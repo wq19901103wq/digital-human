@@ -1,0 +1,16 @@
+# 本地数据、实例快照与生成报告；保留 src/digital_human/dashboard/ 源码。
+/data/
+/instances/
+/private/
+/runs/
+/dashboard/
+/.env
+/.env.*
+!/.env.example
+/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+/.dashboard.pid
