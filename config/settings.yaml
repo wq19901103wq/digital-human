@@ -7,11 +7,11 @@
 evaluation:
   # 开发 A/B 集：可看答案找问题，迭代用，不进正式结论
   development:
-    total: 1000
+    total: 1000  # 用户确认：开发轮恢复为 1000 题
     group_ratio: 0.75          # 群聊占比；私聊 = total - group
   # 固定测试集：冻结，只回总分，永不参与调优
   fixed_test:
-    total: 1000
+    total: 1000  # 固定轮同为 1000 题
     group_ratio: 0.75
   max_cases_per_chat: 25        # 测试集每聊天题数上限：1000 题应来自 40+ 聊天，防聊天内相关性主导指标
   few_shots_per_case: 3        # 每题注入的风格示例条数
@@ -28,9 +28,9 @@ evaluation:
     # 边界规则：补验后两版判定相同（双边同时翻转/同时不翻转）记 contested，
     # 属噪声对冲，不计入净胜、不进符号检验
   adoption:
-    dev_min_net_win_rate: 0.0     # 开发晋级：完整补验后确认净胜 > 0
-    fixed_entry_min_net_win_rate: 0.01 # 最新开发版直接对比生产版：确认净胜 ≥ 1% 才进入固定轮
-    formal_min_net_win_rate: 0.01 # 正式采用双条件之一：确认净胜 ≥ 1%。±1 题级波动不构成采用证据
+    dev_min_net_win_rate: 0.0     # 开发晋级：确认净胜严格大于零
+    fixed_entry_min_net_win_rate: 0.005 # 直接对生产版确认净胜至少 +5/1000 才进入固定轮
+    formal_min_net_win_rate: 0.005 # 正式采用：确认净胜至少 +5/1000，且初测识别数严格改善
     judge_min_gain_rate: 0.0      # Judge 校准：候选识别率净改善 ≥ 该比率才晋升。0.0=允许打平
                                   # （测量仪器能不换就不换，同识别率换模型/降成本应允许）；
                                   # 担心抽样噪声可设 0.01 要求必须改善

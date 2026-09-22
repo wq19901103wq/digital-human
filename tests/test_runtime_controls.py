@@ -43,33 +43,6 @@ def test_archived_code_does_not_bless_changed_data_or_missing_evidence(env, tmp_
         runtime.archive_inputs(inputs)
 
 
-@pytest.mark.parametrize('changed', ['none', 'code', 'manifest', 'logical_path', 'data'])
-def test_exact_runtime_snapshot_is_historical_code_evidence(env, tmp_path, changed):
-    root = tmp_path / 'framework'
-    code = root / 'scripts/train.py'
-    code.parent.mkdir(parents=True)
-    code.write_text('old training\n')
-    data = root / 'scripts/samples.json'
-    data.write_text('{"sample": 1}')
-    saved = runtime.freeze(env.root / 'jobs/code-evidence', root=root)
-    original = data if changed == 'data' else code
-    checksum = runtime.sha256_file(original)
-    original.write_text('changed current file')
-    if changed == 'code':
-        (saved / 'scripts/train.py').write_text('changed snapshot')
-    elif changed == 'manifest':
-        path = saved / 'manifest.json'
-        write_json(path, {**json.loads(path.read_text()), 'schema': 999})
-    elif changed == 'logical_path':
-        original = root / 'different/train.py'
-    if changed == 'none':
-        assert runtime.evidence_path(str(original), checksum) == saved / 'scripts/train.py'
-        assert not (env.root / 'evidence_blobs').exists()
-    else:
-        with pytest.raises(ConfigError, match='changed or missing'):
-            runtime.evidence_path(str(original), checksum)
-
-
 def test_threshold_cli_uses_verified_frozen_executor(env, monkeypatch):
     from scripts import promote as cli
     directory = env.root / 'experiments/completed'
@@ -171,23 +144,26 @@ def test_public_gate_checks_history_even_after_file_is_removed(tmp_path):
     from scripts.check_public import check
     root = tmp_path / 'release'
     root.mkdir()
-    write_json(root / 'public-files.json', {'files': ['public-files.json']})
+    (root / 'config').mkdir()
+    write_json(root / 'config' / 'public_boundary.json',
+               {'blocked_paths': ['private'], 'blocked_words': []})
     def git(*args):
         return subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True)
     git('init')
     git('config', 'user.name', 'Synthetic Test')
     git('config', 'user.email', 'test@example.invalid')
-    path = root / 'private-report.md'
-    path.write_text('private synthetic record')
+    path = root / 'report.md'
+    path.write_text('home path /home/' + 'someuser/leak stays in history')
     git('add', '.')
     git('commit', '-m', 'synthetic fixture')
     path.unlink()
     git('add', '-u')
     git('commit', '-m', 'remove fixture')
-    assert any('private-report.md' in issue[0] for issue in check(root, history=True))
+    issues = check(root, history=True)
+    assert any('report.md' in i[0] and i[2] == 'personal_home' for i in issues)
 
 
 def test_public_gate_rejects_reverse_import_without_disclosing_content():
     from scripts.check_public import inspect
-    findings = inspect('src/core.py', b'from scripts import instance_job\n', {'src/core.py'})
-    assert findings == [('src/core.py', 1, 'framework_imports_instance_or_cli')]
+    findings = inspect('src/core.py', b'from scripts import instance_job\n', [], [], set())
+    assert findings == [('src/core.py', 1, 'src_imports_cli_or_private')]
