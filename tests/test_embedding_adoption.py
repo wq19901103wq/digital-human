@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pytest
 
+pytest.importorskip('torch')  # 可选重依赖：缺省时整模块跳过
 from src import cache
 from src.config import ConfigError, sha256_file
 from src.iteration import embedding_adoption as adoption
