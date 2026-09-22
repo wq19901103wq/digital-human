@@ -9,9 +9,10 @@ from urllib.request import urlopen
 
 import pytest
 
-from src.digital_human.dashboard import server
-from src.digital_human.iteration import experiment, report
-from src.digital_human.iteration.progress import RunProgress, track_run
+from src.dashboard import server
+from src.dashboard import report
+from src.iteration import experiment, versions
+from src.iteration.progress import RunProgress, track_run
 from test_report import _run
 
 
@@ -59,8 +60,16 @@ def test_judge_callbacks_and_process_exit_are_visible(tmp_path, monkeypatch):
     assert '执行已停止' in page and 'data-stage-clock' not in page
 
 
-def test_interruption_keeps_checkpoint_and_stops_progress(tmp_path):
+def _select_execution_instance(exp, monkeypatch):
+    instance = exp.parent.parent
+    monkeypatch.setattr(versions, 'PRIVATE', instance)
+    monkeypatch.setattr(versions, 'DATA_ROOT', instance / 'data')
+    (instance / 'data/data/dev_pool.jsonl').write_text(json.dumps({'case_id': '1'}) + '\n')
+
+
+def test_interruption_keeps_checkpoint_and_stops_progress(tmp_path, monkeypatch):
     exp, _ = _run(tmp_path, state={'status': 'running'})
+    _select_execution_instance(exp, monkeypatch)
     @track_run
     def interrupted(directory, *, _progress):
         _progress.stage('generating', total=1000)
@@ -73,12 +82,16 @@ def test_interruption_keeps_checkpoint_and_stops_progress(tmp_path):
     assert state['status'] == 'running'  # 仍允许续跑。
 
 
-def test_finished_state_keeps_timing_but_does_not_look_running(tmp_path):
-    exp, _ = _run(tmp_path, state={'status': 'running'})
+def test_finished_state_keeps_timing_but_does_not_look_running(tmp_path, monkeypatch):
+    exp, _ = _run(tmp_path, state={'status': 'running'}, records=[
+        {'case_id': '1', 'status': 'ok', 'identified_baseline': True, 'identified_candidate': True}])
+    _select_execution_instance(exp, monkeypatch)
     progress = RunProgress(exp)
     progress.stage('generating', total=1)
     progress.stage('summarizing')
-    experiment.finish(exp, {'attempted': 1, 'pairs': 1, 'failures': 0}, {'verdict': 'observe', 'reason': 'test'})
+    experiment.finish(exp, {'attempted': 1, 'pairs': 1, 'failures': 0,
+                           'identified_baseline': 1, 'identified_candidate': 1},
+                      {'verdict': 'observe', 'reason': 'test'})
     state = experiment.state_of(exp)
     assert state['progress']['status'] == 'finished'
     assert 'generating' in state['progress']['timings']
@@ -121,6 +134,20 @@ def test_fixed_cases_never_enter_live_payload(tmp_path, live_server):
     # 自定义实验 ID 也按 spec.dataset 隔离，不依赖 ID 名称。
     body = urlopen(live_server + '/api/live/demo/test-run').read().decode()
     assert 'FIXED_SECRET' not in body and '固定集答案不在开发后台展开' in body
+
+
+@pytest.mark.parametrize('filename', ['pack.json', 'building.json'])
+def test_validation_pack_and_checkpoint_are_audit_only(tmp_path, live_server, filename):
+    root = tmp_path / 'instances' / 'demo' / 'judge_eval'
+    for split in ('validation', 'calibration'):
+        directory = root / f'pack-{split}-rebase-test'
+        directory.mkdir(parents=True)
+        (directory / filename).write_text('{"human_reply": ["test answer"]}')
+    path = '/instances/demo/judge_eval/pack-{}-rebase-test/' + filename
+    with pytest.raises(HTTPError) as caught:
+        urlopen(live_server + path.format('validation') + '?download=1')
+    assert caught.value.code == 403
+    assert urlopen(live_server + path.format('calibration')).status == 200
 
 
 @pytest.mark.parametrize('path', ['/api/live/%2e%2e/test-run', '/api/live/demo/%2e%2e', '/api/live/demo/a/b'])

@@ -1,6 +1,9 @@
 """逐题实录与实际请求一致，失败/补测可追踪，固定集不可旁路读取。"""
 import io
 import json
+import os
+import subprocess
+from src.iteration.storage import write_json
 import sys
 import urllib.error
 from pathlib import Path
@@ -9,20 +12,21 @@ from urllib.request import urlopen
 
 import pytest
 
-from src.digital_human import llm, tracing
-from src.digital_human.dashboard import trace_view
-from src.digital_human.generator.generator import ReplyGenerator
-from src.digital_human.iteration import experiment, report
-from src.digital_human.iteration.progress import RunProgress, track_run
-from src.digital_human.judge import rpa
+from src import llm, tracing
+from src.dashboard import trace_view
+from src.generator.generator import ReplyGenerator
+from src.dashboard import report
+from src.iteration import experiment
+from src.iteration.progress import RunProgress, track_run
+from src.judge import corrected
 import test_live_dashboard
 from test_report import _run
-import test_rpa_judge
-from test_rpa_judge import features
+import test_corrected_judge
+from test_corrected_judge import features
 
 live_server = test_live_dashboard.live_server
-bundle = test_rpa_judge.bundle
-case = test_rpa_judge.case
+bundle = test_corrected_judge.bundle
+case = test_corrected_judge.case
 
 
 @pytest.fixture
@@ -89,7 +93,7 @@ def test_openai_trace_matches_request(setup_case, case, monkeypatch):
         assert llm.ChatClient(settings, {'model': 'test'}).chat([{'role': 'user', 'content': '原始提示词'}], True) == 'ok'
 
 
-def test_rpa_real_adapter_records_feature_retry_probability_and_mapping(setup_case, bundle, case, monkeypatch):
+def test_corrected_real_adapter_records_feature_retry_probability_and_mapping(setup_case, bundle, case, monkeypatch):
     exp, progress, _ = setup_case
     cfg, directory = bundle
     execution = {'provider': 'codex_cli', 'model': 'test', 'reasoning_effort': 'low', 'timeout_seconds': 360, 'codex_cli_version': '0.144.1'}
@@ -111,10 +115,10 @@ def test_rpa_real_adapter_records_feature_retry_probability_and_mapping(setup_ca
             text = json.dumps({'option_A': features(), 'option_B': features()})
         Path(command[command.index('--output-last-message') + 1]).write_text(text)
         return SimpleNamespace(returncode=0, stdout='{"type":"turn.completed","usage":{"output_tokens":12}}\n', stderr='')
-    monkeypatch.setattr(rpa.subprocess, 'run', run)
-    monkeypatch.setattr(rpa.random, 'random', lambda: .9)
-    monkeypatch.setattr(rpa.runtime, 'score_formal_judge_pair', lambda *_: .8)
-    assert progress.judge(rpa.RpaJudge(cfg, directory), case, ['九点'], 'baseline')
+    monkeypatch.setattr(corrected.subprocess, 'run', run)
+    monkeypatch.setattr(corrected.random, 'random', lambda: .9)
+    monkeypatch.setattr(corrected.runtime, 'score_formal_judge_pair', lambda *_: .8)
+    assert progress.judge(corrected.CorrectedJudge(cfg, directory), case, ['九点'], 'baseline')
     doc = tracing.read(exp, progress.trace.ref)
     events = doc['operations'][0]['events']
     assert [e['data']['valid'] for e in events if e['kind'] == 'features'] == [False, True]
@@ -146,8 +150,10 @@ def test_failure_and_resume_keep_previous_attempt(setup_case, case):
     assert '已发送' in trace_view.payload(exp, old_ref)['html']
 
 
-def test_interruption_persists_inflight_prompt_and_clears_sink(setup_case, case):
+def test_interruption_persists_inflight_prompt_and_clears_sink(setup_case, case, monkeypatch):
     exp, progress, _ = setup_case
+    test_live_dashboard._select_execution_instance(exp, monkeypatch)
+    (exp.parent.parent / 'data/data/dev_pool.jsonl').write_text(json.dumps(case) + '\n')
     @track_run
     def execute(directory, *, _progress):
         _progress.start_case(case)
@@ -194,7 +200,7 @@ def test_custom_fixed_run_trace_api_denied(setup_case, live_server):
     exp, progress, _ = setup_case
     spec = experiment.spec_of(exp)
     spec['dataset'] = 'fixed_test'
-    experiment._write_json(exp / 'spec.json', spec)
+    write_json(exp / 'spec.json', spec)
     for path in [f'/api/trace/demo/test-run/{progress.trace.ref}', '/instances/demo/experiments/test-run/cases.jsonl']:
         with pytest.raises(urllib.error.HTTPError) as caught:
             urlopen(live_server + path)
@@ -209,3 +215,137 @@ def test_historical_data_boundary_warning_does_not_invent_actual_prompt(tmp_path
     page = report._cases_html(run)
     assert '本人 · 被模仿对象' in page and '数据边界异常' in page
     assert '历史未记录' in page and '不能当作本题实际输入' in page
+
+
+@pytest.fixture
+def cached_trace(setup_case, case):
+    exp, progress, _ = setup_case
+    source = exp.with_name('source-run')
+    source.mkdir()
+    spec = {**experiment.spec_of(exp), 'id': source.name}
+    write_json(source / 'spec.json', spec)
+    original = tracing.CaseTrace(source, case, spec)
+    with original.operation('generation', 'baseline', 0, {}):
+        tracing.note('validation', {'raw': 'UNRELATED_STEP'})
+    with original.operation('generation', 'candidate', 0, {}) as op:
+        with tracing.step('llm', {'body': {'model': 'original-model', 'system': 'ORIGINAL_SYSTEM',
+                'messages': [{'role': 'user', 'content': 'ORIGINAL_PROMPT<script>bad()</script>'}]}}) as event:
+            event['response'] = {'text': 'ORIGINAL_RESPONSE'}
+        op['result'] = {'replies': ['ORIGINAL_RESPONSE']}
+    original.finish('ok')
+    origin = {'experiment_id': source.name, 'experiment_path': '/old/location/experiments/source-run',
+              'trace_ref': original.ref, 'operation_index': 1, 'branch': 'candidate', 'round': 0}
+    with progress.trace.operation('generation', 'baseline', 0, {}):
+        tracing.note('cache_hit', {'layer': 'generation', 'key': 'saved-key', 'origin': origin})
+    return exp, progress.trace, source, original, origin
+
+
+def test_cached_prompt_source_is_lazy_scoped_and_read_only(cached_trace, live_server):
+    exp, current, source, original, _ = cached_trace
+    before = original.path.read_bytes()
+    endpoint = f'/api/trace/demo/{exp.name}/{current.ref}'
+    page = json.load(urlopen(live_server + endpoint))['html']
+    source_url = f'/api/trace/demo/{source.name}/{original.ref}?operation=1'
+    assert source_url in page and '展开缓存来源的实际提示词与调用过程' in page
+    assert 'ORIGINAL_PROMPT' not in page
+    loaded = json.load(urlopen(live_server + source_url))
+    assert '2. 候选 · 初测 · 生成回复' in loaded['html']
+    assert 'ORIGINAL_SYSTEM' in loaded['html'] and 'ORIGINAL_RESPONSE' in loaded['html']
+    assert 'ORIGINAL_PROMPT&lt;script&gt;bad()&lt;/script&gt;' in loaded['html']
+    assert 'UNRELATED_STEP' not in loaded['html']
+    assert '没有重新发送这些请求' in loaded['html']
+    assert 'html' not in json.load(urlopen(live_server + source_url + '&revision=' + loaded['revision']))
+    assert before == original.path.read_bytes()
+
+
+@pytest.mark.parametrize('problem', ['missing', 'fixed', 'outside', 'different-case', 'bad-id', 'bad-step', 'self'])
+def test_unavailable_cache_origin_does_not_invent_prompts(cached_trace, problem, tmp_path):
+    exp, current, source, original, origin = cached_trace
+    if problem == 'missing':
+        original.path.unlink()
+    elif problem == 'fixed':
+        write_json(source / 'spec.json', {**experiment.spec_of(source), 'dataset': 'fixed_test'})
+    elif problem == 'outside':
+        moved = tmp_path / 'outside-instance'
+        source.rename(moved)
+        source.symlink_to(moved, target_is_directory=True)
+    elif problem == 'different-case':
+        original.value['case_id'] = 'another-case'
+        original.save()
+    elif problem == 'bad-id':
+        origin['experiment_id'] = '../source-run'
+    elif problem == 'bad-step':
+        origin['operation_index'] = 100
+    else:
+        origin.update(experiment_id=exp.name, trace_ref=current.ref, operation_index=0)
+    current.save()
+    page = trace_view.payload(exp, current.ref)['html']
+    assert '缓存来源实录不可用' in page and '不能用当前版本模板还原' in page
+    assert 'data-trace-url=' not in page and 'ORIGINAL_PROMPT' not in page
+
+
+@pytest.mark.parametrize('operation,status', [('bad', 400), ('-1', 400), ('100', 404)])
+def test_invalid_trace_operation_rejected(cached_trace, live_server, operation, status):
+    _, _, source, original, _ = cached_trace
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urlopen(f'{live_server}/api/trace/demo/{source.name}/{original.ref}?operation={operation}')
+    assert caught.value.code == status
+
+
+def _check_trace_browser(url, expected_prompt):
+    """复用浏览器验收：真实点击、缓存来源、轮询后的展开状态；经 check.py 调用。"""
+    result = subprocess.run(['node', '-e', r'''
+const assert = require('node:assert/strict');
+const {chromium} = require('playwright');
+(async () => {
+  const browser = await chromium.launch({channel: 'chrome', headless: true, timeout: 15000});
+  try {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(process.argv[1], {waitUntil: 'domcontentloaded'});
+    assert.deepEqual(errors, [], '页面初始化不得有 JavaScript 错误');
+    const item = page.locator('.case:not([hidden])').first();
+    await item.locator(':scope > summary').click();
+    const trace = item.locator('[data-trace-url]').first();
+    await trace.locator(':scope > summary').click();
+    await trace.locator(':scope > .detail-body > [data-trace-body] > p').first().waitFor();
+    assert.match(await trace.getAttribute('data-revision'), /\d/);
+    await trace.locator('[data-detail-key^="operation-"]').first().locator(':scope > summary').click();
+    const event = trace.locator('[data-detail-key^="event-"]').filter({has: page.locator('[data-trace-url*="?operation="]')}).first();
+    await event.locator(':scope > summary').click();
+    const source = event.locator('[data-trace-url]').first();
+    await source.locator(':scope > summary').click();
+    const body = source.locator(':scope > .detail-body > [data-trace-body]');
+    await body.locator('[data-detail-key^="operation-"]').waitFor({state: 'attached'});
+    assert.ok((await body.textContent()).includes(process.argv[2]));
+    assert.ok((await source.getAttribute('data-revision')).includes(':'));
+    await body.locator('[data-detail-key^="operation-"] > summary').click();
+    const request = body.locator('[data-detail-key^="event-"]').filter({has: page.getByText('完整请求参数', {exact: true})}).first();
+    await request.locator(':scope > summary').click();
+    for (const summary of await request.locator('summary').filter({hasText: /^实际提示词|^模型返回正文/}).all()) {
+      await summary.click();
+    }
+    assert.ok(await request.locator('pre:visible').first().isVisible(), '提示词正文必须实际可见');
+    await page.waitForTimeout(3500);
+    assert.equal(await source.getAttribute('open'), '');
+    assert.ok((await body.textContent()).includes(process.argv[2]));
+    assert.ok(await request.locator('pre:visible').first().isVisible());
+    assert.deepEqual(errors, [], '加载和实时刷新不得有 JavaScript 错误');
+    console.log('浏览器通过：列表初始化、实录展开、来源提示词加载、实时刷新保留展开状态');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+''', url, expected_prompt], capture_output=True, text=True, timeout=50)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout.strip())
+
+
+@pytest.mark.skipif(os.getenv('DH_BROWSER_TESTS') != '1', reason='可选 Chrome + Node Playwright 浏览器回归')
+def test_browser_trace_loading_and_live_refresh(cached_trace, live_server):
+    exp, _, _, _, _ = cached_trace
+    _check_trace_browser(f'{live_server}/instances/demo/experiments/{exp.name}/index.html', 'ORIGINAL_PROMPT')
+
+
+@pytest.mark.skipif(not os.getenv('DH_DASHBOARD_TEST_URL'), reason='可选现有开发实验的只读浏览器验收')
+def test_browser_existing_experiment_trace():
+    _check_trace_browser(os.environ['DH_DASHBOARD_TEST_URL'], '实际提示词')

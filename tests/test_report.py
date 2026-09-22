@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.digital_human.iteration import report
+import pytest
+
+from src.dashboard import report
 
 
 def _write(path: Path, obj) -> None:
@@ -52,12 +54,31 @@ def test_failed_smoke_is_not_running_or_a_quality_score(tmp_path):
     assert 'href="/dashboard/demo/index.html"' in page
 
 
+def test_threshold_review_display_keeps_original_decision(tmp_path):
+    from src.config import sha256_file
+    exp, run = _run(tmp_path, fixed=True, state={
+        'status': 'finished', 'verdict': 'reject',
+        'metrics': {'attempted': 1000, 'pairs': 1000, 'net_win_confirmed': 9}})
+    original = (exp / 'state.json').read_bytes()
+    _write(exp / 'threshold_review.json', {
+        'original_verdict': 'reject', 'protocol': {'formal_min_net_win_rate': .005},
+        'decision': {'verdict': 'adopt', 'reason': '确认净胜 +9 ≥ +5'},
+        'evidence_sha256': {name: sha256_file(exp / name) for name in ('spec.json', 'state.json')}})
+    run = report._load_run(exp)
+    assert '固定验收达标' in report._history_conclusion(run)
+    assert '0.5%' in report._history_conclusion(run)
+    assert '原协议结论：reject' in report._history_conclusion(run)
+    report.write_run(exp)
+    assert '按修订门槛复核' in (exp / 'index.html').read_text()
+    assert (exp / 'state.json').read_bytes() == original
+
+
 def test_cases_keep_human_and_baseline_separate_and_escape_text(tmp_path):
     row = {'case_id': 'x', 'status': 'failed', 'human_reply': ['真人回复'],
            'context': [{'sender': '甲', 'text': '<script>bad()</script>'}], 'reason': '模型调用失败'}
     _, run = _run(tmp_path, records=[row])
     page = report._cases_html(run)
-    assert '真人实际回复' in page and '基线生成器回复' in page
+    assert '真人实际回复' in page and '对照生成器回复' in page
     assert page.count('未记录回复') == 2  # 真人回复不能顶替缺失的两版回复。
     assert '<script>bad()</script>' not in page
     assert '&lt;script&gt;bad()&lt;/script&gt;' in page
@@ -84,9 +105,9 @@ def test_judge_cases_include_frozen_pack_input_and_correct_direction(tmp_path):
         {'case_id': 'judge-x', 'context': [{'sender': '甲', 'text': '问题'}],
          'human_reply': ['真人回答'], 'ai_replies': ['模型回答']} ]})
     page = report._cases_html(run)
-    for text in ['候选识别更准', '基线裁判', '候选裁判', '模型回答', '真人回答', '问题']:
+    for text in ['候选识别更准', '对照裁判', '候选裁判', '模型回答', '真人回答', '问题']:
         assert text in page
-    assert '基线生成器回复' not in page
+    assert '对照生成器回复' not in page
 
 
 def test_fixed_answers_never_enter_html_even_in_collapsed_sections(tmp_path):
@@ -104,9 +125,11 @@ def test_dashboard_reads_its_own_instance_and_shows_no_fake_adoption(tmp_path):
     target = tmp_path / 'dashboard/demo'
     report.refresh_dashboard(exp.parent, target)
     page = (target / 'index.html').read_text()
-    assert 'generators-base' in page and 'judges-base' in page
-    assert '当前配置' in page and '最近任务' in page and '实验历史' in page
+    assert '当前基线' in page and '实验记录' in page
+    assert 'data-live-region="task"' not in page and 'id="mechanism"' not in page
     assert '组内可比' not in page and '符号检验p' not in page
+    detail = report._render_run_html(report._load_run(exp))
+    assert 'generators-base' in detail and 'judges-base' in detail
     assert '当前对应指针未指向本次候选' in report._adoption_note(run)
 
 
@@ -126,3 +149,209 @@ def test_judge_reason_mirrors_direction_without_changing_saved_state():
     assert report._reason({'kind': 'judge_eval'}, state) == '识别数 40→60 严格上升'
     assert state['reason'] == '识别数 40→60 严格下降'
     assert '不形成效果改善' in report._reason({'smoke': True}, state)
+
+
+def _history_state(net=8, verdict='diagnostic_complete'):
+    return {'status': 'finished', 'verdict': verdict, 'metrics': {
+        'attempted': 1000, 'pairs': 1000, 'failures': 0, 'failure_rate': 0,
+        'identified_baseline': 905, 'identified_candidate': 919,
+        'wins_confirmed': net + 3, 'losses_confirmed': 3,
+        'net_win_confirmed': net, 'contested': 24}}
+
+
+def test_historical_recipe_shows_development_gain_without_claiming_adoption(tmp_path):
+    exp, run = _run(tmp_path, kind='judge_eval', state=_history_state())
+    run['spec'].update(comparison={
+        'baseline': {'arm': 'luna', 'recipe': 'lr_l2_c1', 'policy': 'hybrid'},
+        'candidate': {'arm': 'luna', 'recipe': 'lr_l2_c1', 'policy': 'pure'}},
+        protocol={'gate_schema': 2}, adoption_allowed=False, generator_ref='generator')
+    run['spec'].pop('candidate_ref')
+    run['spec'].pop('baseline_ref')
+    _write(exp / 'spec.json', run['spec'])
+    before = (exp / 'state.json').read_bytes()
+    page = report._history_html([run])
+    for value in ['确认净胜', '晋级结论', '实际采用（当前）', '+8', '919/1000',
+                  '开发收益达标', '未绑定候选版本', 'lr_l2_c1', '纯分类器']:
+        assert value in page
+    assert '开发晋级达标' not in page
+    versions = report._history_versions(run)
+    assert '<dt>本轮对照</dt><dd>luna · lr_l2_c1 · 初判与分类器合并</dd>' in versions
+    assert '<dt>本轮候选</dt><dd>luna · lr_l2_c1 · 纯分类器</dd>' in versions
+    assert '初测净胜 <strong>+14</strong>' in page
+    assert '补验后：胜 11 / 负 3 · 打平 24' in page
+    # Both static and live history use the same conclusion, with no state mutation.
+    live = report.live_payload(exp.parent.parent)
+    assert live['regions']['history'] == page
+    assert page in report.dashboard_html(exp.parent)
+    assert (exp / 'state.json').read_bytes() == before
+
+
+@pytest.mark.parametrize('kind,initial,confirmed', [
+    ('judge_eval', '-2', 5),
+    ('gen_ab', '+2', -5),
+])
+def test_history_keeps_initial_accuracy_and_confirmed_votes_separate(tmp_path, kind, initial, confirmed):
+    state = _history_state(confirmed)
+    state['metrics'].update(identified_baseline=932, identified_candidate=930,
+                            wins_confirmed=15 if confirmed > 0 else 10,
+                            losses_confirmed=10 if confirmed > 0 else 15, contested=23)
+    exp, run = _run(tmp_path, kind=kind, state=state)
+    before = (exp / 'state.json').read_bytes()
+    rates, net = report._history_rates(run), report._history_net(run)
+    assert '93.2%' in rates and '932/1000' in rates
+    assert '93.0%' in rates and '930/1000' in rates
+    assert f'初测净胜 <strong>{initial}</strong>' in rates
+    assert f'<strong>{confirmed:+d}</strong>' in net
+    assert '打平 23' in net and '未确认' not in net
+    assert '初测与补验方向不同' in net
+    page = report._history_html([run])
+    assert '所有净胜均为候选相对本轮对照' in page
+    assert '不一定是当前基线' in page
+    assert report.live_payload(exp.parent.parent)['regions']['history'] == page
+    assert (exp / 'state.json').read_bytes() == before
+
+
+@pytest.mark.parametrize('missing', ['identified_baseline', 'identified_candidate', 'no_pairs'])
+def test_history_does_not_invent_initial_net_when_counts_are_missing(tmp_path, missing):
+    _, run = _run(tmp_path, kind='judge_eval', state=_history_state())
+    if missing == 'no_pairs':
+        run['pairs'] = 0
+    else:
+        run['metrics'].pop(missing)
+    assert '初测净胜 <strong>—</strong>' in report._history_rates(run)
+    assert '初测与补验方向不同' not in report._history_net(run)
+
+
+def test_history_comparison_identities_are_escaped(tmp_path):
+    _, run = _run(tmp_path, kind='judge_eval')
+    run['spec']['comparison'] = {
+        'baseline': {'arm': 'features', 'recipe': '<base>', 'policy': 'pure'},
+        'candidate': {'arm': 'features', 'recipe': '<candidate>', 'policy': 'pure'}}
+    versions = report._history_versions(run)
+    assert '<dt>本轮对照</dt><dd>features · &lt;base&gt; · 纯分类器</dd>' in versions
+    assert '<dt>本轮候选</dt><dd>features · &lt;candidate&gt; · 纯分类器</dd>' in versions
+    assert '<base>' not in versions and '<candidate>' not in versions
+
+
+@pytest.mark.parametrize('net,protocol,label', [
+    (0, {'gate_schema': 2}, '开发未达标'),
+    (8, {'gate_schema': 1, 'dev_min_net_win_rate': .01}, '开发未达标'),
+    (8, {'gate_schema': 2}, '开发收益达标'),
+])
+def test_history_uses_frozen_development_gate(tmp_path, net, protocol, label):
+    _, run = _run(tmp_path, kind='judge_eval', state=_history_state(net))
+    run['spec'].update(adoption_allowed=False, protocol=protocol)
+    assert label in report._history_conclusion(run)
+
+
+def test_history_separates_pass_from_actual_pointer_and_fixed_rejection(tmp_path):
+    exp, run = _run(tmp_path, kind='judge_eval', state=_history_state(13, 'merge_to_iteration_baseline'))
+    assert '开发晋级达标' in report._history_conclusion(run)
+    assert '候选：当前未采用' in report._history_adoption(run)
+    ptr_path = exp.parent.parent / 'pointers.json'
+    ptr = json.loads(ptr_path.read_text())
+    ptr['iteration_judge'] = 'candidate'
+    _write(ptr_path, ptr)
+    assert '候选：当前开发版' in report._history_adoption(run)
+    assert '对照：当前生产版' in report._history_adoption(run)
+    run['spec']['dataset'] = 'fixed_test'
+    run['state']['verdict'] = 'reject'
+    run['metrics']['net_win_confirmed'] = 9
+    assert '固定验收未达标' in report._history_conclusion(run)
+    assert '开发晋级达标' not in report._history_conclusion(run)
+    assert '候选：当前生产版' not in report._history_adoption(run)
+
+
+def test_history_does_not_promote_incomplete_or_smoke_results(tmp_path):
+    _, run = _run(tmp_path, kind='judge_eval', state=_history_state(13, 'experiment_incomplete'))
+    assert '暂无结论' in report._history_conclusion(run)
+    run['spec']['smoke'] = True
+    assert '不参与晋级' in report._history_conclusion(run)
+
+
+@pytest.mark.parametrize('accepted_state', ['current', 'missing', 'other_candidate', 'stale_basis'])
+def test_history_reads_branch_development_adoption_without_changing_shared_pointers(tmp_path, accepted_state):
+    exp, run = _run(tmp_path, kind='judge_eval', state=_history_state(8, 'merge_to_iteration_baseline'))
+    ptr_path = exp.parent.parent / 'pointers.json'
+    before = ptr_path.read_bytes()
+    ptr = json.loads(before)
+    basis = {key: ptr[key] for key in ('data', 'production_gen', 'production_judge')}
+    run['spec'].update(branch_round='pure-lr/r-0001', production_basis=basis)
+    _write(exp / 'spec.json', run['spec'])
+    accepted = {'candidate_ref': 'candidate', 'experiment_id': exp.name, 'basis': dict(basis)}
+    if accepted_state == 'other_candidate':
+        accepted['candidate_ref'] = 'newer'
+    elif accepted_state == 'stale_basis':
+        accepted['basis']['data'] = 'old-data'
+    if accepted_state != 'missing':
+        _write(exp.parent.parent / 'branches/pure-lr/state.json', {'development': accepted})
+    adoption, note = report._history_adoption(run), report._adoption_note(run)
+    if accepted_state == 'current':
+        assert '候选：分支 pure-lr 当前开发版' in adoption
+        assert '候选已保留为分支 pure-lr 的当前开发版' in note
+    else:
+        assert '候选：当前未采用' in adoption
+        assert '候选已保留' not in note
+    assert '对照：当前生产版' in adoption
+    assert '已推全' not in note
+    page = report._history_html([run])
+    assert report.live_payload(exp.parent.parent)['regions']['history'] == page
+    assert ptr_path.read_bytes() == before
+
+
+def test_history_status_filter_marks_promoted_failed_and_running(tmp_path):
+    """状态筛选桶与已晋升标记：已晋升只认指针/凭证硬证据；verdict 达标不算晋升。"""
+    exp, run = _run(tmp_path, state=_history_state(8, 'merge_to_iteration_baseline'))
+    page = report._history_html([run])
+    assert 'data-status="passed"' in page and 'data-promoted="false"' in page
+    assert '>已晋升</span>' not in page
+    # 指针指向候选 → 已晋升（硬证据）
+    ptr_path = exp.parent.parent / 'pointers.json'
+    ptr = json.loads(ptr_path.read_text())
+    ptr['iteration_judge'] = 'candidate'
+    _write(ptr_path, ptr)
+    page = report._history_html([run])
+    assert 'data-promoted="true"' in page and '>已晋升</span>' in page
+    ptr['iteration_judge'] = 'base'
+    _write(ptr_path, ptr)
+    # 分支推全凭证 → 已晋升
+    ptr['branch_promotions'] = {'test-run': 'candidate'}
+    _write(ptr_path, ptr)
+    assert 'data-promoted="true"' in report._history_html([run])
+    ptr.pop('branch_promotions')
+    _write(ptr_path, ptr)
+    run['state']['verdict'] = 'reject'
+    page = report._history_html([run])
+    assert 'data-status="done"' in page and 'data-promoted="false"' in page
+    run['state']['verdict'] = 'experiment_incomplete'
+    page = report._history_html([run])
+    assert 'data-status="failed"' in page and 'data-promoted="false"' in page
+    run['state'] = {'status': 'running'}
+    page = report._history_html([run])
+    assert 'data-status="running"' in page
+    # 对象与规模筛选属性
+    assert 'data-object="gen"' in page
+    run['spec']['kind'] = 'judge_eval'
+    run['state'] = _history_state(8, 'merge_to_iteration_baseline')
+    run['attempted'] = 7
+    page = report._history_html([run])
+    assert 'data-object="judge"' in page and 'data-size="small"' in page
+    run['attempted'] = 1000
+    assert 'data-size="full"' in report._history_html([run])
+
+
+def test_baseline_summary_shows_branch_baselines_and_stage_limit(tmp_path):
+    """分支保留的开发版显示为分支基线；stage_limit 挡住的分支给出解除命令。"""
+    exp, _ = _run(tmp_path)
+    instance = exp.parent.parent
+    _write(instance / 'branches/gen-conversation/state.json', {
+        'rounds': ['r-0003'], 'stage_limit': 'development',
+        'development': {'candidate_ref': 'g-0020', 'experiment_id': 'branch-gen-conversation-r-0003-dev'}})
+    _write(instance / 'branches/luna/state.json', {
+        'rounds': ['r-0001'],
+        'development': {'candidate_ref': 'j-0019', 'experiment_id': 'branch-luna-r-0001-dev'}})
+    page = report._baseline_summary(instance)
+    assert '分支基线' in page and 'gen-conversation' in page
+    assert 'g-0020' in page and 'j-0019' in page
+    assert 'limit --stage fixed_test gen-conversation' in page
+    assert '🔒' in page
