@@ -80,9 +80,10 @@ def test_verification_reconstructs_original_data_before_current_guard(tmp_path, 
     record = dict(asset_files=dict(next(iter(learning_guard.GENERATOR_RECIPES.values()))),
                   information_end=20, evidence_files={})
     calls = []
-    def reconstruct(directory, data):
+    def reconstruct(directory, data, evidence):
         calls.append(('reconstruct', data))
         assert directory == str(model)
+        assert evidence == proof['evidence_files']
         return proof
     def current(data, directory, loader):
         calls.append(('current', data))
@@ -132,6 +133,90 @@ def test_recall_reuses_guard_and_strict_history(monkeypatch):
         selection.recall(Retriever(), target)
 
 
+def test_recall_source_overlap_filters_complete_examples_without_more_recall(monkeypatch):
+    target = dict(record(10), case_id='target')
+    overlapping, same_text, shared_context = [example(name, i) for i, name in
+        enumerate(('overlapping', 'same-text', 'shared-context'), 1)]
+    overlapping['reply_message_ids'] = ['earlier-bubble', *target['context_message_ids']]
+    shared_context['context_message_ids'] = list(target['context_message_ids'])
+    calls = []
+    class Retriever:
+        def retrieve(self, **kwargs):
+            calls.append(kwargs)
+            return [overlapping, same_text] if len(calls) % 2 else [shared_context, overlapping]
+    monkeypatch.setattr(selection, 'eligible', lambda row, case: True)
+    original = selection.recall(Retriever(), target)
+    calls.clear()
+    retained = selection.recall(Retriever(), target,
+        source_overlap_policy=selection.SOURCE_OVERLAP_POLICY)
+    assert retained == [row for row in original if row['id'] != 'overlapping']
+    assert set(row['id'] for row in retained) == {'same-text', 'shared-context'}
+    assert len(calls) == 2 and all(call['limit'] == 12 for call in calls)
+    assert overlapping['reply'] == same_text['reply'] == ['yes', 'detail']
+    # Retained rows have identical extraction keys and requests: no new feature cache identity.
+    def tasks(rows):
+        return extraction.prepare([dict(target_id='target', target=target,
+            candidates=[dict(example=row) for row in rows])], {'model': 'frozen'})
+    before_tasks, before_refs = tasks(original)
+    after_tasks, after_refs = tasks(retained)
+    assert all(before_tasks[key] == value for key, value in after_tasks.items())
+    assert all(before_refs[key] == value for key, value in after_refs.items())
+    # The policy never weakens the existing answer/future guard, even for rows it would remove.
+    monkeypatch.setattr(selection, 'eligible', lambda row, case: row is not overlapping)
+    with pytest.raises(ConfigError, match='ineligible'):
+        selection.recall(Retriever(), target,
+            source_overlap_policy=selection.SOURCE_OVERLAP_POLICY)
+
+
+def test_recall_source_overlap_policy_rejects_unknown_configuration():
+    class Retriever:
+        def retrieve(self, **kwargs):
+            pytest.fail('Invalid policy must fail before recall')
+    with pytest.raises(ConfigError, match='Unsupported learned source overlap policy'):
+        selection.recall(Retriever(), {}, source_overlap_policy='typo')
+
+
+@pytest.mark.parametrize('switches, message', [
+    ({'learned': selection.POLICY, 'source_overlap_policy': 'typo'},
+     'Unsupported learned source overlap policy'),
+    ({'source_overlap_policy': selection.SOURCE_OVERLAP_POLICY},
+     'source_overlap_policy requires learned few-shot selection'),
+])
+def test_generator_rejects_invalid_source_overlap_configuration(monkeypatch, switches, message):
+    from src.generator import generator
+    monkeypatch.setattr(generator, 'PersonaPromptBuilder', lambda *a, **kw: object())
+    settings = {'evaluation': {'few_shots_per_case': 3, 'few_shots_char_budget': 2500}}
+    with pytest.raises(ConfigError, match=message):
+        generator.ReplyGenerator(settings, {'retriever': switches}, llm=None)
+
+
+@pytest.mark.parametrize('policy', [None, selection.SOURCE_OVERLAP_POLICY])
+def test_generator_passes_source_overlap_policy_to_shared_recall(monkeypatch, policy):
+    from src.generator.generator import ReplyGenerator
+    target, rows = dict(record(10), case_id='target'), [example('a')]
+    generator = ReplyGenerator.__new__(ReplyGenerator)
+    generator._cfg = {'retriever': {} if policy is None else {'source_overlap_policy': policy}}
+    generator._retriever = Renderer()
+    generator._max_shots, generator._budget = 3, 2500
+    generator._selection, generator._reranker = None, None
+    generator._check_sources = lambda: None
+    calls = []
+    def recall(retriever, case, *, source_overlap_policy):
+        assert retriever is generator._retriever and case is target
+        calls.append(source_overlap_policy)
+        return rows
+    class Selector:
+        def select(self, case, recalled, *, count, budget, retriever, check):
+            assert case is target and recalled is rows
+            assert count == 3 and budget == 2500 and retriever is generator._retriever
+            check()
+            return recalled
+    generator._learned = Selector()
+    monkeypatch.setattr(selection, 'recall', recall)
+    assert generator._style_block(target) == Renderer.render_selected(rows, max_chars=2500)[0]
+    assert calls == [policy]
+
+
 def test_serving_features_match_training_and_ignore_target_answers():
     target, rows = dict(record(10), case_id='target'), [example('a'), example('b', 2)]
     groups = [dict(target_id='target', target=target, candidates=[{'example': r} for r in rows])]
@@ -150,9 +235,36 @@ def test_serving_features_match_training_and_ignore_target_answers():
     assert selection.feature_rows(changed, rows, refs, values) == expected
 
 
+def test_serving_action_crosses_require_explicit_model_transform(monkeypatch):
+    from src.generator.fewshot_ranker import action_crosses
+    target, rows = dict(record(10), case_id='target'), [example('a')]
+    tasks, refs = extraction.prepare([dict(target_id='target', target=target,
+        candidates=[dict(example=row) for row in rows])], {'model': 'frozen'})
+    values = {key: {field: 'unknown' for field in task['schema']['properties']}
+              for key, task in tasks.items()}
+    old = selection.feature_rows(target, rows, refs, values)
+    calls = []
+    def expand(row):
+        calls.append(row)
+        return {**row, 'action_cross.test': 'added'}
+    monkeypatch.setattr(action_crosses, 'expand', expand)
+    assert selection.feature_rows(target, rows, refs, values,
+        transform=learned_sources.TRANSFORM) == old
+    assert calls == []
+    assert selection.feature_rows(target, rows, refs, values,
+        transform={**learned_sources.TRANSFORM, 'reply_action_crosses': action_crosses.VERSION}) == [
+            {**row, 'action_cross.test': 'added'} for row in old]
+    assert calls == old  # The new crosses follow, and retain, the existing semantic/identity crosses.
+    with pytest.raises(ConfigError, match='Unsupported reply action feature transform'):
+        selection.feature_rows(target, rows, refs, values,
+            transform={'reply_action_crosses': 'unknown'})
+
+
 @pytest.mark.parametrize('approved', [True, False])
 @pytest.mark.parametrize('workers', [16, 48])
-def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypatch, approved, workers):
+@pytest.mark.parametrize('source_policy', [None, selection.SOURCE_OVERLAP_POLICY])
+def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypatch, approved, workers,
+                                                          source_policy):
     from types import SimpleNamespace
     from src.iteration.parallel import completed_map
     events = []
@@ -163,8 +275,9 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
             events.append('history_ready')
             return approved
     selector = SimpleNamespace(cache=tmp_path, client=None, tasks=lambda *a: ({}, {}))
-    def recall(retriever, case):
+    def recall(retriever, case, *, source_overlap_policy):
         assert events == ['history_ready']
+        assert source_overlap_policy == source_policy
         events.append('recall')
         return []
     monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', Retriever)
@@ -173,6 +286,8 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
     monkeypatch.setattr(learned_gen.experiment, 'spec_of', lambda *a: {'data_ref': 'd-0001'})
     monkeypatch.setattr(versions, 'data_version_dir', lambda *a: tmp_path)
     monkeypatch.setattr(versions, 'generator_dir', lambda *a: tmp_path)
+    monkeypatch.setattr(versions, 'load_generator', lambda *a: {
+        'config': {'retriever': {'source_overlap_policy': source_policy}}})
     monkeypatch.setattr(learned_gen.datasets, 'rows_for', lambda *a: [{}])
     def extract(*args, **kwargs):
         assert kwargs['workers'] == workers

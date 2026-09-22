@@ -51,7 +51,8 @@ class ReplyGenerator:
             require_materials(pool_path.parent.name, [prompt_root])
             self._information_end = json.loads((prompt_root / "learning.json").read_text())["information_end"]
 
-        self._builder = PersonaPromptBuilder(settings, prompt_root=prompt_root)
+        self._builder = PersonaPromptBuilder(settings, prompt_root=prompt_root,
+                                            context_identity=gen_cfg.get("context_identity"))
         self._check_sources()
 
         ev = settings["evaluation"]
@@ -60,6 +61,12 @@ class ReplyGenerator:
 
         # Selection policies and model reranking require explicit version config.
         switches = gen_cfg.get("retriever", {})
+        if 'source_overlap_policy' in switches:
+            from .learned_selection import POLICY, validate_source_overlap_policy
+            overlap_policy = switches['source_overlap_policy']
+            validate_source_overlap_policy(overlap_policy)
+            if overlap_policy is not None and switches.get('learned') != POLICY:
+                raise ConfigError('source_overlap_policy requires learned few-shot selection')
         self._learned = None
         if switches.get('learned'):
             from .learned_selection import LearnedSelector, POLICY
@@ -131,7 +138,9 @@ class ReplyGenerator:
             selection_trace = {}
             if self._learned is not None:
                 from .learned_selection import recall
-                rows = self._learned.select(case, recall(self._retriever, case),
+                recalled = recall(self._retriever, case,
+                    source_overlap_policy=self._cfg.get('retriever', {}).get('source_overlap_policy'))
+                rows = self._learned.select(case, recalled,
                     count=self._max_shots, budget=self._budget, retriever=self._retriever,
                     check=self._check_sources)
             elif self._selection:

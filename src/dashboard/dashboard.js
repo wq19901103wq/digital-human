@@ -1,3 +1,4 @@
+const revealListItem = new WeakMap();
 function initLists(root = document) {
 root.querySelectorAll('[data-list]').forEach(list => {
   if (list.dataset.initialized) return;
@@ -46,8 +47,41 @@ root.querySelectorAll('[data-list]').forEach(list => {
   showComparison?.addEventListener('change', () => render(true));
   previous.addEventListener('click', () => { page--; render(); });
   next.addEventListener('click', () => { page++; render(); list.scrollIntoView({block:'start', behavior:'smooth'}); });
+  revealListItem.set(list, item => {
+    const index = items.indexOf(item);
+    if (index < 0) return;
+    if (search) search.value = '';
+    selects.forEach(select => { select.value = 'all'; });
+    page = Math.floor(index / size);
+    render();
+  });
   render();
 });
+}
+
+let revealedCaseHash = '';
+function revealLinkedCase(force = false) {
+  const hash = location.hash;
+  if (!hash.startsWith('#case-') || (!force && hash === revealedCaseHash)) return;
+  // ID 与链接都由同一个 Case ID 编码生成，不将片段拼进 CSS 选择器。
+  const item = document.getElementById(hash.slice(1));
+  if (!item?.matches('.case')) return;
+  revealListItem.get(item.closest('[data-list]'))?.(item);
+  item.open = true;
+  item.querySelector(':scope > summary').focus({preventScroll:true});
+  item.scrollIntoView({block:'start'});
+  revealedCaseHash = hash;
+}
+async function copyCaseLink(button) {
+  const link = button.closest('.case').querySelector('[data-case-link]');
+  try {
+    await navigator.clipboard.writeText(link.href);
+    button.textContent = '已复制';
+  } catch (error) {
+    // 普通 HTTP 或剪贴板权限被拒时，仍可手动复制完整链接。
+    window.prompt('复制本题链接', link.href);
+  }
+  setTimeout(() => { button.textContent = '复制链接'; }, 2000);
 }
 
 const lastHtml = new WeakMap();
@@ -151,6 +185,8 @@ async function refreshLive() {
     });
     casesRevision = payload.cases_revision || casesRevision;
     configRevision = payload.config_revision || configRevision;
+    // 链接指向的题可能稍后才产生记录；首次出现时定位，后续轮询保留用户的浏览位置。
+    revealLinkedCase();
     updateClocks();
     refreshOpenTraces();
     status.textContent = `实时更新 · 每 3 秒同步 · 最近同步 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}`;
@@ -164,10 +200,25 @@ async function refreshLive() {
   }
 }
 initLists();
+revealLinkedCase();
+window.addEventListener('hashchange', () => { revealedCaseHash = ''; revealLinkedCase(); });
 document.addEventListener('toggle', event => {
   if (event.target.matches('[data-trace-url],.case')) refreshOpenTraces();
 }, true);
 document.addEventListener('click', event => {
+  const copy = event.target.closest('[data-copy-case-link]');
+  if (copy) {
+    event.preventDefault();
+    copyCaseLink(copy);
+    return;
+  }
+  const link = event.target.closest('[data-case-link]');
+  if (link && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    if (location.hash !== link.hash) history.pushState(null, '', link.href);
+    revealLinkedCase(true);
+    return;
+  }
   if (event.target.closest('[data-reload]')) {
     if (document.body.dataset.liveUrl) refreshLive();
     else location.reload();

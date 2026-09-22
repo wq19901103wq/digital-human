@@ -3,7 +3,7 @@ import copy
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip('torch')
 
 from src import cache
 from src.config import ConfigError

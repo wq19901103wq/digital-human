@@ -32,6 +32,8 @@ def test_lr_reproduces_original_pairwise_recipe(pairs):
 
 @pytest.mark.parametrize('kind', ['lr', 'gbdt', 'dnn'])
 def test_option_scoring_symmetry_and_roundtrip(pairs, kind):
+    if kind in ('gbdt', 'dnn'):
+        pytest.importorskip('xgboost' if kind == 'gbdt' else 'torch')  # 可选重依赖
     a, b, y = pairs
     recipe = next(r for r in pm.recipes() if r['kind'] == kind)
     with threadpool_limits(limits=1):

@@ -123,7 +123,9 @@ def require_materials(data_ref, directories, role='development'):
     # learning eligibility merely because evaluation moved to a later window.
     audit = datasets.static_sources(data, directories, 'development')
     if audit.get('promotion_eligible') is not True:
-        raise ConfigError('学习材料来源未知或越界：禁止创建、运行、复用或晋升')
+        failures = '; '.join(row['asset'] + ': ' + row.get('error', '学习范围未验证或超出截止时间')
+                             for row in audit.get('assets', []) if not row['verified'])
+        raise ConfigError('学习材料来源未知或越界：禁止创建、运行、复用或晋升；' + failures)
     for directory in directories:
         record = json.loads((directory / 'learning.json').read_text())
         bound = record.get('asset_files', {})

@@ -96,6 +96,7 @@ def precompute(directory, candidate, output, workers):
             f'feature workers must be within the instance concurrency limit (1–{limit})')
     spec = experiment.spec_of(directory)
     data_dir = versions.data_version_dir(spec['data_ref'])
+    switches = versions.load_generator(candidate)['config'].get('retriever', {})
     selector = LearnedSelector(versions.generator_dir(candidate) / 'ranker',
                               versions.PRIVATE / '.cache/fewshot_ranker_features')
     retriever = PersonaFewShotRetriever(path=data_dir / 'fewshot_pool.jsonl')
@@ -115,7 +116,8 @@ def precompute(directory, candidate, output, workers):
         reported = time.time()
         for index, case in enumerate(cases, 1):
             control.check()
-            prepared, _ = selector.tasks(case, recall(retriever, case))
+            prepared, _ = selector.tasks(case, recall(retriever, case,
+                source_overlap_policy=switches.get('source_overlap_policy')))
             tasks.update(prepared)
             if time.time() - reported >= 15 or index == len(cases):
                 progress('recalling', index)

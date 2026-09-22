@@ -133,6 +133,24 @@ def evidence_path(name, expected):
     archived = versions.PRIVATE / 'evidence_blobs' / expected
     if p.suffix == '.py' and archived.is_file() and sha256_file(archived) == expected:
         return archived
+    if p.suffix == '.py':
+        # Some completed trainers predate archive_inputs. Their exact code is
+        # already retained by experiment snapshots; reading it does not re-sign
+        # the model or allow changed data to move to a different path.
+        for manifest in sorted((versions.PRIVATE / 'runtimes').glob('*/manifest.json')):
+            value = json.loads(manifest.read_text())
+            if digest(value) != manifest.parent.name:
+                continue
+            for relative, checksum in value.get('files', {}).items():
+                path = Path(relative)
+                if (checksum != expected or path.is_absolute() or '..' in path.parts
+                        or not str(p).endswith('/' + relative) or path.suffix != '.py'):
+                    continue
+                candidate = manifest.parent / path
+                if (candidate.resolve().is_relative_to(manifest.parent.resolve())
+                        and not candidate.is_symlink() and candidate.is_file()
+                        and sha256_file(candidate) == expected):
+                    return candidate
     raise ConfigError(f'frozen input changed or missing: {p.name}')
 
 

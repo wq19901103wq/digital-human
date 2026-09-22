@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip('torch')
 
 from src.config import ConfigError, sha256_file
 from src.generator.fewshot_ranker import (

@@ -881,6 +881,10 @@ def _reply(label: str, replies: list | None, css: str = '', result: str = '') ->
 
 
 def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: str = '') -> str:
+    anchor = 'case-' + quote(str(row['case_id']), safe='')
+    links = (f'<span class="case-actions"><a data-case-link href="#{anchor}" '
+             f'aria-label="打开第 {index} 题的直达链接">题目链接</a>'
+             '<button type="button" class="button" data-copy-case-link aria-live="polite">复制链接</button></span>')
     label, key = _case_result(row, judge)
     tone = {'failed': 'danger', 'loss': 'warning', 'win': 'success'}.get(key, 'neutral')
     # 徽章永远是补验后最终判定；与回复区“初测”脚注并列时容易误读，在徽章后显式标注。
@@ -946,7 +950,7 @@ def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: 
     if timing:
         body += '<p class="help">' + ' · '.join(f'{k}：{_e(v)}' for k, v in timing.items()) + '</p>'
     body += _details('查看原始记录与重试历史', _pre(raw))
-    return f'<details class="case" data-item data-case-id="{_e(row["case_id"])}" data-kind="{key}"><summary><span class="case-summary"><span class="case-title">第 {index} 题 · {kind}</span><span class="case-preview">{_e(preview)}</span></span>{_badge(label, tone)}{flip_note}</summary><div class="detail-body">{body}</div></details>'
+    return f'<details class="case" data-item data-case-id="{_e(row["case_id"])}" data-kind="{key}" id="{anchor}"><summary><span class="case-summary"><span class="case-title">第 {index} 题 · {kind}</span><span class="case-preview">{_e(preview)}</span></span>{_badge(label, tone)}{flip_note}{links}</summary><div class="detail-body">{body}</div></details>'
 
 
 def _cases_html(run: dict) -> str:
@@ -982,7 +986,7 @@ def _cases_html(run: dict) -> str:
         records.sort(key=lambda row: ordinals.get(str(row['case_id']), len(ordinals) + 1))
     options = [('all', '全部结果'), ('failed', '执行失败'), ('win', '候选更好'), ('loss', '候选更差'), ('tie', '两版一致'), ('pending', '判定未完成')]
     body = '<section class="panel" id="cases" data-list data-page-size="20"><div class="section-head"><h2>逐题详情<span class="count">' + str(len(records)) + ' 题</span></h2><span class="help">点击每题展开</span></div>'
-    body += '<p class="help">展开每题查看消息角色、来源、实际提示词、模型返回、裁判特征和补测过程。长调用记录点击后加载；历史任务未保存的细节会明确标注。</p>'
+    body += '<p class="help">展开每题查看消息角色、来源、实际提示词、模型返回、裁判特征和补测过程。点击“复制链接”可分享具体题目，打开链接会自动定位并展开。长调用记录点击后加载；历史任务未保存的细节会明确标注。</p>'
     body += _list_controls('搜索聊天内容、回复或 case ID', options)
     for index, row in enumerate(records, 1):
         merged = {**inputs.get(str(row['case_id']), {}), **row}

@@ -83,14 +83,17 @@ def static_sources(directory: Path, assets: list[Path], role: str) -> dict:
         verified = (record.get('verified') is True and
                     isinstance(record.get('information_end'), (int, float)) and
                     record['information_end'] < cutoff and bool(record.get('evidence_files')))
+        error = None
         if verified:
             from .runtime import verify_inputs
             try:
                 verify_inputs(record['evidence_files'])
-            except ConfigError:
+            except ConfigError as exc:
                 verified = False
+                error = str(exc)
         findings.append({'asset': asset.name, 'verified': verified,
-                         'information_end': record.get('information_end')})
+                         'information_end': record.get('information_end'),
+                         **({'error': error} if error else {})})
     return {'promotion_eligible': all(x['verified'] for x in findings), 'assets': findings,
             'reason': '静态资产需要可核验的学习范围，未知历史来源禁止运行或晋升'}
 

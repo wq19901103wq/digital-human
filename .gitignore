@@ -1,31 +1,17 @@
-# 敏感配置（红线）
-.env
-.env.*
-!.env.example
-
-# 私有数据（红线：实例、导出数据、运行产物）
-/instances/
+# 本地数据、实例快照与生成报告；保留 src/digital_human/dashboard/ 源码。
 /data/
+/instances/
 /private/
 /runs/
 /dashboard/
-*.db
-*.sqlite3
-
-# Python
+/.env
+/.env.*
+!/.env.example
+/.venv/
 __pycache__/
 *.pyc
-.venv/
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
-*.egg-info/
-
-# 日志与系统
-logs/
-*.log
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
-.coverage
+/.dashboard.pid
+logs/

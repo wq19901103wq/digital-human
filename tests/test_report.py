@@ -93,6 +93,8 @@ def test_final_retry_is_shown_and_previous_attempt_stays_inline(tmp_path):
     _, run = _run(tmp_path, records=rows)
     page = report._cases_html(run)
     assert page.count('class="case" data-item') == 2
+    assert page.count('href="#case-x"') == 1  # 重试记录共用同一题的稳定链接。
+    assert page.count('data-copy-case-link') == 2
     assert 'data-kind="loss"' in page and '候选更易被识别' in page
     assert '第一次失败' in page and '保存记录 2 条' in page
 
@@ -117,6 +119,8 @@ def test_fixed_answers_never_enter_html_even_in_collapsed_sections(tmp_path):
     page = report._render_run_html(run)
     assert '固定集答案不在开发后台展开' in page
     assert 'FIXED_SECRET' not in page and 'data-item' not in report._cases_html(run)
+    assert 'data-case-link' not in report._cases_html(run)
+    assert 'data-copy-case-link' not in report._cases_html(run)
     assert 'cases.jsonl' not in page
 
 

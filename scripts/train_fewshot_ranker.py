@@ -17,7 +17,7 @@ from src.iteration.storage import file_lock, locked, write_json
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'status', 'compare-lr', 'compare-id', 'compare-features', 'compare-models', 'compare-grades'])
+    parser.add_argument('command', choices=['run', 'status', 'compare-lr', 'compare-id', 'compare-features', 'compare-models', 'compare-grades', 'compare-actions'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--inventory', type=Path)
     parser.add_argument('--source', type=Path, help='Completed training output; reuse its features and labels')
@@ -38,10 +38,12 @@ def main(argv=None):
         print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],
                               new_model_requests=result['new_model_requests']), indent=2))
         return
-    if args.command in ('compare-id', 'compare-features', 'compare-models'):
+    if args.command in ('compare-id', 'compare-features', 'compare-models', 'compare-actions'):
         if not args.source or not args.reference or args.background:
             parser.error('feature comparison requires --source and --reference and runs locally in the foreground')
-        if args.command == 'compare-models':
+        if args.command == 'compare-actions':
+            from src.generator.fewshot_ranker.action_comparison import run
+        elif args.command == 'compare-models':
             from src.generator.fewshot_ranker.architecture_comparison import run
         else:
             from src.generator.fewshot_ranker.identity_comparison import run

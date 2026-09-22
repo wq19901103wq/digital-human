@@ -197,6 +197,13 @@ def check_materials(args, report):
             raise ConfigError('学习来源与新版开发用途冲突；详见 material_compatibility.summary')
         return '来源记录未见冲突；不替代模型重建和正式实验保护'
     report.run('material_source_compatibility', inspect)
+    if args.reconstruct:
+        from src.iteration import gbdt_evidence, learning_guard, pack_transport, runtime
+        def reconstruct():
+            with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
+                return learning_guard.require_materials(args.data,
+                    [versions.judge_dir(args.judge)['dir'], versions.generator_dir(args.generator)])
+        report.run('material_reconstruction', reconstruct)
 
 
 def main(argv=None):
@@ -233,6 +240,8 @@ def main(argv=None):
     materials.add_argument('--data', required=True)
     materials.add_argument('--judge', required=True)
     materials.add_argument('--generator', required=True)
+    materials.add_argument('--reconstruct', action='store_true',
+                           help='同时使用正式运行器的保护重建材料；无模型请求')
     args = parser.parse_args(argv)
     if args.mode == 'experiment' and args.gate == 'fixed-entry' and not args.exp:
         parser.error('--gate fixed-entry 需要 --exp 正式开发实验 ID')
