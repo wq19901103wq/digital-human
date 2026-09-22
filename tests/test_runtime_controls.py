@@ -43,6 +43,33 @@ def test_archived_code_does_not_bless_changed_data_or_missing_evidence(env, tmp_
         runtime.archive_inputs(inputs)
 
 
+@pytest.mark.parametrize('changed', ['none', 'code', 'manifest', 'logical_path', 'data'])
+def test_exact_runtime_snapshot_is_historical_code_evidence(env, tmp_path, changed):
+    root = tmp_path / 'framework'
+    code = root / 'scripts/train.py'
+    code.parent.mkdir(parents=True)
+    code.write_text('old training\n')
+    data = root / 'scripts/samples.json'
+    data.write_text('{"sample": 1}')
+    saved = runtime.freeze(env.root / 'jobs/code-evidence', root=root)
+    original = data if changed == 'data' else code
+    checksum = runtime.sha256_file(original)
+    original.write_text('changed current file')
+    if changed == 'code':
+        (saved / 'scripts/train.py').write_text('changed snapshot')
+    elif changed == 'manifest':
+        path = saved / 'manifest.json'
+        write_json(path, {**json.loads(path.read_text()), 'schema': 999})
+    elif changed == 'logical_path':
+        original = root / 'different/train.py'
+    if changed == 'none':
+        assert runtime.evidence_path(str(original), checksum) == saved / 'scripts/train.py'
+        assert not (env.root / 'evidence_blobs').exists()
+    else:
+        with pytest.raises(ConfigError, match='changed or missing'):
+            runtime.evidence_path(str(original), checksum)
+
+
 def test_threshold_cli_uses_verified_frozen_executor(env, monkeypatch):
     from scripts import promote as cli
     directory = env.root / 'experiments/completed'

@@ -271,3 +271,38 @@ def test_changed_data_allows_familiar_history_but_rejects_leaks(tmp_path, monkey
         else:
             with pytest.raises(ConfigError, match='来源发生变化' if conflict == 'changed_source' else '答案或未来'):
                 materials.require_current('new-data', tmp_path, load)
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_material_reconstruction_uses_formal_adapter_without_requests(priv, monkeypatch, capsys, missing):
+    from contextlib import contextmanager
+    from src.iteration import gbdt_evidence, material_compatibility, pack_transport, runtime
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: priv)
+    monkeypatch.setattr(versions, 'generator_dir', lambda ref: priv / ref)
+    monkeypatch.setattr(versions, 'judge_dir', lambda ref: dict(dir=priv / ref))
+    monkeypatch.setattr(versions, 'data_version_dir', lambda ref: priv / ref)
+    monkeypatch.setattr(material_compatibility, 'inspect', lambda *args: dict(source_conflicts=False))
+    calls = []
+    @contextmanager
+    def adapter(module, resolver):
+        assert module is gbdt_evidence and resolver is runtime
+        calls.append('enter')
+        yield
+        calls.append('exit')
+    def reconstruct(data, directories):
+        assert calls == ['enter'] and data == 'data'
+        assert directories == [priv / 'judge', priv / 'gen']
+        calls.append('guard')
+        if missing:
+            raise ConfigError('frozen input missing')
+        return {'verified': True}
+    monkeypatch.setattr(pack_transport, 'archived_gbdt_paths', adapter)
+    monkeypatch.setattr(learning_guard, 'require_materials', reconstruct)
+    before = versions.POINTERS_PATH.read_bytes()
+    assert check.main(['materials', '--instance', 'demo', '--data', 'data',
+        '--judge', 'judge', '--generator', 'gen', '--reconstruct']) == int(missing)
+    report = json.loads(capsys.readouterr().out)
+    result = next(row for row in report['checks'] if row['name'] == 'material_reconstruction')
+    assert result['status'] == ('failed' if missing else 'passed')
+    assert calls == ['enter', 'guard'] + ([] if missing else ['exit'])
+    assert report['model_requests_prohibited'] and versions.POINTERS_PATH.read_bytes() == before

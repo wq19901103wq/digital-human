@@ -3,6 +3,9 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError
 from src.generator.fewshot_ranker import (
     comparison, discovery, identity_comparison, identity_crosses, logistic, neural_sweep, training,

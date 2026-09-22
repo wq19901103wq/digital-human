@@ -5,6 +5,9 @@ import json
 import numpy as np
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError, sha256_file
 from src.generator.fewshot_ranker import (
     boosting, graded_comparison as comparison, graded_labels, graded_metrics,

@@ -177,6 +177,7 @@ def test_pending_case_visible_and_prompts_are_lazy_loaded(setup_case, case, live
         with tracing.step('llm', {'body': {'messages': [{'role': 'user', 'content': 'LAZY_PROMPT<script>bad()</script>'}]}}):
             page = urlopen(live_server + '/instances/demo/experiments/test-run/index.html').read().decode()
             assert 'LAZY_PROMPT' not in page and f'data-case-id="{case["case_id"]}"' in page
+            assert f'href="#case-{case["case_id"]}"' in page
             endpoint = f'{live_server}/api/trace/demo/test-run/{progress.trace.ref}'
             payload = json.load(urlopen(endpoint))
             assert 'LAZY_PROMPT&lt;script&gt;bad()&lt;/script&gt;' in payload['html']
@@ -298,7 +299,8 @@ def _check_trace_browser(url, expected_prompt):
 const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
 (async () => {
-  const browser = await chromium.launch({channel: 'chrome', headless: true, timeout: 15000});
+  const executable = process.env.DH_BROWSER_EXECUTABLE_PATH;
+  const browser = await chromium.launch({...(executable ? {executablePath:executable} : {channel:'chrome'}), headless:true, timeout:30000});
   try {
     const page = await browser.newPage();
     const errors = [];
@@ -335,7 +337,7 @@ const {chromium} = require('playwright');
     console.log('浏览器通过：列表初始化、实录展开、来源提示词加载、实时刷新保留展开状态');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
-''', url, expected_prompt], capture_output=True, text=True, timeout=50)
+''', url, expected_prompt], capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout.strip())
 
@@ -349,3 +351,93 @@ def test_browser_trace_loading_and_live_refresh(cached_trace, live_server):
 @pytest.mark.skipif(not os.getenv('DH_DASHBOARD_TEST_URL'), reason='可选现有开发实验的只读浏览器验收')
 def test_browser_existing_experiment_trace():
     _check_trace_browser(os.environ['DH_DASHBOARD_TEST_URL'], '实际提示词')
+
+
+def _check_case_links_browser(url):
+    """验证跨分页直达、复制、筛选及刷新；也可用于现有开发页的只读验收。"""
+    result = subprocess.run(['node', '-e', r'''
+const assert = require('node:assert/strict');
+const {chromium} = require('playwright');
+(async () => {
+  const executable = process.env.DH_BROWSER_EXECUTABLE_PATH;
+  const browser = await chromium.launch({...(executable ? {executablePath:executable} : {channel:'chrome'}), headless:true, timeout:30000});
+  try {
+    const context = await browser.newContext({permissions:['clipboard-read', 'clipboard-write']});
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(process.argv[1], {waitUntil:'domcontentloaded'});
+    const target = page.locator('.case').nth(25); // 必须落在第二页，不能只验证首屏锚点。
+    const url = await target.locator('[data-case-link]').evaluate(link => link.href);
+    const hash = new URL(url).hash;
+    const identity = await target.getAttribute('data-case-id');
+    await page.goto(url, {waitUntil:'domcontentloaded'});
+    const waitTarget = () => page.waitForFunction(hash => {
+      const item = document.getElementById(hash.slice(1));
+      return item && item.open && !item.hidden;
+    }, hash);
+    await waitTarget();
+    assert.equal(await target.getAttribute('data-case-id'), identity);
+    assert.equal(await page.locator('#cases').getAttribute('data-current-page'), '1');
+    const copy = target.locator('[data-copy-case-link]');
+    await copy.click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), url);
+    assert.equal(await target.getAttribute('open'), '', '复制不得折叠题目');
+    const search = page.locator('#cases input[type=search]');
+    await search.fill('NO_MATCH_FOR_LINK_TEST');
+    await page.locator('#cases select').selectOption('failed');
+    await page.evaluate(() => { location.hash = '#cases'; });
+    await page.evaluate(hash => { location.hash = hash; }, hash);
+    await waitTarget();
+    assert.equal(await search.inputValue(), '');
+    assert.equal(await page.locator('#cases select').inputValue(), 'all');
+
+    // 用实际 API 的新快照替换区域，验证重新分页、事件委托及展开状态。
+    await page.waitForFunction(() => !refreshing);
+    await page.evaluate(async () => {
+      const payload = await fetch(document.body.dataset.liveUrl).then(response => response.json());
+      updateRegion(document.querySelector('[data-live-region=cases]'), payload.regions.cases + '\n');
+    });
+    await waitTarget();
+    let fallback = '';
+    await page.evaluate(() => {
+      navigator.clipboard.writeText = async () => { throw new Error('clipboard denied'); };
+    });
+    page.once('dialog', async dialog => { fallback = dialog.defaultValue(); await dialog.dismiss(); });
+    await copy.click();
+    assert.equal(fallback, url, '剪贴板被拒时提供完整链接供手动复制');
+
+    await page.locator('#cases [data-next]').click();
+    await page.waitForTimeout(3500);
+    assert.equal(await page.locator('#cases').getAttribute('data-current-page'), '2');
+    assert.equal(await target.getAttribute('hidden'), '', '轮询不得把用户拉回直达题目');
+    const other = page.locator('.case:not([hidden])').first().locator('[data-case-link]');
+    await other.click();
+    assert.notEqual(new URL(page.url()).hash, hash);
+    await page.goBack();
+    await waitTarget();
+    await target.locator(':scope > summary').click();
+    await target.locator('[data-case-link]').click();
+    await waitTarget(); // 相同 hash 再次点击也能展开。
+    if (process.argv[2]) await page.screenshot({path:process.argv[2]});
+    assert.deepEqual(errors, []);
+    console.log('题目链接通过：第二页直达、复制与拒绝回退、筛选恢复、快照更新、后退定位');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+''', url, os.getenv('DH_CASE_LINK_SCREENSHOT', '')], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout.strip())
+
+
+@pytest.mark.skipif(os.getenv('DH_BROWSER_TESTS') != '1', reason='可选 Chrome + Node Playwright 浏览器回归')
+def test_browser_case_links_with_pagination_and_encoded_ids(tmp_path, live_server):
+    rows = [{'case_id': f'link-test-{i}', 'status': 'ok',
+             'identified_baseline': True, 'identified_candidate': False} for i in range(45)]
+    rows[25]['case_id'] = '题目 空格/百分号%?#"<&'
+    exp, _ = _run(tmp_path, records=rows)
+    _check_case_links_browser(f'{live_server}/instances/demo/experiments/{exp.name}/index.html')
+
+
+@pytest.mark.skipif(not os.getenv('DH_DASHBOARD_TEST_URL'), reason='可选现有开发实验的只读浏览器验收')
+def test_browser_existing_experiment_case_links():
+    _check_case_links_browser(os.environ['DH_DASHBOARD_TEST_URL'])

@@ -4,6 +4,9 @@ import json
 import numpy as np
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError
 from src.generator.fewshot_ranker import extraction, features, schema, training
 from src.iteration.storage import read_json, write_json
