@@ -1,0 +1,12 @@
+# 机制层依赖：与任何具体人格/数据无关
+openai>=1.30        # OpenAI 兼容 LLM 客户端
+pyyaml>=6.0         # 通用协议参数配置
+python-dotenv>=1.0  # 命令行读取项目 .env（不覆盖显式环境变量）
+scikit-learn>=1.4   # Judge 小模型：LR（xgboost 可选）
+joblib>=1.3         # 模型持久化
+pytest>=8.0         # 测试
+# xgboost>=2.0      # 可选：Judge 小模型另一种选型
+# torch>=2.2,<3    # 可选：全离散 embedding DNN；权重绑定具体运行版本
+
+numpy>=1.24
+scipy>=1.10

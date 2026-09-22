@@ -1,0 +1,5 @@
+{
+  "name": "judge_single_rule_full_timeline_v1",
+  "mode": "append_to_builtin",
+  "instructions": "不得仅因某个选项没有直接回答最后一句就判它更像 AI；若它自然承接完整时间线中的未完话题、本人状态或正在形成的群聊队形，应把这种承接视为真人可能出现的正常行为。"
+}

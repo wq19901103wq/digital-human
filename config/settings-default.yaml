@@ -1,0 +1,37 @@
+# Framework example defaults. Instances may select DH_SETTINGS_FILE; each run freezes its own settings.
+# Models, data windows and private material are declared by the instance.
+
+evaluation:
+  # 开发 A/B 集：可看答案找问题，迭代用，不进正式结论
+  development:
+    total: 1000
+    group_ratio: 0.75          # 群聊占比；私聊 = total - group
+  # 固定测试集：冻结，只回总分，永不参与调优
+  fixed_test:
+    total: 1000
+    group_ratio: 0.75
+  max_cases_per_chat: 25        # 仅旧 build_testsets 接口；历史回放使用实例 data_policy 的上限
+  few_shots_per_case: 3        # 每题注入的风格示例条数
+  few_shots_char_budget: 2500  # 风格示例总字符预算
+  force_reply: true            # 评测时强制不静默（沉默能力不在本指标内）
+  split_strategy: by_chat      # 仅旧 partition 接口；新入口使用 data_policy 的全局时间和用途划分
+  pool_min_total: 5000       # 池规模下限：低于则禁止正式迭代（SOP §1.4）
+  max_failure_rate: 0.01       # 失败率上限：单题重试2次仍失败→豁免出分母；
+                              # 失败率≥1%整轮判 experiment_incomplete，结果不可用
+  flip_verification:           # 翻转题补验：回应波动大的问题
+    enabled: true
+    extra_rounds_per_version: 2  # 翻转题每版补生成 2 次，连同首次共 3 次取多数
+    # 边界规则：补验后两版判定相同（双边同时翻转/同时不翻转）记 contested，
+    # 属噪声对冲，不计入净胜、不进符号检验
+  adoption:
+    dev_min_net_win_rate: 0.005   # 开发晋级：确认净胜至少 +5/1000
+    fixed_entry_min_net_win_rate: 0.005 # 直接对生产版确认净胜至少 +5/1000 才进入固定轮
+    formal_min_net_win_rate: 0.005 # 正式采用：确认净胜至少 +5/1000，且初测识别数严格改善
+    judge_min_gain_rate: 0.0      # Judge 校准：候选识别率净改善 ≥ 该比率才晋升。0.0=允许打平
+                                  # （测量仪器能不换就不换，同识别率换模型/降成本应允许）；
+                                  # 担心抽样噪声可设 0.01 要求必须改善
+
+llm:
+  base_url_env: DH_LLM_BASE_URL     # 环境变量名，通用
+  api_key_env: DH_LLM_API_KEY
+  max_retries: 2

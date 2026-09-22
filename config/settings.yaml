@@ -1,0 +1,45 @@
+# ============================================================
+# 超参（机制层）——与实验和数据都无关的科学协议常数，可提交 git。
+# 实验配置（特征清单、模型选型 LR/DNN/XGB、few-shot 条数、用哪个 LLM、
+# 检索开关）在 private/config/current_*.json，随迭代调整并升 baseline_id。
+# ============================================================
+
+evaluation:
+  # 开发 A/B 集：可看答案找问题，迭代用，不进正式结论
+  development:
+    total: 1000
+    group_ratio: 0.75          # 群聊占比；私聊 = total - group
+  # 固定测试集：冻结，只回总分，永不参与调优
+  fixed_test:
+    total: 1000
+    group_ratio: 0.75
+  max_cases_per_chat: 25        # 测试集每聊天题数上限：1000 题应来自 40+ 聊天，防聊天内相关性主导指标
+  few_shots_per_case: 3        # 每题注入的风格示例条数
+  few_shots_char_budget: 2500  # 风格示例总字符预算
+  force_reply: true            # 评测时强制不静默（沉默能力不在本指标内）
+  split_strategy: by_chat      # 数据切分（SOP §9 split-first）：先按会话整块切分，
+                              # 测试聊天禁止进入人格/池/训练材料
+  pool_min_total: 5000       # 池规模下限：低于则禁止正式迭代（SOP §1.4）
+  max_failure_rate: 0.01       # 失败率上限：单题重试2次仍失败→豁免出分母；
+                              # 失败率≥1%整轮判 experiment_incomplete，结果不可用
+  flip_verification:           # 翻转题补验：回应波动大的问题
+    enabled: true
+    extra_rounds_per_version: 2  # 翻转题每版补生成 2 次，连同首次共 3 次取多数
+    # 边界规则：补验后两版判定相同（双边同时翻转/同时不翻转）记 contested，
+    # 属噪声对冲，不计入净胜、不进符号检验
+  adoption:
+    dev_min_net_win_rate: 0.0     # 开发晋级：完整补验后确认净胜 > 0
+    fixed_entry_min_net_win_rate: 0.01 # 最新开发版直接对比生产版：确认净胜 ≥ 1% 才进入固定轮
+    formal_min_net_win_rate: 0.01 # 正式采用双条件之一：确认净胜 ≥ 1%。±1 题级波动不构成采用证据
+    judge_min_gain_rate: 0.0      # Judge 校准：候选识别率净改善 ≥ 该比率才晋升。0.0=允许打平
+                                  # （测量仪器能不换就不换，同识别率换模型/降成本应允许）；
+                                  # 担心抽样噪声可设 0.01 要求必须改善
+    formal_strictly_fewer_identified: true  # 且识别数必须严格更少（双重条件）
+
+llm:
+  base_url_env: DH_LLM_BASE_URL     # 环境变量名，通用
+  api_key_env: DH_LLM_API_KEY
+  max_retries: 2
+
+paths:
+  profile: private/config/profile.json   # 用户填写的人格档案（bootstrap 读，唯一剩余 settings 路径）

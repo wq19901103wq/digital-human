@@ -1,0 +1,425 @@
+{
+  "schema": 1,
+  "rules": [
+    {
+      "id": "generator-case-concurrency",
+      "rule": "生成器与 Judge 执行器均使用传入的 1–16 题并发；每线程独立生成及评分组件，完整历史索引在冻结输入保护下每进程仅加载一次；每题独立实录和补验轮次，主线程写入成功断点；续跑先核验冻结输入，仅跳过成功题。",
+      "enforcement": "code",
+      "code": ["src/iteration/runner.py::run_gen_experiment", "src/iteration/progress.py::ParallelCaseProgress", "scripts/iterate_branches.py::work"],
+      "tests": ["tests/test_resume_data.py::test_generator_rejects_invalid_workers_before_requests", "tests/test_resume_data.py::test_generator_parallelism_is_bounded_and_rounds_remain_isolated", "tests/test_resume_data.py::test_generator_workers_share_one_pinned_history_index", "tests/test_history_shared_retriever.py", "tests/test_resume_data.py::test_changed_case_cannot_be_skipped_on_resume", "tests/test_branches.py::test_worker_forwards_case_concurrency_to_both_runners"]
+    },
+    {
+      "id": "fewshot-model-reranking",
+      "rule": "模型重排只使用经过历史时间与来源过滤的候选；当前输入不含目标答案。序号须唯一且属于召回候选；无效结果不缓存、不静默回退，缓存命中也检查来源。",
+      "enforcement": "code",
+      "code": ["src/generator/reranker.py::FewShotReranker", "src/generator/generator.py::ReplyGenerator"],
+      "tests": ["tests/test_fewshot_reranker.py::test_real_history_filtered_answers_hidden_and_cache_reused", "tests/test_fewshot_reranker.py::test_invalid_selections_never_cached_or_silently_fallback", "tests/test_fewshot_reranker.py::test_changed_sources_rejected_including_cache_hits"]
+    },
+    {
+      "id": "branch-accepted-development-fork",
+      "rule": "并行新方向可显式继承同条件的已采用开发版；绑定来源分支及正式实验，核对材料、数据和完整补验净胜。拒绝未采用、过期或不一致的来源，不重签旧证据、不改变生产指针；新实验仍执行当前来源保护。",
+      "enforcement": "code",
+      "code": ["src/iteration/branches.py::_accepted_source", "src/iteration/branches.py::submit"],
+      "tests": ["tests/test_branches.py::test_fork_accepted_development_uses_common_control", "tests/test_branches.py::test_fork_rejects_invalid_development_receipt"]
+    },
+    {
+      "id": "branch-development-stage-limit",
+      "rule": "仅开发比较的分支通过原开发门槛后保留开发版，停止在固定准入与固定轮之前，不更改生产指针；后续同分支提案继承有收益的开发版。",
+      "enforcement": "code",
+      "code": ["src/iteration/branches.py::advance", "src/iteration/branches.py::set_stage_limit", "src/iteration/branches.py::promote_experiment"],
+      "tests": ["tests/test_branches.py::test_development_stage_limit_retains_winner_without_fixed_or_production", "tests/test_branches.py::test_direct_development_promotion_recovers_blocked_round"]
+    },
+    {
+      "id": "development-frozen-failure-limit",
+      "rule": "开发晋级与固定准入沿用冻结失败率上限；所有题目必须有最终记录，失败题单独计数并排除出有效对数，达到上限拒绝，成功分歧仍须完整独立补验，不改写已完成证据",
+      "enforcement": "code",
+      "code": ["src/iteration/gates.py::confirmed_metrics"],
+      "tests": ["tests/test_record_contract.py::test_development_gate_uses_frozen_failure_limit"]
+    },
+    {
+      "id": "embedding-adoption-and-supplement",
+      "rule": "Embedding 主候选必须从原训练特征重建且保留原来源；推理时两侧编码完全相同须返回精确 0.5，其余输入保留网络概率；补验须显式开启，只补缺失 r1/r2，同一轮两方共享观察，已有证据损坏不得回退请求",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/embedding_adoption.py::selected_model",
+        "src/iteration/embedding_adoption.py::verify",
+        "src/judge/embedding_runtime.py::EmbeddingJudge",
+        "src/iteration/draw_replay.py::SavedDrawReplay"
+      ],
+      "tests": [
+        "tests/test_embedding_adoption.py::test_resigned_weights_rejected",
+        "tests/test_embedding_adoption.py::test_nontraining_or_changed_inputs_rejected",
+        "tests/test_embedding_adoption.py::test_identical_encoded_inputs_tie_exactly",
+        "tests/test_embedding_adoption.py::test_distinct_encoded_inputs_keep_network_probability",
+        "tests/test_draw_replay.py::test_supplement_missing_rounds_is_paired_independent_and_opt_in",
+        "tests/test_draw_replay.py::test_supplement_cannot_replace_corrupt_evidence_or_initial"
+      ]
+    },
+    {
+      "id": "all-categorical-embedding-search",
+      "rule": "所有输入离散化且 embedding 维度为 8，无数值旁路；共享回复网络先打分后求差；仅训练内部选择配置，数据及参数改变禁止续用旧任务；成功训练复用，正式比较登记后计分，缺少独立观察不得冒充补验",
+      "enforcement": "code",
+      "code": [
+        "src/judge/embedding.py::Ranker",
+        "src/iteration/embedding_tuning.py::bind_batch",
+        "src/iteration/embedding_tuning.py::shared_learning_snapshot",
+        "src/iteration/embedding_tuning.py::train_jobs",
+        "src/iteration/embedding_tuning.py::comparison_records",
+        "src/iteration/embedding_tuning.py::formal_comparisons"
+      ],
+      "tests": [
+        "tests/test_embedding_judge.py::test_all_fields_embed_and_unknown_does_not_learn",
+        "tests/test_embedding_judge.py::test_shared_preparation_preserves_existing_learning_guards",
+        "tests/test_embedding_judge.py::test_shared_scores_swap_serialization_and_bn_eval",
+        "tests/test_embedding_judge.py::test_changed_batch_and_checkpoint_rejected_and_resume_reused",
+        "tests/test_embedding_judge.py::test_missing_independent_rounds_do_not_count_as_confirmation"
+      ]
+    },
+    {
+      "id": "pack-terminal-failures",
+      "rule": "生成两次格式无效计入单题失败；旧冻结任务仅从相同条件实录恢复，保留原代码和成功断点，传输和来源异常仍中止",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/branch_packs.py::build",
+        "src/iteration/branch_packs.py::recover_terminal_failures"
+      ],
+      "tests": [
+        "tests/test_architecture_contracts.py::test_pack_nonterminal_errors_still_stop",
+        "tests/test_architecture_contracts.py::test_pack_terminal_format_failure_is_counted",
+        "tests/test_architecture_contracts.py::test_recover_legacy_terminal_failure_preserves_frozen_runtime"
+      ]
+    },
+    {
+      "id": "unified-validation",
+      "rule": "统一入口调用既有规则，汇总所有独立失败并返回非零；材料与实验校验禁止模型请求，不更换基线，不把校验当作实验或晋级；调度已有任务不重复完整来源与准入审计，创建、实际续跑和采用自动保留保护",
+      "enforcement": "code",
+      "code": [
+        "scripts/check.py::main",
+        "scripts/check.py::check_judge",
+        "scripts/check.py::check_experiment",
+        "scripts/check.py::offline",
+        "src/iteration/branches.py::_ensure_trial",
+        "src/iteration/branches.py::_fixed_job"
+      ],
+      "tests": [
+        "tests/test_check.py::test_failed_check_does_not_hide_other_failures",
+        "tests/test_check.py::test_offline_check_forbids_each_model_entrypoint",
+        "tests/test_check.py::test_changed_observations_rejected",
+        "tests/test_check.py::test_judge_aggregates_data_and_source_failures",
+        "tests/test_check.py::test_real_material_guard_rejects_forged_assets",
+        "tests/test_check.py::test_experiment_missing_independent_votes_rejected",
+        "tests/test_check.py::test_changed_pointers_are_reported",
+        "tests/test_branches.py::test_fixed_polling_does_not_repeat_source_or_entry_audit",
+        "tests/test_branches.py::test_judge_branch_builds_validation_only_after_development_entry",
+        "tests/test_branches.py::test_changed_pack_is_rejected_before_any_scoring",
+        "tests/test_leakage_guards.py::test_unchanged_ids_cannot_reuse_changed_sources"
+      ]
+    },
+    {
+      "id": "saved-development-draws",
+      "rule": "开发观察复用须绑定样本、生成器、特征配置、原请求和独立轮次；逐步骤核验成功结果，缺失独立补验不可回退请求或借用初测，固定验收不能复用开发观察；观察来源与本轮对照分离，纯判别器可在相同特征条件下分别重评分，原来源配置与资产仍须保持冻结",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/draw_replay.py::verify_draw",
+        "src/iteration/draw_replay.py::manifest",
+        "src/iteration/draw_replay.py::SavedDrawReplay",
+        "src/iteration/branches.py::submit",
+        "src/iteration/branches.py::_ensure_trial",
+        "src/iteration/runner.py::run_judge_experiment",
+        "src/iteration/draw_replay.py::source_info"
+      ],
+      "tests": [
+        "tests/test_draw_replay.py::test_registered_replay_completes_all_votes_without_requests",
+        "tests/test_draw_replay.py::test_branch_replay_promotes_development_without_requests_or_shared_pointer_change",
+        "tests/test_draw_replay.py::test_branch_replay_blocks_changed_binding_without_live_fallback",
+        "tests/test_draw_replay.py::test_successful_operation_in_failed_case_is_reusable",
+        "tests/test_draw_replay.py::test_forged_observation_rejected_even_with_updated_trace_hash",
+        "tests/test_draw_replay.py::test_changed_inputs_and_cache_entries_are_rejected",
+        "tests/test_draw_replay.py::test_missing_independent_round_has_no_live_fallback",
+        "tests/test_draw_replay.py::test_cross_condition_replay_rejected",
+        "tests/test_draw_replay.py::test_rebased_pure_scorers_reuse_source_rounds_without_requests",
+        "tests/test_draw_replay.py::test_rebased_replay_rejects_changed_source_or_baseline",
+        "tests/test_draw_replay.py::test_rebased_replay_rejects_source_change_after_loading"
+      ]
+    },
+    {
+      "id": "gbdt-training-provenance",
+      "rule": "GBDT 派生模型必须继承已重建的干净特征来源，只用冻结训练行复现全部树权重；自签哈希不能替代来源核验",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/learning_guard.py::_reconstructed_judge",
+        "src/iteration/gbdt_evidence.py::verify"
+      ],
+      "tests": [
+        "tests/test_gbdt_evidence.py::test_clean_gbdt_reconstructs_source_without_requests",
+        "tests/test_gbdt_evidence.py::test_forged_learning_or_feature_source_rejected",
+        "tests/test_gbdt_evidence.py::test_forged_fit_even_with_resigned_hashes_rejected"
+      ]
+    },
+    {
+      "id": "gbdt-frozen-scoring",
+      "rule": "纯 GBDT 分别对两个选项评分再取 logit 差，拒绝未绑定资产、维度及特征顺序变化；特征复用保留独立轮次",
+      "enforcement": "code",
+      "code": [
+        "src/judge/gbdt.py::GBDTScorer",
+        "src/judge/gbdt.py::option_vectors",
+        "src/judge/gbdt.py::GBDTJudge"
+      ],
+      "tests": [
+        "tests/test_gbdt_judge.py::test_nonlinear_options_scored_before_difference",
+        "tests/test_gbdt_judge.py::test_dispatch_and_frozen_feature_order",
+        "tests/test_gbdt_judge.py::test_replay_preserves_rounds_without_llm_requests",
+        "tests/test_gbdt_judge.py::test_asset_tampering_rejected_before_request",
+        "tests/test_gbdt_judge.py::test_unbound_model_rejected",
+        "tests/test_gbdt_judge.py::test_invalid_model_rejected",
+        "tests/test_gbdt_judge.py::test_booster_objective_cannot_be_relabelled",
+        "tests/test_gbdt_judge.py::test_booster_dependency_change_rejected"
+      ]
+    },
+    {
+      "id": "experiment-records",
+      "rule": "所有评测先登记，结果只写入 experiments；完成须有完整逐题证据",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/record_contract.py::require_registered",
+        "src/iteration/record_contract.py::validate_completion",
+        "src/iteration/experiment.py::finish"
+      ],
+      "tests": [
+        "tests/test_record_contract.py::test_output_cannot_escape_experiments",
+        "tests/test_record_contract.py::test_completion_checks_all_cases_metrics_and_votes"
+      ]
+    },
+    {
+      "id": "comparison-provenance",
+      "rule": "专项比较统一登记；历史补录核验原始结果且不获得晋级资格",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/comparisons.py::register",
+        "src/iteration/comparisons.py::legacy_plan",
+        "src/iteration/gates.py::require_promotable"
+      ],
+      "tests": [
+        "tests/test_record_contract.py::test_comparison_blocks_ordinary_execution_and_promotion",
+        "tests/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
+      ]
+    },
+    {
+      "id": "frozen-inputs",
+      "rule": "任务规格及版本不可原地替换，来源改变时拒绝复用",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/storage.py::write_once_json",
+        "src/iteration/learning_guard.py::verify"
+      ],
+      "tests": [
+        "tests/test_architecture_contracts.py::test_frozen_json_retry_is_idempotent_and_never_replaces_evidence",
+        "tests/test_leakage_guards.py::test_unchanged_ids_cannot_reuse_changed_sources"
+      ]
+    },
+    {
+      "id": "data-boundaries",
+      "rule": "训练、开发、固定用途与时间边界必须核验，不能凭 verified 标记放行；通用生成指令仅接受已审阅配方的精确资产，重签未知内容仍拒绝",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/datasets.py::case_path",
+        "src/iteration/learning_guard.py::require_materials"
+      ],
+      "tests": [
+        "tests/test_leakage_guards.py::test_forged_case_rejected_before_request",
+        "tests/test_leakage_guards.py::test_verified_flag_cannot_certify_arbitrary_assets",
+        "tests/test_leakage_guards.py::test_conversation_recipe_cannot_be_resigned_with_answers",
+        "tests/test_leakage_guards.py::test_unknown_or_judge_prompt_recipe_rejected",
+        "tests/test_data_boundaries.py::test_other_chat_future_unknown_source_and_same_second"
+      ]
+    },
+    {
+      "id": "baseline-stability",
+      "rule": "创建、训练和完成不更换基线；晋级核验当前指针并在锁内更新",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/promote.py::promote_judge",
+        "src/iteration/promote.py::promote_gen",
+        "src/iteration/branches.py::promote_experiment"
+      ],
+      "tests": [
+        "tests/test_iteration.py::test_judge_comparator_changes_only_after_development_promotion",
+        "tests/test_architecture_contracts.py::test_bootstrap_cannot_reinitialize_an_existing_baseline"
+      ]
+    },
+    {
+      "id": "fixed-acceptance",
+      "rule": "固定批次先封存、分配即消耗、不可退回；采用需直接比较和冻结阈值",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/acceptance.py::claim",
+        "src/iteration/gates.py::require_fixed_entry"
+      ],
+      "tests": [
+        "tests/test_runtime_controls.py::test_batches_are_unique_bound_and_not_refunded",
+        "tests/test_protocol.py::test_decide_formal_requires_both_conditions"
+      ]
+    },
+    {
+      "id": "threshold-revision",
+      "rule": "开发及固定门槛按配置冻结；用户明确修订时复用既有固定成绩并保存独立决定，不改写原结果或绕过晋级保护",
+      "enforcement": "hybrid",
+      "code": [
+        "src/iteration/protocol.py::decide",
+        "src/iteration/promote.py::_review_thresholds",
+        "src/iteration/promote.py::_record_review",
+        "scripts/promote.py::review_policy"
+      ],
+      "tests": [
+        "tests/test_protocol.py::test_configurable_five_per_thousand_boundary",
+        "tests/test_iteration.py::test_threshold_review_cannot_bypass_existing_guards",
+        "tests/test_iteration.py::test_threshold_review_preserves_records_and_reuses_fixed_result",
+        "tests/test_report.py::test_threshold_review_display_keeps_original_decision",
+        "tests/test_runtime_controls.py::test_threshold_cli_rejects_wrong_executor_and_changed_snapshot"
+      ],
+      "human_step": "SOP §3：负责人明确修订采用门槛，晋级命令记录理由；不得将修订后达标描述为原协议通过"
+    },
+    {
+      "id": "recovery",
+      "rule": "成功断点不覆盖；损坏尾行先备份恢复，中间损坏拒绝",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/journal.py::recover",
+        "src/iteration/record_contract.py::writer"
+      ],
+      "tests": [
+        "tests/test_record_contract.py::test_successful_checkpoint_cannot_be_replaced",
+        "tests/test_framework_followups.py::test_recovery_preserves_completed_records_and_exact_failed_tail",
+        "tests/test_framework_followups.py::test_corrupt_middle_is_never_recovered"
+      ]
+    },
+    {
+      "id": "runtime-resources",
+      "rule": "恢复使用冻结代码；跨进程共享额度、截止时间和取消状态",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/runtime.py::verify",
+        "src/iteration/control.py::request"
+      ],
+      "tests": [
+        "tests/test_runtime_controls.py::test_runtime_snapshot_survives_source_changes_and_rejects_tampering",
+        "tests/test_runtime_controls.py::test_request_quota_is_atomic_across_processes",
+        "tests/test_runtime_controls.py::test_cancel_blocks_cache_hit_and_deadline_blocks_request"
+      ]
+    },
+    {
+      "id": "honest-dashboard",
+      "rule": "后台来自实验记录，失败和暂停如实展示；采用状态读取共享指针及同基线的分支开发记录，固定答案不可出现在页面",
+      "enforcement": "code",
+      "code": [
+        "src/dashboard/report.py::_runs",
+        "src/dashboard/server.py::_AuditGuardHandler"
+      ],
+      "tests": [
+        "tests/test_report.py::test_fixed_answers_never_enter_html_even_in_collapsed_sections",
+        "tests/test_report.py::test_history_reads_branch_development_adoption_without_changing_shared_pointers",
+        "tests/test_workflow_dashboard.py::test_live_workflow_updates_training_without_regenerating_html",
+        "tests/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
+      ]
+    },
+    {
+      "id": "preflight",
+      "rule": "全量训练前完成小样本链路检查；输入完整性由代码判定，效果是否值得继续由人判断",
+      "enforcement": "hybrid",
+      "code": [
+        "src/iteration/training.py::preflight",
+        "src/iteration/experiment.py::_verify_trigger"
+      ],
+      "tests": [
+        "tests/test_training_pipeline.py::test_clean_checkout_trains_audits_and_evaluates_synthetic_data"
+      ],
+      "human_step": "SOP §10.2：审阅代表样本及具体失败，记录继续或停止理由"
+    },
+    {
+      "id": "human-proposal",
+      "rule": "候选方向与评价目标由人决定；明确提案字段由代码检查",
+      "enforcement": "hybrid",
+      "code": [
+        "src/iteration/training.py::submit",
+        "src/iteration/branches.py::submit"
+      ],
+      "tests": [
+        "tests/test_training_pipeline.py::test_clean_checkout_trains_audits_and_evaluates_synthetic_data"
+      ],
+      "human_step": "SOP §10.1：记录假设、改动、对照、预算和选定候选；不把字段非空当作科学有效性"
+    },
+    {
+      "id": "public-boundary",
+      "rule": "公开文件清单和常见秘密由代码拦截；任意自然语言的隐私及许可证由人审核",
+      "enforcement": "hybrid",
+      "code": [
+        "scripts/check_public.py::check"
+      ],
+      "tests": [
+        "tests/test_runtime_controls.py::test_public_gate_checks_history_even_after_file_is_removed"
+      ],
+      "human_step": "SOP §10.3：所有者审核公开内容、许可证和发布目标"
+    },
+    {
+      "id": "root-cause-and-interpretation",
+      "rule": "根因分析、实验解释和结论适用范围必须人工审核",
+      "enforcement": "sop",
+      "human_step": "SOP §10.4：给出复现证据、因果链、替代解释和结论范围；不得把开发收益当成生产收益"
+    },
+    {
+      "id": "rule-maintenance",
+      "rule": "新增规范必须分类，代码规则须绑定实现和反例测试；SOP 规则须给出人工步骤",
+      "enforcement": "code",
+      "code": [
+        "scripts/check_rules.py::check",
+        "scripts/check_rules.py::inspect"
+      ],
+      "tests": [
+        "tests/test_rule_enforcement.py::test_rule_catalog_and_write_boundaries",
+        "tests/test_rule_enforcement.py::test_new_scripts_cannot_bypass_journal_or_pointer_writers"
+      ]
+    },
+    {
+      "id": "frozen-gbdt-archive-paths",
+      "rule": "冻结 GBDT 验证可在内存中适配历史代码归档路径；必须核对原绑定及归档内容哈希，继续执行原模型来源重建，不修改冻结代码、来源记录、权重或数据",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/pack_transport.py::archived_gbdt_paths",
+        "src/iteration/gates.py::verify_learning"
+      ],
+      "tests": [
+        "tests/test_gbdt_evidence.py::test_archived_code_compatibility_preserves_guard",
+        "tests/test_gbdt_evidence.py::test_adoption_learning_uses_verified_archives"
+      ]
+    },
+    {
+      "id": "pack-transport-timeout",
+      "rule": "冻结回复包及实验可记录并提高传输等待上限；不得修改模型请求、缓存身份、原冻结代码或已有结果",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/pack_transport.py::launch",
+        "src/iteration/pack_transport.py::timeout_floor"
+      ],
+      "tests": [
+        "tests/test_pack_transport.py::test_invalid_timeout_is_rejected",
+        "tests/test_pack_transport.py::test_timeout_changes_transport_only",
+        "tests/test_pack_transport.py::test_frozen_launch_keeps_checkpoint_and_rejects_tampering"
+      ]
+    },
+    {
+      "id": "train-only-score-fusion",
+      "rule": "融合候选分别计算回复分数后求差，固定权重，尺度只从完整训练特征重建；继承来源、独立补验与晋级规则不变",
+      "enforcement": "code",
+      "code": [
+        "src/iteration/fusion.py::verify",
+        "src/judge/fusion.py::FusionScorer"
+      ],
+      "tests": [
+        "tests/test_fusion.py::test_option_score_fusion_and_swap",
+        "tests/test_fusion.py::test_resigned_fusion_forgery_rejected",
+        "tests/test_fusion.py::test_nontraining_normalization_rejected",
+        "tests/test_draw_replay.py::test_fusion_reuses_registered_draws_without_requests"
+      ]
+    }
+  ]
+}
