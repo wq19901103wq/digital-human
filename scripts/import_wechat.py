@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 wechat-mac-rpa 迁移数据与实验配置（一次性导入，机制层无改动）。
+"""从外部来源部署（wechat-mac 项目）迁移数据与实验配置（一次性导入，机制层无改动）。
 
 产物 = 新数据版本 + 初始生成器/Judge 版本 + 指针（同 bootstrap，但数据来自 wechat 资产）：
 - 测试集：从 WeFlow 导出按 split-first 现切（不走 bootstrap 的统计再生成）
@@ -23,19 +23,20 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE_DEPLOYMENT = min(ROOT.parent.glob('wechat-mac-*/'), key=lambda p: len(p.name), default=ROOT.parent / 'wechat-mac-missing')
 sys.path.insert(0, str(ROOT))
 
-from src.digital_human.bootstrap import build_testsets, ingest, partition  # noqa: E402
-from src.digital_human.config import ConfigError, load_settings  # noqa: E402
-from src.digital_human.iteration import versions  # noqa: E402
-from src.digital_human.judge.rpa import prepare_import  # noqa: E402
+from src.bootstrap import build_testsets, ingest, partition  # noqa: E402
+from src.config import ConfigError, load_settings  # noqa: E402
+from src.iteration import versions  # noqa: E402
+from src.judge.corrected import prepare_import  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="wechat-mac-rpa 资产迁移")
+    parser = argparse.ArgumentParser(description="来源部署资产迁移")
     parser.add_argument("--instance", default=None, help="数字人实例名（默认 env DH_INSTANCE 或 default）")
-    parser.add_argument("--source-root", default=str(ROOT.parent / "wechat-mac-rpa"), help="来源 RPA 项目根目录")
-    parser.add_argument("--judge-only", action="store_true", help="已有实例对齐 RPA Judge，并补齐现有题目的来源元数据")
+    parser.add_argument("--source-root", default=str(SOURCE_DEPLOYMENT), help="来源部署根目录")
+    parser.add_argument("--judge-only", action="store_true", help="已有实例对齐来源裁判，并补齐现有题目的来源元数据")
     parser.add_argument("--exports", help="WeFlow 导出目录（含 b/ 与 main/）；judge-only 默认取来源项目 data/exports")
     parser.add_argument("--pool", help="已策划 few-shot 池 jsonl")
     parser.add_argument("--persona", help="wechat persona.md")
@@ -53,25 +54,25 @@ def main() -> None:
     source_root = Path(args.source_root).resolve()
     judge_cfg, judge_meta, judge_assets = prepare_import(source_root)
     if args.judge_only:
-        from src.digital_human.judge.migration import enrich_cases, snapshot_enriched_data
-        from src.digital_human.judge.rpa import RpaJudge
-        from src.digital_human.iteration import report
+        from src.judge.migration import enrich_cases, snapshot_enriched_data
+        from src.judge.corrected import CorrectedJudge
+        from src.dashboard import report
         pointers = versions.load_pointers()
         messages = ingest.load_weflow_dir(Path(args.exports) if args.exports else source_root / "data/exports")
         enriched = enrich_cases(versions.data_version_dir(pointers["data"]), messages)
-        print(f"已核对 RPA Judge {judge_meta['source_baseline_id']} 及 {sum(map(len, enriched.values()))} 题的来源元数据")
+        print(f"已核对来源裁判 {judge_meta['source_baseline_id']} 及 {sum(map(len, enriched.values()))} 题的来源元数据")
         if not args.adopt:
             print("只核对；加 --adopt 后创建快照并切换当前实例")
             return
         with tempfile.TemporaryDirectory() as directory:
             # 指针切换前验证完整资产、运行时版本及 524 维模型。
             jid = versions.create_judge_version(judge_cfg, judge_meta, assets=judge_assets, root=Path(directory))
-            RpaJudge(judge_cfg, Path(directory) / jid)
+            CorrectedJudge(judge_cfg, Path(directory) / jid)
         current = versions.current_judge("production")
         same_data = all(rows == [json.loads(line) for line in (versions.data_version_dir(pointers["data"]) / filename).read_text(encoding="utf-8").splitlines() if line.strip()]
                         for filename, rows in enriched.items())
         if same_data and current["config"] == judge_cfg and pointers["iteration_judge"] == current["id"]:
-            print(f"已对齐 RPA：{current['id']}，无需重复创建版本")
+            print(f"已对齐来源裁判：{current['id']}，无需重复创建版本")
             return
         vid = snapshot_enriched_data(pointers["data"], enriched)
         jid = versions.create_judge_version(judge_cfg, judge_meta, assets=judge_assets)
@@ -95,7 +96,7 @@ def main() -> None:
 
     vid = versions.create_data_version(None, {
         "seed": 42, "split_strategy": "by_chat",
-        "source": "wechat-mac-rpa migration",
+        "source": "wechat-mac migration",
         "source_messages": len(messages),
         "partitions": {"fixed_chats": len(part.fixed_chat_ids),
                        "dev_chats": len(part.dev_chat_ids),
@@ -159,7 +160,7 @@ def main() -> None:
         "review_status": "approved",
         "examples_sha256": pool_sha,
         "total": kept,
-        "source": "wechat-mac-rpa situation_few_shot_library_v1（已策划、来源核验）",
+        "source": "wechat-mac situation_few_shot_library_v1（已策划、来源核验）",
         "filtered_against": "本次 fixed/dev 划分（文本匹配）",
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
@@ -169,11 +170,31 @@ def main() -> None:
     versions.finalize_data_version(vid)
     print(f"数据版本 {vid}: 池 {kept} 条（按本次划分过滤后）, fixed {testsets['fixed_test']['total']}, dev {testsets['development']['total']}")
 
+    # 采用前准入：构成与配额不符、池不足，一律拒绝切指针（直接从落盘文件计数，与 manifest 结构解耦）
+    def _actual(path: Path) -> dict:
+        cases = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        return {"total": len(cases), "group": sum(1 for c in cases if c.get("chat_type") == "group")}
+
+    for ds in ("fixed_test", "development"):
+        plan = {"total": settings["evaluation"][ds]["total"],
+                "group": round(settings["evaluation"][ds]["total"] * settings["evaluation"][ds]["group_ratio"])}
+        actual = _actual(d / ("fixed_test.jsonl" if ds == "fixed_test" else "dev_pool.jsonl"))
+        if actual != plan:
+            raise SystemExit(f"准入拒绝：{ds} 构成 {actual} ≠ 要求 {plan}；不 --adopt，先修数据")
+    if kept < settings["evaluation"].get("pool_min_total", 5000):
+        raise SystemExit(f"准入拒绝：过滤后池 {kept} 条 < pool_min_total；不 --adopt")
     if not args.adopt:
         print("未 --adopt：指针未动。确认后重跑加 --adopt 建初始版本并切指针。")
         return
 
-    # 生成器配置：优先读旧 current_c0.json 的模型/超时（#4），否则用传入默认
+    if versions.POINTERS_PATH.exists():
+        versions._write_json(versions.PRIVATE / 'data_preparations' / f'{vid}.json', {
+            'data_ref': vid, 'previous_baseline': versions.load_pointers(),
+            'status': 'prepared', 'reason': '数据已准备；模型与生产组合须经独立评测采用'})
+        print(f'{vid} 已准备；现有模型和基线未变化。数据变更不再隐式采用新生成器或 Judge。')
+        return
+
+    # 生成器配置：首次初始化才读取旧模型配置并创建模型版本。
     c0 = {}
     c0_path = Path(args.c0_config) if args.c0_config else source_root / "config/current_c0.json"
     if c0_path.exists():

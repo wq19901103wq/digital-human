@@ -1,0 +1,4 @@
+{
+  "max_active_requests": 4,
+  "max_requests": 10000
+}

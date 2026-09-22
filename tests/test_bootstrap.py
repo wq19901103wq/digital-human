@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.digital_human.bootstrap import analyze, build_fewshot_pool, build_testsets, ingest
-from src.digital_human.config import load_settings
+from src.bootstrap import analyze, build_fewshot_pool, build_testsets, ingest
+from src.config import load_settings
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "chat_export.sample.jsonl"
 
@@ -43,7 +43,7 @@ def test_fewshot_pool_rows_loadable(tmp_path):
     assert row["source_provenance"] == "before_automation_cutoff"
     assert isinstance(row["context"], list) and isinstance(row["reply"], list)
     # 检索器认可该池（report.json 存在 → is_approved）
-    from src.digital_human.generator.few_shot import PersonaFewShotRetriever
+    from src.generator.few_shot import PersonaFewShotRetriever
 
     retriever = PersonaFewShotRetriever(path=tmp_path / "pool.jsonl")
     assert retriever.is_approved()
@@ -59,7 +59,7 @@ def test_testsets_disjoint_and_composition(tmp_path):
     settings["evaluation"]["fixed_test"]["total"] = 4
     settings["evaluation"]["fixed_test"]["group_ratio"] = 0.5
     messages = _messages()
-    from src.digital_human.bootstrap.partition import partition
+    from src.bootstrap.partition import partition
 
     part = partition(messages, settings, seed=42)
     manifest = build_testsets.build_testsets(

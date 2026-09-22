@@ -1,0 +1,35 @@
+{
+  "data_ref": "d-0001",
+  "generator_ref": "g-0001",
+  "change": "Describe the human-selected training change",
+  "feature_configs": {
+    "candidate": {
+      "provider": "codex_cli",
+      "model": "MODEL_NAME",
+      "reasoning_effort": "high",
+      "codex_cli_version": "INSTALLED_VERSION",
+      "timeout_seconds": 360
+    }
+  },
+  "scoring": {
+    "initial": {
+      "provider": "codex_cli",
+      "model": "BASELINE_JUDGE_MODEL",
+      "reasoning_effort": "high",
+      "codex_cli_version": "INSTALLED_VERSION",
+      "timeout_seconds": 360
+    },
+    "correction_threshold": 0.7,
+    "decision_policy": "hybrid"
+  },
+  "reference_case_ids": [],
+  "recipe": {
+    "fit_intercept": false,
+    "C": 1.0,
+    "penalty": "l2",
+    "solver": "lbfgs",
+    "max_iter": 5000,
+    "tol": 0.0001,
+    "random_state": 0
+  }
+}

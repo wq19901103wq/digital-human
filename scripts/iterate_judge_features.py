@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import shutil
 import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from threading import local
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.digital_human.bootstrap.ingest import load_weflow_dir  # noqa: E402
-from src.digital_human.config import ConfigError, load_settings, sha256_file  # noqa: E402
-from src.digital_human.generator.generator import ReplyGenerator  # noqa: E402
-from src.digital_human.iteration import experiment, report, runner, versions  # noqa: E402
-from src.digital_human.llm import build_clients  # noqa: E402
-from src.digital_human.tracing import CaseTrace  # noqa: E402
+from src.bootstrap.ingest import load_weflow_dir  # noqa: E402
+from src.config import ConfigError, load_settings, sha256_file  # noqa: E402
+from src.generator.generator import ReplyGenerator  # noqa: E402
+from src.iteration import experiment, runner, versions
+from src.dashboard import report  # noqa: E402  # noqa: E402
+from src.llm import LLMRefusal, build_clients  # noqa: E402
+from src.iteration.parallel import completed_map  # noqa: E402
+from src.tracing import CaseTrace  # noqa: E402
 
 
 def clean_cases(pool, messages):
@@ -77,36 +81,82 @@ def build_pack(args, study):
     pack_id = 'pack-calibration-features-' + study
     directory = versions.PRIVATE / 'judge_eval' / pack_id
     directory.mkdir(parents=True, exist_ok=True)
-    generator = ReplyGenerator(settings, info['config'], build_clients(settings, info['config']['llm']),
-                               prompt_root=info['dir'], pool_path=data / 'fewshot_pool.jsonl')
     path = directory / 'building.json'
-    building = json.loads(path.read_text()) if path.exists() else {'rows': [], 'selected_ids': [c['case_id'] for c in selected]}
-    if building['selected_ids'] != [c['case_id'] for c in selected]:
-        raise ConfigError('续建时样本集合发生变化')
+    source = {'data_ref': ptr['data'], 'generator_ref': info['id'],
+              'dev_sha256': sha256_file(data / 'dev_pool.jsonl')}
+    building = json.loads(path.read_text()) if path.exists() else {
+        'rows': [], 'selected_ids': [c['case_id'] for c in selected], 'source': source}
+    if building['selected_ids'] != [c['case_id'] for c in selected] or building.get('source', source) != source:
+        raise ConfigError('续建时样本集合或版本发生变化')
     done = {row['case_id'] for row in building['rows']}
-    for case in selected:
-        if case['case_id'] in done:
-            continue
+    worker_state = local()
+    progress_path = directory / 'progress.json'
+    progress = {'status': 'running', 'pid': os.getpid(), 'total': args.sample,
+                'completed': len(done), 'workers': args.workers, 'started_at': time.time(),
+                'models': args.models, 'effort': args.effort,
+                'failed': sum(r.get('generation_status') == 'failed' for r in building['rows'])}
+    progress['successful'] = len(done) - progress['failed']
+    experiment._write_json(progress_path, progress)
+
+    def generate(case):
+        if not hasattr(worker_state, 'generator'):
+            worker_state.generator = ReplyGenerator(settings, info['config'], build_clients(settings, info['config']['llm']),
+                prompt_root=info['dir'], pool_path=data / 'fewshot_pool.jsonl')
         trace = CaseTrace(directory, case, {'kind': 'judge_pack', 'dataset': 'development', 'baseline_ref': info['id'], 'data_ref': ptr['data']})
         try:
             with trace.operation('generation', 'baseline', 0, {'forced_reply': True}) as op:
-                generated = generator.generate(case)
+                generated = worker_state.generator.generate(case)
                 op['result'] = generated
             trace.finish('ok')
+        except LLMRefusal as exc:
+            trace.finish('failed')
+            # 拒答不伪装成 AI 回复，也不替换样本；Judge 沿用 SOP §2.4 单题失败口径。
+            return {**case, 'generation_status': 'failed',
+                    'generation_error': {'type': type(exc).__name__, 'message': str(exc)},
+                    'generation_trace_ref': trace.ref}
         except BaseException:
             trace.finish('failed')
             raise
-        building['rows'].append({**case, 'ai_replies': generated['replies'], 'generation_trace_ref': trace.ref})
-        experiment._write_json(path, building)
-        print(f'生成评估包 {len(building["rows"])}/{args.sample}', flush=True)
+        return {**case, 'ai_replies': generated['replies'], 'generation_trace_ref': trace.ref}
+
+    pending = [case for case in selected if case['case_id'] not in done]
+    if args.build_limit:
+        # 小样本先覆盖两种生成器，再续建同一套已锁定样本。
+        pending = [case for pair in zip([c for c in pending if c['chat_type'] == 'group'],
+                    [c for c in pending if c['chat_type'] == 'private']) for case in pair][:args.build_limit]
+    try:
+        for row in completed_map(generate, pending, args.workers):
+            building['rows'].append(row)
+            experiment._write_json(path, building)
+            progress['failed'] += int(row.get('generation_status') == 'failed')
+            progress.update(completed=len(building['rows']),
+                            successful=len(building['rows']) - progress['failed'], updated_at=time.time())
+            experiment._write_json(progress_path, progress)
+            print(f'生成评估包 {len(building["rows"])}/{args.sample}'
+                  f'（有效 {progress["successful"]}，失败 {progress["failed"]}）', flush=True)
+    except BaseException:
+        progress.update(status='stopped', updated_at=time.time())
+        experiment._write_json(progress_path, progress)
+        raise
+    if len(building['rows']) < args.sample:
+        progress.update(status='paused', updated_at=time.time())
+        experiment._write_json(progress_path, progress)
+        print(f'小样本生成完成，尚未冻结全量包：{path}', flush=True)
+        return None
+    indexed = {row['case_id']: row for row in building['rows']}
+    building['rows'] = [indexed[case['case_id']] for case in selected]
     pack = {'pack_id': pack_id, 'c0_gen_version': info['id'], 'data_ref': ptr['data'],
             'created': time.strftime('%Y-%m-%d %H:%M:%S'), 'rows': building['rows'],
             'source_audit': {'source_total': len(pool), 'eligible': len(valid), 'excluded': exclusions,
                              'rule': '对方单条待回复消息 → 本人单条回复；来源逐字段一致；回复间隔不超过 600 秒',
-                             'note': '受限开发子集，用于模型方向筛选；不是全量数据已清洗的声明'},
+                             'note': ('本版本完整开发集；用于开发校准，不是固定验收'
+                                      if args.sample == len(pool) else '受限开发子集，用于模型方向筛选')},
             'sampling': {'seed': args.seed, **counts},
-            'identical_options': sum(r['human_reply'] == r['ai_replies'] for r in building['rows'])}
+            'generation_failures': progress['failed'],
+            'identical_options': sum(r['human_reply'] == r.get('ai_replies') for r in building['rows'])}
     experiment._write_json(directory / 'pack.json', pack)
+    progress.update(status='finished', updated_at=time.time())
+    experiment._write_json(progress_path, progress)
     print(f'冻结评估包 {pack_id}：{len(pack["rows"])} 题；相同文本对 {pack["identical_options"]}', flush=True)
     return pack_id
 
@@ -120,6 +170,8 @@ def main():
     parser.add_argument('--study', default=time.strftime('%Y%m%d-%H%M%S'))
     parser.add_argument('--models', nargs='+', default=['gpt-5.6-terra', 'gpt-5.6-sol'])
     parser.add_argument('--effort', default='high')
+    parser.add_argument('--workers', type=int, default=4, choices=range(1, 17))
+    parser.add_argument('--build-limit', type=int, default=0, help='只构建少量生成样本以先验证链路')
     args = parser.parse_args()
     if args.sample < 4:
         parser.error('--sample 至少 4')
@@ -129,6 +181,8 @@ def main():
     pack_path = versions.PRIVATE / 'judge_eval' / pack_id / 'pack.json'
     if not pack_path.exists():
         pack_id = build_pack(args, args.study)
+    if pack_id is None:
+        return
     results = []
     for model in args.models:
         name = model.removeprefix('gpt-5.6-')
@@ -141,6 +195,7 @@ def main():
             spec = experiment.spec_of(directory)
             # 记录来源包的哈希，说明本次所有候选使用同一份冻结输入。
             spec['pack_sha256'] = sha256_file(pack_path)
+            spec['execution'] = {'workers': args.workers}
             experiment._write_json(directory / 'spec.json', spec)
             (directory / 'traces').mkdir(exist_ok=True)
             for source in (pack_path.parent / 'traces').glob('*.json'):
@@ -149,7 +204,7 @@ def main():
             raise ConfigError('评估包已被改写，拒绝混合结果')
         print(f'开始 {exp_id}', flush=True)
         report.write_run(directory)
-        runner.run_judge_experiment(directory)
+        runner.run_judge_experiment(directory, workers=args.workers)
         state = experiment.state_of(directory)
         results.append({'experiment': exp_id, 'candidate': experiment.spec_of(directory)['candidate_ref'],
                         'feature_model': model, 'effort': args.effort, **state})

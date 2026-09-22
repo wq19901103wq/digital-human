@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.digital_human import config, llm
+from src import config, llm
 
 
 @pytest.fixture
@@ -79,6 +79,20 @@ def test_partial_text_with_truncation_is_failure(settings, monkeypatch):
         {"content": [{"type": "text", "text": '{"replies":['}], "stop_reason": "max_tokens"}))
     with pytest.raises(llm.LLMError, match="截断"):
         llm.ChatClient(settings, {"model": "test"}).chat([])
+
+
+@pytest.mark.parametrize('text', ['您的问题我无法回答。', '{"replies":["拒答"]}'])
+def test_explicit_refusal_is_failure_without_retry(settings, monkeypatch, text):
+    calls = []
+    def urlopen(*args, **kwargs):
+        calls.append(1)
+        return reply({'content': [{'type': 'text', 'text': text}], 'stop_reason': 'refusal'})
+    monkeypatch.setattr(llm.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(llm.time, 'sleep', lambda *_: pytest.fail('refusal must not retry'))
+    with pytest.raises(llm.LLMRefusal, match='stop_reason=refusal') as error:
+        llm.ChatClient(settings, {'model': 'test'}).chat([], json_mode=True)
+    assert len(calls) == 1
+    assert error.value.retryable is False
 
 
 def test_reasoning_exhaustion_is_not_retried_as_network_error(settings, monkeypatch):

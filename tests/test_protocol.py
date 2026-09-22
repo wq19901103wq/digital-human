@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.digital_human.config import dataset_plan, load_settings
-from src.digital_human.iteration import protocol
+from src.config import dataset_plan, load_settings
+from src.iteration import protocol
 
 
 def test_sign_test_perfect_separation():
@@ -68,15 +68,58 @@ def test_decide_dev_merge_at_threshold():
 
 
 def test_decide_dev_below_threshold_observes():
-    settings = load_settings()
-    v = protocol.decide(_metrics(9), "development", _protocol())
+    # 历史实验使用冻结的旧门槛，不随新设置改写结论。
+    v = protocol.decide(_metrics(9), "development", {**_protocol(), "dev_min_net_win_rate": .01})
     assert v["verdict"] == "observe"
+
+
+@pytest.mark.parametrize("net, expected", [(9, "merge_to_iteration_baseline"),
+    (1, "merge_to_iteration_baseline"), (0, "observe"), (-1, "reject")])
+def test_layered_development_requires_positive_net(net, expected):
+    proto = {**_protocol(), "gate_schema": 2}
+    assert protocol.decide(_metrics(net), "development", proto)["verdict"] == expected
 
 
 def test_decide_dev_net_negative_rejects():
     settings = load_settings()
     v = protocol.decide(_metrics(-1), "development", _protocol())
     assert v["verdict"] == "reject"
+
+
+@pytest.mark.parametrize('net,expected', [(1, 'merge_to_iteration_baseline'),
+    (0, 'observe'), (-1, 'reject')])
+def test_zero_development_threshold_still_requires_positive_net(net, expected):
+    proto = {**_protocol(), 'gate_schema': 3, 'dev_min_net_win_rate': 0.,
+             'fixed_entry_min_net_win_rate': .005, 'formal_min_net_win_rate': .005}
+    assert protocol.decide(_metrics(net), 'development', proto)['verdict'] == expected
+    assert protocol.decide(_metrics(1), 'fixed_test', proto)['verdict'] == 'reject'
+
+
+@pytest.mark.parametrize('dataset,pass_verdict', [
+    ('development', 'merge_to_iteration_baseline'), ('fixed_test', 'adopt')])
+@pytest.mark.parametrize('pairs', [999, 1000, 1001])
+def test_configurable_five_per_thousand_boundary(dataset, pass_verdict, pairs):
+    from math import ceil
+    proto = {**_protocol(), 'gate_schema': 3, 'dev_min_net_win_rate': .005,
+             'formal_min_net_win_rate': .005}
+    needed = ceil(pairs * .005)
+    for net in (needed - 1, needed):
+        metrics = {**_metrics(net), 'pairs': pairs, 'attempted': pairs}
+        verdict = protocol.decide(metrics, dataset, proto)
+        assert (verdict['verdict'] == pass_verdict) is (net == needed)
+        if dataset == 'fixed_test' and net == needed:
+            assert '0.5%' in verdict['reason']
+
+
+def test_new_protocol_freezes_configured_thresholds():
+    from src.iteration.experiment import _protocol_snapshot
+    settings = load_settings()
+    snapshot = _protocol_snapshot(settings)
+    assert snapshot['gate_schema'] == 3
+    for key in ('dev_min_net_win_rate', 'fixed_entry_min_net_win_rate', 'formal_min_net_win_rate'):
+        assert snapshot[key] == .005
+    settings['evaluation']['adoption']['dev_min_net_win_rate'] = .1
+    assert snapshot['dev_min_net_win_rate'] == .005
 
 
 def test_decide_formal_requires_both_conditions():

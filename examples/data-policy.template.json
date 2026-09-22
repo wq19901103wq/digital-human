@@ -1,0 +1,14 @@
+{
+  "total": 1000,
+  "train_total": 1200,
+  "acceptance_total": 2000,
+  "seed": 42,
+  "development_start": 1600000000,
+  "acceptance_start": 1700000000,
+  "familiar_weight": 0.8,
+  "group_weight": 0.75,
+  "training_group_weight": 0.5,
+  "heldout_chat_fraction": 0.2,
+  "evaluation_chat_cap": 50,
+  "learning_chat_cap": 125
+}

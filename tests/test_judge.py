@@ -10,7 +10,7 @@ import random as random_module
 
 import pytest
 
-from src.digital_human.judge.judge import Judge
+from src.judge.judge import Judge
 
 CANDIDATE_MARKER = "UNIQUE_CANDIDATE_MARKER_唯一候选标记"
 

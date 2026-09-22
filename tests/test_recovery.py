@@ -1,9 +1,11 @@
 import json
 
 import pytest
+from leakage_support import isolated_legacy_provenance  # noqa: F401
 
-from src.digital_human.config import ConfigError
-from src.digital_human.iteration import experiment, report
+from src.config import ConfigError
+from src.dashboard import report
+from src.iteration import experiment
 
 
 @pytest.fixture
@@ -72,10 +74,11 @@ def test_recovery_requires_successful_same_case_smoke(runs, change):
 
 
 @pytest.mark.parametrize('smoke,expected_calls', [(True, 2), (False, 6)])
+@pytest.mark.usefixtures("isolated_legacy_provenance")
 def test_smoke_checks_both_branches_without_supplemental_calls(tmp_path, monkeypatch, smoke, expected_calls):
-    from src.digital_human import llm
-    from src.digital_human.config import load_settings
-    from src.digital_human.iteration import runner, versions
+    from src import llm
+    from src.config import load_settings
+    from src.iteration import runner, versions
     exp = tmp_path / 'experiments/check'
     exp.mkdir(parents=True)
     data = tmp_path / 'data'

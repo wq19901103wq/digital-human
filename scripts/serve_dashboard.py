@@ -85,7 +85,7 @@ def main() -> None:
         cmd_daemon(args.port)
         return
 
-    from src.digital_human.dashboard.server import serve  # noqa: E402
+    from src.dashboard.server import serve  # noqa: E402
     serve(port=args.port)
 
 

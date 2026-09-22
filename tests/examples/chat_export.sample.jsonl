@@ -1,0 +1,30 @@
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "甲", "is_self": false, "timestamp": 1700000001, "text": "周末打球去吗"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "乙", "is_self": false, "timestamp": 1700000009, "text": "+1 几点"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000020, "text": "下午三点老地方"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "甲", "is_self": false, "timestamp": 1700000031, "text": "ok"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "乙", "is_self": false, "timestamp": 1700000100, "text": "今天手感怎么样啊"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000112, "text": "还行吧 就是有点累"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "甲", "is_self": false, "timestamp": 1700000200, "text": "哈哈哈"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000210, "text": "笑啥"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "乙", "is_self": false, "timestamp": 1700000300, "text": "晚上聚餐来不来"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000315, "text": "来 带我一个"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "甲", "is_self": false, "timestamp": 1700000400, "text": "那家火锅还是烧烤"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000410, "text": "火锅吧 我想吃毛肚了"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000411, "text": "你们随意"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "乙", "is_self": false, "timestamp": 1700000500, "text": "行 那就火锅"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "甲", "is_self": false, "timestamp": 1700000600, "text": "谁先到谁占座"}
+{"chat_id": "sample-group-1", "chat_type": "group", "chat_name": "合成示例群", "sender": "我", "is_self": true, "timestamp": 1700000610, "text": "我可能晚点 你们先点"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001001, "text": "在吗"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001010, "text": "在 咋了"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001020, "text": "帮我带杯咖啡呗"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001030, "text": "行 美式还是拿铁"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001040, "text": "美式 谢谢老板"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001050, "text": "客气啥"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001100, "text": "晚上电影看不看"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001110, "text": "看 啥片"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001120, "text": "新出的那个科幻"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001130, "text": "可以 几点场"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001140, "text": "七点半的"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001150, "text": "那我六点半出门"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "合成好友A", "is_self": false, "timestamp": 1700001200, "text": "门口等我"}
+{"chat_id": "sample-private-1", "chat_type": "private", "chat_name": "合成好友A", "sender": "我", "is_self": true, "timestamp": 1700001210, "text": "好"}
