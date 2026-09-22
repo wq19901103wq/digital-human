@@ -4,6 +4,9 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError, sha256_file
 from src.generator import learned_sources, ranker_report
 from src.generator.fewshot_ranker import action_comparison as comparison, action_crosses, boosting

@@ -4,6 +4,9 @@ import json
 
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError
 from src.generator import learned_selection as selection
 from src.generator import learned_sources

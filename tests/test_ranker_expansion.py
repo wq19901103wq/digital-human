@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import pytest
+pytest.importorskip('torch')  # 可选重依赖
+pytest.importorskip('xgboost')  # 可选重依赖
 from src.bootstrap.history import write_rows
 from src.config import ConfigError, sha256_file
 from src.generator.few_shot import PersonaFewShotRetriever
