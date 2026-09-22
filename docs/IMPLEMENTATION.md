@@ -16,7 +16,7 @@ instances/<实例名>/          # 每个数字人一套（gitignore）
 │   ├── config.json                  #   llm/retriever{enabled}/shots/data_version/persona_sha256
 │   └── persona.md scenarios/        #   自包含快照
 ├── judges/j-XXXX/                   # Judge 版本（创建后只读，候选同样在这里）
-│   ├── config.json                  #   mode=pairwise_llm 或 rpa_corrected_pairwise / llm / 资产指纹
+│   ├── config.json                  #   mode=pairwise_llm 或 corrected_pairwise / llm / 资产指纹
 │   ├── prompt.md                    #   提示词快照（随版本冻结）
 │   └── meta.json                    #   来源（bootstrap / calibration + changed diff）
 ├── judge_eval/pack-XXXX/pack.json   # 冻结校准包（当前生产基线生成的 AI 回复）
@@ -68,12 +68,12 @@ run.py 新建（预检/准入/diff/one-shot 全过才建目录与候选版本）
 
 ## 命令速查
 
-RPA 初始化使用 `scripts/import_wechat.py --source-root <RPA 根目录>`，读取
+外部部署导入使用 `scripts/import_wechat.py --source-root <来源部署根目录>`，读取
 `config/current_judge.json`，拒绝静默套用默认裁判。已有实例先核对：
 `python scripts/import_wechat.py --instance example-agent --judge-only`；加 `--adopt` 后
 补齐数据元信息、创建 Judge 快照并切双指针，生成器和历史实验保持原版本。
 后台“展开裁判配置与来源”可直接查看源配置、规则、参考资料和校正模型。
-`judge/rpa_v1.py` 只保留 RPA 的纯推理定义；迁移时逐定义核对来源指纹，
+`judge/corrected_v1.py` 只保留来源的纯推理定义；迁移时逐定义核对来源指纹，
 来源算法变化时必须更新适配，不能用旧特征定义装载新权重。
 
 ```bash
