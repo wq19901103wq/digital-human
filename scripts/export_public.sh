@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 公开导出：从本仓库生成公开候选树（docs/PUBLIC-RELEASE-PLAN.md §1 白名单的固化实现）。
-# 用法: scripts/export_public.sh <目标目录>
-# 排除项集中在此脚本的 EXCLUDE 规则中，重新导出不会漏删/多删。
+# Public export: build the public candidate tree from this repo.
+# Usage: scripts/export_public.sh <target-dir>
+# Exclusion rules are fixed here so re-exports are consistent.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-DST="${1:?用法: export_public.sh <目标目录>}"
+DST="${1:?usage: export_public.sh <target-dir>}"
 
 mkdir -p "$DST"
 rsync -a --delete \
@@ -14,8 +14,10 @@ rsync -a --delete \
   --include='/prompts/***' \
   --include='/config/***' \
   --include='/examples/***' \
+  --include='/scripts/' \
   --include='/scripts/*.py' \
   --exclude='/scripts/legacy/***' \
+  --include='/docs/' \
   --include='/docs/SOP.md' --include='/docs/IMPLEMENTATION.md' --include='/docs/DATA_CONTRACT.md' \
   --include='/docs/RESULT-CACHE.md' --include='/docs/ASYNC-ITERATION.md' \
   --include='/docs/ARCHITECTURE.md' --include='/docs/DATA_MODEL.md' --include='/docs/DATA_BOUNDARIES.md' \
@@ -27,6 +29,15 @@ rsync -a --delete \
   --exclude='*' \
   "$SRC/" "$DST/"
 
-# 已知需另行处理（见 PUBLIC-RELEASE-PLAN §7）：scripts/legacy 依赖的 12 个测试、
-# AGENTS.md/README/LICENSE/CONTRIBUTING/SECURITY/CHANGELOG 由发布流程在候选树内准备。
-echo "导出完成: $DST（随后运行 scripts/scrub_sensitive.py 与 scripts/check_public.py --history）"
+# Downstream steps (see docs/PUBLIC-RELEASE-PLAN.md):
+#   1) drop tests that import scripts.legacy (listed below)
+#   2) copy public scaffolding (README/LICENSE/CONTRIBUTING/SECURITY/CHANGELOG,
+#      scrub_sensitive.py, check_public.py, config/public_boundary.json)
+#   3) run scrub_sensitive.py, then check_public.py (tree and --history)
+#   4) run the full test suite in the candidate tree
+LEGACY_TESTS="test_dnn_continuation test_guarded_audit_cohorts test_guarded_history_rerun \
+test_history_stage_scheduling test_history_training test_judge_dataset_rerun test_judge_temporal \
+test_learning_material_repair test_lr_dataset_training test_lr_retrain \
+test_pairwise_policy_comparison test_pairwise_tuning"
+echo "exported to $DST"
+echo "legacy-dependent tests to drop: $LEGACY_TESTS"

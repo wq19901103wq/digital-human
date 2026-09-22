@@ -116,10 +116,12 @@ def test_new_protocol_freezes_configured_thresholds():
     settings = load_settings()
     snapshot = _protocol_snapshot(settings)
     assert snapshot['gate_schema'] == 3
-    for key in ('dev_min_net_win_rate', 'fixed_entry_min_net_win_rate', 'formal_min_net_win_rate'):
+    # settings-v6 现行口径：开发晋级为净胜严格大于零（0.0），固定准入/正式采用 ≥ +5/1000
+    assert snapshot['dev_min_net_win_rate'] == 0.0
+    for key in ('fixed_entry_min_net_win_rate', 'formal_min_net_win_rate'):
         assert snapshot[key] == .005
     settings['evaluation']['adoption']['dev_min_net_win_rate'] = .1
-    assert snapshot['dev_min_net_win_rate'] == .005
+    assert snapshot['dev_min_net_win_rate'] == 0.0
 
 
 def test_decide_formal_requires_both_conditions():
