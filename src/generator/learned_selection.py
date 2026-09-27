@@ -9,10 +9,17 @@ from .fewshot_ranker import extraction, crosses, identity_crosses
 from .fewshot_ranker.features import combine, context_local, reply_local
 
 POLICY = 'pairwise_xgb_v1'
+SOURCE_OVERLAP_POLICY = 'exclude_reply_in_context_v1'
 
 
-def recall(retriever, case):
+def validate_source_overlap_policy(policy):
+    require(policy is None or policy == SOURCE_OVERLAP_POLICY,
+            f'Unsupported learned source overlap policy: {policy!r}')
+
+
+def recall(retriever, case, *, source_overlap_policy=None):
     """The training recall routes, without its eight-candidate sampling step."""
+    validate_source_overlap_policy(source_overlap_policy)
     messages = case.get('context', [])
     options = dict(chat_name=str(case.get('chat_name', '')),
         is_group=case.get('chat_type') == 'group', limit=12,
@@ -32,10 +39,23 @@ def recall(retriever, case):
                 candidates[key] = (min(rank, candidates[key][0]), row)
             else:
                 candidates[key] = (rank, row)
-    return [item[1] for _, item in sorted(candidates.items(), key=lambda p: (p[1][0], p[0]))]
+    rows = [item[1] for _, item in sorted(candidates.items(), key=lambda p: (p[1][0], p[0]))]
+    if source_overlap_policy == SOURCE_OVERLAP_POLICY:
+        # Remove the whole example only after both original routes are merged.
+        # Its reply is already visible in the target context; text similarity is
+        # irrelevant, and extra recall would change more than this policy.
+        visible = set(case['context_message_ids'])
+        rows = [row for row in rows if not visible.intersection(row['reply_message_ids'])]
+    return rows
 
 
-def feature_rows(case, rows, refs, values):
+def feature_rows(case, rows, refs, values, *, transform=None):
+    action_expander = None
+    action_policy = (transform or {}).get('reply_action_crosses')
+    if action_policy is not None:
+        from .fewshot_ranker import action_crosses
+        require(action_policy == action_crosses.VERSION, 'Unsupported reply action feature transform')
+        action_expander = action_crosses.expand
     result = []
     for example in rows:
         tk, ck, rk = refs[(case['case_id'], example['id'])]
@@ -45,6 +65,8 @@ def feature_rows(case, rows, refs, values):
             {**values[rk], **reply_local(example)})
         row = crosses.expand(row)
         row['id_cross.chat_id'] = identity_crosses.pair(row, 'target.chat_id', 'example_context.chat_id')
+        if action_expander is not None:
+            row = action_expander(row)
         result.append(row)
     return result
 
@@ -92,6 +114,7 @@ class LearnedSelector:
         tasks, refs = self.tasks(case, rows)
         values = {key: extraction.extract_one(self.cache, key, task, self.client)
                   for key, task in tasks.items()}
-        scores = score_document(self.model, feature_rows(case, rows, refs, values))
+        scores = score_document(self.model, feature_rows(case, rows, refs, values,
+            transform=self.model.get('feature_transform')))
         check()
         return choose(rows, scores, retriever, count=count, budget=budget)

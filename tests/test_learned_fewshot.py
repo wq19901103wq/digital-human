@@ -268,12 +268,22 @@ def test_serving_action_crosses_require_explicit_model_transform(monkeypatch):
 @pytest.mark.parametrize('source_policy', [None, selection.SOURCE_OVERLAP_POLICY])
 def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypatch, approved, workers,
                                                           source_policy):
+    from contextlib import contextmanager
     from types import SimpleNamespace
     from src.iteration.parallel import completed_map
     events = []
+    active = []
+    @contextmanager
+    def lane(output):
+        assert read_json(output / 'features/recall_progress.json')['phase'] == 'waiting_for_memory'
+        active.append(True)
+        try:
+            yield
+        finally:
+            active.pop()
     class Retriever:
         def __init__(self, **kwargs):
-            pass
+            assert active == [True]
         def is_approved(self):
             events.append('history_ready')
             return approved
@@ -286,6 +296,8 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
     monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', Retriever)
     monkeypatch.setattr(learned_gen, 'LearnedSelector', lambda *a: selector)
     monkeypatch.setattr(learned_gen, 'recall', recall)
+    monkeypatch.setattr(learned_gen, 'recall_binding', lambda *a: ('binding', [], []))
+    monkeypatch.setattr(learned_gen.pack_transport, 'history_memory_lane', lane)
     monkeypatch.setattr(learned_gen.experiment, 'spec_of', lambda *a: {'data_ref': 'd-0001'})
     monkeypatch.setattr(versions, 'data_version_dir', lambda *a: tmp_path)
     monkeypatch.setattr(versions, 'generator_dir', lambda *a: tmp_path)
@@ -293,6 +305,7 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
         'config': {'retriever': {'source_overlap_policy': source_policy}}})
     monkeypatch.setattr(learned_gen.datasets, 'rows_for', lambda *a: [{}])
     def extract(*args, **kwargs):
+        assert not active
         assert kwargs['workers'] == workers
         assert sorted(completed_map(lambda x: x, range(50), workers)) == list(range(50))
         events.append('extract')
@@ -312,6 +325,117 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
         list(completed_map(str, [1], 17))
     with pytest.raises(ConfigError, match='concurrency limit'):
         learned_gen.precompute(tmp_path, 'g-test', tmp_path, workers + 1)
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_history_phase_releases_archive_before_and_after_lane(tmp_path, monkeypatch, fail):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    events = []
+    @contextmanager
+    def lane(output):
+        events.append('enter')
+        try:
+            yield
+        finally:
+            events.append('exit')
+    monkeypatch.setattr(learned_gen.pack_transport, 'history_memory_lane', lane)
+    monkeypatch.setattr(learned_gen.history_sources, '_load',
+        SimpleNamespace(cache_clear=lambda: events.append('clear')))
+    monkeypatch.setattr(learned_gen.gc, 'collect', lambda: events.append('gc'))
+    def work():
+        with learned_gen.history_phase(tmp_path):
+            events.append('work')
+            if fail:
+                raise RuntimeError('failed recall')
+    if fail:
+        with pytest.raises(RuntimeError, match='failed recall'):
+            work()
+    else:
+        work()
+    assert events == ['clear', 'gc', 'enter', 'work', 'clear', 'gc', 'exit']
+
+
+@pytest.mark.parametrize('changed', ['source', 'case', 'spec', 'snapshot', 'policy', 'feature', 'code'])
+def test_recall_checkpoint_reuses_exact_inputs_and_invalidates_changes(tmp_path, monkeypatch, changed):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import weakref
+    events, refs = [], []
+    data = tmp_path / 'data'
+    data.mkdir()
+    for name in ('messages.jsonl', 'purposes.json', 'fewshot_pool.jsonl', 'report.json'):
+        (data / name).write_text('{}')
+    code = tmp_path / 'src/recall.py'
+    code.parent.mkdir()
+    code.write_text('original')
+    spec = dict(data_ref='d-test', id='smoke', created='earlier', smoke=True, smoke_limit=2,
+                branch_stage='smoke', record_contract={'case_ids': ['a', 'b']},
+                fingerprint='smoke', data_snapshot={'case_count': 2, 'cases_sha256': 'smoke',
+                                                  'history_policy': 'original'})
+    cases, switches = [{'case_id': 'original'}], {}
+    selector = SimpleNamespace(cache=tmp_path / 'cache', client=None,
+                               proof={'feature_identity': {'model': 'frozen'}})
+    request = {'kind': 'context', 'prompt': 'frozen', 'client': {'model': 'frozen'}}
+    key = learned_gen.history_sources.digest(request)
+    selector.tasks = lambda *args: ({key: request}, {})
+    class Retriever:
+        def __init__(self, **kwargs):
+            events.append('construct')
+            refs.append(weakref.ref(self))
+        def is_approved(self):
+            return True
+    monkeypatch.setattr(learned_gen, 'ROOT', tmp_path)
+    monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', Retriever)
+    monkeypatch.setattr(learned_gen, 'LearnedSelector', lambda *args: selector)
+    monkeypatch.setattr(learned_gen, 'recall', lambda *args, **kwargs: [])
+    monkeypatch.setattr(learned_gen.experiment, 'spec_of', lambda *args: spec)
+    monkeypatch.setattr(learned_gen.datasets, 'rows_for', lambda *args: cases)
+    monkeypatch.setattr(versions, 'data_version_dir', lambda *args: data)
+    monkeypatch.setattr(versions, 'generator_dir', lambda *args: tmp_path)
+    monkeypatch.setattr(versions, 'load_generator', lambda *args: {'config': {'retriever': switches}})
+    monkeypatch.setattr(learned_gen.pack_transport, 'history_memory_lane', lambda *args: nullcontext())
+    monkeypatch.setattr(learned_gen.control, 'policy', lambda: {'max_active_requests': 1})
+    def extract(tasks, *args, **kwargs):
+        assert tasks == {key: request}
+        assert all(ref() is None for ref in refs)
+        events.append('extract')
+    monkeypatch.setattr(learned_gen.extraction, 'run', extract)
+    output = tmp_path / 'output'
+    learned_gen.precompute(tmp_path, 'g-test', output, 1)
+    learned_gen.precompute(tmp_path, 'g-test', output, 1)
+    assert events == ['construct', 'extract', 'extract']
+    # Smoke has a limited record contract, but precompute uses the same full
+    # rows as development. Only stage bookkeeping changes: no second recall.
+    events.clear()
+    spec.update(id='development', created='later', smoke=False, smoke_limit=None,
+                branch_stage='development', record_contract={'case_ids': ['a', 'b', 'c']},
+                fingerprint='development', data_snapshot={'case_count': 1000,
+                    'cases_sha256': 'development', 'history_policy': 'original'})
+    learned_gen.precompute(tmp_path, 'g-test', output, 1)
+    assert events == ['extract']
+    if changed == 'source':
+        (data / 'messages.jsonl').write_text('{"changed": true}')
+    elif changed == 'case':
+        cases[0]['case_id'] = 'changed'
+    elif changed == 'spec':
+        spec['dataset'] = 'different'
+    elif changed == 'snapshot':
+        spec['data_snapshot']['history_policy'] = 'changed'
+    elif changed == 'policy':
+        switches['source_overlap_policy'] = selection.SOURCE_OVERLAP_POLICY
+    elif changed == 'feature':
+        selector.proof['feature_identity'] = {'model': 'changed'}
+    else:
+        code.write_text('changed')
+    learned_gen.precompute(tmp_path, 'g-test', output, 1)
+    assert events == ['extract', 'construct', 'extract']
+    checkpoint = output / 'features/recall_tasks.json'
+    saved = read_json(checkpoint)
+    saved['tasks'][key]['prompt'] = 'tampered'
+    write_json(checkpoint, saved)
+    with pytest.raises(ConfigError, match='checkpoint content changed'):
+        learned_gen.precompute(tmp_path, 'g-test', output, 1)
 
 
 def test_explicit_worker_limit_is_parallel_and_restored():
@@ -394,3 +518,20 @@ def test_workflow_resume_keeps_one_revision_and_versions_ranker(tree, monkeypatc
     assert read_json(tree / 'branches/unrelated/state.json')['rounds'] == []
     with pytest.raises(ConfigError, match='baseline changed'):
         learned_gen.prepare(tmp_path / 'other', **{**args, 'base': first})
+    # A source's production promotion changes its basis, but the existing
+    # model run can still resume the exact candidate frozen by its proposal.
+    output = tmp_path / 'workflow'
+    manifest_bytes = (output / 'manifest.json').read_bytes()
+    write_json(tree / 'branches/source/state.json', {'development': {
+        'candidate_ref': base, 'basis': {**basis, 'production_gen': 'g-old'}}})
+    def forbidden(*args, **kwargs):
+        pytest.fail('Frozen resume must not redeploy the ranker or create a version')
+    monkeypatch.setattr(learned_gen.learned_sources, 'deploy', forbidden)
+    monkeypatch.setattr(versions, 'create_generator_version', forbidden)
+    frozen = dict(candidate=first, base=base, name='learned', data='d-0001')
+    assert learned_gen.prepare(output, **frozen) == first
+    assert (output / 'manifest.json').read_bytes() == manifest_bytes
+    for changes in ({'base': first}, {'candidate': base}, {'name': 'missing'},
+                    {'data': 'd-0002'}, {'stage': 'fixed_test'}):
+        with pytest.raises(ConfigError):
+            learned_gen.prepare(output, **{**frozen, **changes})
