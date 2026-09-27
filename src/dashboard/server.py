@@ -43,11 +43,6 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
         parts = unquote(url.path).strip('/').split('/')
         if parts == ['dashboard', 'index.html']:
             report.write_instance_index(_instances_root(), _instances_root().parent / 'dashboard')
-        instance_page = len(parts) == 3 and parts[0] == 'dashboard' and parts[-1] == 'index.html'
-        if instance_page and (_instances_root() / parts[1]).is_dir():
-            # 实例页随请求重建（与总索引一致），代码升级后不残留旧渲染。
-            report.refresh_dashboard(_instances_root() / parts[1] / 'experiments',
-                                     _instances_root().parent / 'dashboard' / parts[1])
         version_page = len(parts) >= 3 and parts[0] == 'dashboard' and parts[2] == 'versions'
         if version_page:
             self._version_page(parts, parse_qs(url.query))

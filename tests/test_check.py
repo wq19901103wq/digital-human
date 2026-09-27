@@ -27,7 +27,7 @@ def test_failed_check_does_not_hide_other_failures(monkeypatch, capsys, tmp_path
         return 'ok'
     monkeypatch.setattr(check, 'command', command)
     path = tmp_path / 'report.json'
-    assert check.main(['--output', str(path), 'code', '--tests', 'tests/test_check.py']) == 1
+    assert check.main(['--output', str(path), 'code', '--public', '--tests', 'tests/test_check.py']) == 1
     report = json.loads(capsys.readouterr().out)
     assert [r['status'] for r in report['checks']] == ['failed', 'passed', 'passed', 'failed']
     assert len(calls) == 4 and json.loads(path.read_text()) == report
@@ -37,12 +37,25 @@ def test_failed_check_does_not_hide_other_failures(monkeypatch, capsys, tmp_path
     assert path.read_bytes() == before and len(calls) == 4
 
 
-def test_code_default_does_not_run_regression_or_demo(monkeypatch, capsys):
+def test_code_default_does_not_run_public_regression_or_demo(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(check, 'command', lambda argv: calls.append(argv))
     assert check.main(['code', '--staged']) == 0
-    assert len(calls) == 3 and not any('pytest' in c for c in calls)
-    assert '--staged' in calls[0] and '--staged' in calls[2]
+    assert calls == [['scripts/check_rules.py', '--staged'], ['scripts/check_docs.py']]
+
+
+@pytest.mark.parametrize('flags,public_flags', [
+    (['--public'], []),
+    (['--public', '--staged'], ['--staged']),
+    (['--history'], ['--history']),
+    (['--public', '--history'], ['--history']),
+])
+def test_public_checks_are_explicit(monkeypatch, capsys, flags, public_flags):
+    calls = []
+    monkeypatch.setattr(check, 'command', lambda argv: calls.append(argv))
+    assert check.main(['code', *flags]) == 0
+    assert len(calls) == 3
+    assert calls[-1] == ['scripts/check_public.py', *public_flags]
 
 
 def test_offline_check_forbids_each_model_entrypoint():

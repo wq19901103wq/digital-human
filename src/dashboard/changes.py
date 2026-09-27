@@ -6,6 +6,10 @@ from pathlib import Path
 from ..config import sha256_file
 from ..iteration.versions import version_payload
 from ..judge import normalize_mode
+from .read_scope import once
+
+_asset_digest = once(sha256_file)
+_version_payload = once(version_payload)
 
 MODES = {'corrected_pairwise': '大模型初判与抽特征 + 小模型预测与校正',
          'pairwise_llm': '单一大模型配对盲测'}
@@ -43,10 +47,11 @@ def _format(key, value):
     return str(value)
 
 
+@once
 def snapshot_delta(instance: Path, folder: str, before: str, after: str) -> dict:
     """配置、实际提示词和裁判资产对比；数据标记不冒充生成策略改动。"""
     paths = [instance / folder / str(ref) for ref in (before, after)]
-    payloads = [version_payload(path) for path in paths]
+    payloads = [_version_payload(path) for path in paths]
     if any('config' not in p for p in payloads):
         return {'available': False, 'changes': [], 'metadata': [], 'before': before, 'after': after}
     configs = [p['config'] for p in payloads]
@@ -77,7 +82,7 @@ def snapshot_delta(instance: Path, folder: str, before: str, after: str) -> dict
                 return unavailable
             label = {'correction.json': '小模型权重与特征定义', 'profile.json': '裁判规则',
                      'reference.json': '裁判参考资料', 'source_judge.json': '来源配置'}.get(filename, filename)
-            files[label] = sha256_file(target)
+            files[label] = _asset_digest(target)
         assets.append(files)
     for key in sorted(assets[0].keys() | assets[1].keys()):
         old, new = assets[0].get(key), assets[1].get(key)

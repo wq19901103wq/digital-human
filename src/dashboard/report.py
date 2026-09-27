@@ -17,6 +17,7 @@ from ..iteration.progress import is_active
 from ..iteration.storage import atomic_write
 
 from .components import _e, _version_url, _version_link, _pre, _details, _badge, _title, _run_url
+from .read_scope import once, scope
 
 _UI = Path(__file__).resolve().parent
 _LABELS = {
@@ -27,6 +28,7 @@ _LABELS = {
 }
 
 
+@once
 def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
@@ -123,6 +125,7 @@ def _load_run(exp_dir: Path, include_records: bool = True) -> dict:
             'instance_dir': exp_dir.parent.parent}
 
 
+@once
 def _runs(exp_root: Path) -> list[dict]:
     items = [_load_run(p.parent, include_records=False) for p in exp_root.glob('*/spec.json')]
     return sorted(items, key=lambda r: (r['spec'].get('created', ''), r['spec']['id']), reverse=True)
@@ -734,6 +737,7 @@ def _promoted(run: dict, ptr: dict) -> bool:
                ('production_gen', 'iteration_gen', 'production_judge', 'iteration_judge'))
 
 
+@scope
 def _history_html(runs: list) -> str:
     rows = []
     ptr = _json(runs[0]['instance_dir'] / 'pointers.json') if runs else {}
@@ -772,6 +776,7 @@ def _region(name: str, body: str) -> str:
     return f'<div data-live-region="{name}">{body}</div>'
 
 
+@scope
 def dashboard_html(exp_root: Path) -> str:
     """主页 = 当前基线 + 实验记录（含状态筛选）；流程与机制点进实验/版本查看。"""
     runs = _runs(exp_root)
@@ -858,6 +863,8 @@ def _comparison(b: Any, c: Any, judge: bool) -> tuple[str, str]:
     if b is None or c is None:
         return '判定未完成', 'pending'
     if b == c:
+        if judge:
+            return ('双方识别正确', 'both_correct') if b else ('双方识别错误', 'both_wrong')
         return '两版结果一致', 'tie'
     better = bool(c) if judge else not bool(c)
     return (('候选识别更准' if judge else '候选更像真人'), 'win') if better else (('候选识别更差' if judge else '候选更易被识别'), 'loss')
@@ -881,10 +888,15 @@ def _reply(label: str, replies: list | None, css: str = '', result: str = '') ->
 
 
 def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: str = '') -> str:
+    anchor = 'case-' + quote(str(row['case_id']), safe='')
+    links = (f'<span class="case-actions"><a data-case-link href="#{anchor}" '
+             f'aria-label="打开第 {index} 题的直达链接">题目链接</a>'
+             '<button type="button" class="button" data-copy-case-link aria-live="polite">复制链接</button></span>')
     label, key = _case_result(row, judge)
-    tone = {'failed': 'danger', 'loss': 'warning', 'win': 'success'}.get(key, 'neutral')
+    tone = {'failed': 'danger', 'loss': 'warning', 'win': 'success',
+            'both_correct': 'success', 'both_wrong': 'warning'}.get(key, 'neutral')
     # 徽章永远是补验后最终判定；与回复区“初测”脚注并列时容易误读，在徽章后显式标注。
-    flip_note = '<small>（补验后）</small>' if isinstance(row.get('flip_verified'), dict) else ''
+    flip_note = '<small>（补验后）</small>' if row.get('flip_verified') else ''
     context = row.get('context') or []
     preview = str(context[-1].get('text', '')) if context else '展开查看输入、回复和判定'
     kind = {'private': '私聊', 'group': '群聊'}.get(row.get('chat_type'), '裁判评测' if judge else '对话')
@@ -920,7 +932,7 @@ def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: 
     b, c = row.get(keys[0]), row.get(keys[1])
     if judge:
         body += _reply('交给两版裁判识别的 AI 回复', row.get('ai_replies'))
-        body += '<div class="reply-grid">' + _reply('对照裁判', [_identified(b, True)]) + _reply('候选裁判', [_identified(c, True)], 'candidate') + '</div>'
+        body += '<div class="reply-grid">' + _reply('对照裁判 · 初测', [_identified(b, True)]) + _reply('候选裁判 · 初测', [_identified(c, True)], 'candidate') + '</div>'
     else:
         body += '<div class="reply-grid">' + _reply('对照生成器回复', row.get('baseline_replies'), result=_identified(b, False)) + _reply('候选生成器回复', row.get('candidate_replies'), 'candidate', _identified(c, False)) + '</div>'
     flip = row.get('flip_verified')
@@ -931,7 +943,7 @@ def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: 
         verification += '<p>连接检查只验证生成和评分，不做胜负补测，不形成效果结论。</p>'
     elif flip:
         verification += f'<p>初测：{_e(_comparison(b, c, judge)[0])}；最终：{_e(label)}。</p>'
-        if key == 'tie':
+        if key in {'tie', 'both_correct', 'both_wrong'}:
             verification += '<p>补测后两版结果一致，本题不计入确认净胜。</p>'
         final = row if judge else flip
         verification += '<dl><dt>对照最终判定</dt><dd>' + _e(_identified(final.get('baseline_identified_final'), judge)) + '</dd><dt>候选最终判定</dt><dd>' + _e(_identified(final.get('candidate_identified_final'), judge)) + '</dd></dl>'
@@ -946,7 +958,7 @@ def _case_html(row: dict, index: int, judge: bool, raw: list[dict], trace_base: 
     if timing:
         body += '<p class="help">' + ' · '.join(f'{k}：{_e(v)}' for k, v in timing.items()) + '</p>'
     body += _details('查看原始记录与重试历史', _pre(raw))
-    return f'<details class="case" data-item data-case-id="{_e(row["case_id"])}" data-kind="{key}"><summary><span class="case-summary"><span class="case-title">第 {index} 题 · {kind}</span><span class="case-preview">{_e(preview)}</span></span>{_badge(label, tone)}{flip_note}</summary><div class="detail-body">{body}</div></details>'
+    return f'<details class="case" data-item data-case-id="{_e(row["case_id"])}" data-kind="{key}" id="{anchor}"><summary><span class="case-summary"><span class="case-title">第 {index} 题 · {kind}</span><span class="case-preview">{_e(preview)}</span></span>{_badge(label, tone)}{flip_note}{links}</summary><div class="detail-body">{body}</div></details>'
 
 
 def _cases_html(run: dict) -> str:
@@ -981,8 +993,15 @@ def _cases_html(run: dict) -> str:
     if ordinals:
         records.sort(key=lambda row: ordinals.get(str(row['case_id']), len(ordinals) + 1))
     options = [('all', '全部结果'), ('failed', '执行失败'), ('win', '候选更好'), ('loss', '候选更差'), ('tie', '两版一致'), ('pending', '判定未完成')]
+    if judge:
+        options = [('all', '全部结果'), ('failed', '执行失败'),
+                   ('win', '仅候选识别正确'), ('loss', '仅对照识别正确'),
+                   ('both_correct', '双方识别正确'), ('both_wrong', '双方识别错误'),
+                   ('pending', '判定未完成')]
     body = '<section class="panel" id="cases" data-list data-page-size="20"><div class="section-head"><h2>逐题详情<span class="count">' + str(len(records)) + ' 题</span></h2><span class="help">点击每题展开</span></div>'
-    body += '<p class="help">展开每题查看消息角色、来源、实际提示词、模型返回、裁判特征和补测过程。长调用记录点击后加载；历史任务未保存的细节会明确标注。</p>'
+    body += '<p class="help">展开每题查看消息角色、来源、实际提示词、模型返回、裁判特征和补测过程。点击“复制链接”可分享具体题目，打开链接会自动定位并展开。长调用记录点击后加载；历史任务未保存的细节会明确标注。</p>'
+    if judge:
+        body += '<p class="help">识别正确表示裁判正确分辨真人与 AI 回复。筛选和题目标签按最终判定；有补测时采用补测结果，详情保留初测判定。</p>'
     body += _list_controls('搜索聊天内容、回复或 case ID', options)
     for index, row in enumerate(records, 1):
         merged = {**inputs.get(str(row['case_id']), {}), **row}
@@ -1139,6 +1158,7 @@ def _run_overview(run: dict) -> str:
     return hero + nav + baseline + _stage_html(run) + stats + summary
 
 
+@scope
 def _render_run_html(run: dict) -> str:
     spec, state, instance = run['spec'], run['state'], run['instance_dir']
     data = _json(instance / 'data' / str(spec.get('data_ref', '')) / 'manifest.json')
@@ -1148,6 +1168,7 @@ def _render_run_html(run: dict) -> str:
     return _page(_title(spec), body, instance.name, f'/api/live/{quote(instance.name, safe="")}/{quote(spec["id"], safe="")}')
 
 
+@scope
 def live_payload(instance_dir: Path, run_id: str = '', *, cases_revision: str = '', config_revision: str = '') -> dict:
     """仅返回页面所需内容；固定轮从不读取逐题明细。"""
     if run_id:

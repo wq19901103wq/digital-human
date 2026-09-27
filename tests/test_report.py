@@ -124,6 +124,53 @@ def test_fixed_answers_never_enter_html_even_in_collapsed_sections(tmp_path):
     assert 'cases.jsonl' not in page
 
 
+@pytest.mark.parametrize('baseline,candidate,key,label', [
+    (True, True, 'both_correct', '双方识别正确'),
+    (False, False, 'both_wrong', '双方识别错误'),
+    (False, True, 'win', '候选识别更准'),
+    (True, False, 'loss', '候选识别更差'),
+    (None, False, 'pending', '判定未完成'),
+])
+def test_judge_case_filters_distinguish_correct_and_wrong(tmp_path, baseline, candidate, key, label):
+    exp, run = _run(tmp_path, kind='judge_eval', records=[{
+        'case_id': 'judge-case', 'status': 'ok',
+        'baseline_correct': baseline, 'candidate_correct': candidate}])
+    page = report._cases_html(run)
+    assert f'data-kind="{key}"' in page and label in page
+    for value, text in [('both_correct', '双方识别正确'), ('both_wrong', '双方识别错误'),
+                        ('win', '仅候选识别正确'), ('loss', '仅对照识别正确')]:
+        assert f'<option value="{value}">{text}</option>' in page
+    assert '<option value="tie">' not in page
+    assert report.live_payload(exp.parent.parent, exp.name)['regions']['cases'] == page
+
+
+@pytest.mark.parametrize('final,key,label', [
+    (True, 'both_correct', '双方识别正确'),
+    (False, 'both_wrong', '双方识别错误'),
+    (None, 'pending', '判定未完成'),
+])
+def test_judge_case_filters_use_final_votes_without_inventing_missing_results(tmp_path, final, key, label):
+    exp, run = _run(tmp_path, kind='judge_eval', records=[{
+        'case_id': 'judge-case', 'status': 'ok',
+        'baseline_correct': False, 'candidate_correct': True, 'flip_verified': True,
+        'baseline_identified_final': final, 'candidate_identified_final': final}])
+    original = (exp / 'cases.jsonl').read_bytes()
+    page = report._cases_html(run)
+    assert f'data-kind="{key}"' in page
+    assert f'初测：候选识别更准；最终：{label}' in page
+    assert '（补验后）' in page and '对照裁判 · 初测' in page
+    assert ('本题不计入确认净胜' in page) is (final is not None)
+    assert original == (exp / 'cases.jsonl').read_bytes()
+
+
+def test_failed_judge_case_is_not_classified_as_both_wrong(tmp_path):
+    _, run = _run(tmp_path, kind='judge_eval', records=[{
+        'case_id': 'failed', 'status': 'failed',
+        'baseline_correct': False, 'candidate_correct': False}])
+    page = report._cases_html(run)
+    assert 'data-kind="failed"' in page and 'data-kind="both_wrong"' not in page
+
+
 def test_dashboard_reads_its_own_instance_and_shows_no_fake_adoption(tmp_path):
     exp, run = _run(tmp_path)
     target = tmp_path / 'dashboard/demo'

@@ -174,6 +174,6 @@ def _resources(instance):
     for path in sorted((instance / 'acceptance').glob('*/manifest.json')):
         manifest = _read(path)
         ledger = _read(path.parent / 'ledger.json')
-        total, used = len(manifest.get('batches', [])), len(ledger.get('claims', {}))
-        rows.append(f"{path.parent.name} 固定验收批次：已消耗 {used} / {total}，剩余 {total - used}")
+        total, bindings = len(manifest.get('batches', [])), len(ledger.get('claims', {}))
+        rows.append(f"{path.parent.name} 固定验收：{total} 个冻结批次，{bindings} 项实验绑定；题目可跨轮次复用")
     return '<h3>资源与验收批次</h3>' + ''.join(f'<p>{report._e(row)}</p>' for row in rows) if rows else ''

@@ -56,9 +56,11 @@ def check_code(args, report):
     history = ['--history'] if args.history else []
     # Keep one implementation of every rule; aggregate failures instead of hiding
     # all checks after the first failure. Experiment checks never run this suite.
-    for name, argv in [('rules', ['scripts/check_rules.py', *staged]),
-                       ('docs', ['scripts/check_docs.py']),
-                       ('public', ['scripts/check_public.py', *staged, *history])]:
+    checks = [('rules', ['scripts/check_rules.py', *staged]),
+              ('docs', ['scripts/check_docs.py'])]
+    if args.public or args.history:
+        checks.append(('public', ['scripts/check_public.py', *staged, *history]))
+    for name, argv in checks:
         report.run(name, lambda argv=argv: command(argv))
     if args.full or args.tests:
         report.run('regression', lambda: command(['-m', 'pytest', '-q', '-p', 'no:cacheprovider',
@@ -197,16 +199,30 @@ def check_materials(args, report):
             raise ConfigError('学习来源与新版开发用途冲突；详见 material_compatibility.summary')
         return '来源记录未见冲突；不替代模型重建和正式实验保护'
     report.run('material_source_compatibility', inspect)
+    if args.reconstruct:
+        from src.iteration import gbdt_evidence, learning_guard, pack_transport, runtime
+        def reconstruct():
+            with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
+                return learning_guard.require_materials(args.data,
+                    [versions.judge_dir(args.judge)['dir'], versions.generator_dir(args.generator)])
+        report.run('material_reconstruction', reconstruct)
+
+
+def check_dashboard(args, report):
+    from src.dashboard.diagnostics import inspect
+    from src.iteration import versions
+    report.run('dashboard_render', lambda: inspect(versions.PRIVATE))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', help='可选 JSON 报告路径（不可覆盖既有文件）')
     sub = parser.add_subparsers(dest='mode', required=True)
-    code = sub.add_parser('code', help='改框架后：规则、文档、公开边界及所选回归')
+    code = sub.add_parser('code', help='改框架后：规则、文档及所选回归；公开发布检查按需启用')
     scope = code.add_mutually_exclusive_group()
     scope.add_argument('--staged', action='store_true')
-    scope.add_argument('--history', action='store_true')
+    scope.add_argument('--history', action='store_true', help='显式检查公开发布边界及 Git 历史')
+    code.add_argument('--public', action='store_true', help='公开发布时检查导出边界')
     tests = code.add_mutually_exclusive_group()
     tests.add_argument('--tests', nargs='+', help='相关测试文件；省略不运行 pytest')
     tests.add_argument('--full', action='store_true', help='运行全部离线回归')
@@ -233,6 +249,10 @@ def main(argv=None):
     materials.add_argument('--data', required=True)
     materials.add_argument('--judge', required=True)
     materials.add_argument('--generator', required=True)
+    materials.add_argument('--reconstruct', action='store_true',
+                           help='同时使用正式运行器的保护重建材料；无模型请求')
+    dashboard = sub.add_parser('dashboard', help='只读分析首页及实时接口渲染耗时、体积与调用热点')
+    dashboard.add_argument('--instance', required=True)
     args = parser.parse_args(argv)
     if args.mode == 'experiment' and args.gate == 'fixed-entry' and not args.exp:
         parser.error('--gate fixed-entry 需要 --exp 正式开发实验 ID')
@@ -250,7 +270,7 @@ def main(argv=None):
             before = versions.POINTERS_PATH.read_bytes()
             with offline():
                 {'judge': check_judge, 'experiment': check_experiment, 'data': check_data,
-                 'materials': check_materials}[args.mode](args, report)
+                 'materials': check_materials, 'dashboard': check_dashboard}[args.mode](args, report)
         except Exception as exc:
             report.failure('validation_setup', exc)
         finally:

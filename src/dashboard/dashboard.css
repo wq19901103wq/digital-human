@@ -10,6 +10,14 @@ details{border:1px solid var(--line);border-radius:8px;background:#fff;margin:12
 @media(max-width:900px){.overview-grid{grid-template-columns:1fr}.rate-grid{gap:8px}.rate-grid .stat{padding:10px}.rate-grid .stat-value{font-size:23px}}
 @media(max-width:380px){.rate-grid{grid-template-columns:1fr}.live-bar{align-items:flex-start}}
 /* 每题的调用实录按需展开，完整提示词在区域内滚动。 */
+.case { scroll-margin-top: 20px; }
+.case:target { border-color: var(--accent); box-shadow: 0 0 0 2px #17645a22; }
+.case-actions { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; font-size: 12px; }
+.case-actions .button { padding: 5px 8px; font-size: 12px; cursor: pointer; }
+@media(max-width:520px) {
+  .case > summary { flex-wrap: wrap; }
+  .case-actions { flex-basis: 100%; justify-content: flex-end; }
+}
 .trace-loader { border-left: 3px solid #498179; margin: 18px 0; }
 .trace-loader > summary { color: #27675d; font-weight: 650; }
 .trace-loader pre { max-height: 440px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
