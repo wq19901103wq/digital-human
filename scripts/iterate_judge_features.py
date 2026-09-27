@@ -27,36 +27,44 @@ from src.tracing import CaseTrace  # noqa: E402
 
 
 def clean_cases(pool, messages):
-    """仅纳入一次对方发言后的一次本人回复，避开当前数据与 unread 的边界缺陷。"""
+    """来源客观核验（评审人口口径 2026-09-23：连续发言、多条回复不排除）。
+
+    Owner 裁定正式评测包含连续发言与多条回复——这正是“把别人的话当成自己的”
+    问题的典型对话形态；故此处只保留可客观判定的核验，不做行为形状筛选：
+    - 可回复边界：上文末条必须是对方消息；
+    - 来源逐字段一致：上文必须还原为源记录的连续切片；
+    - 真人回复归属：清单标注的每条回复必须是源记录中紧接着的连续本人消息；
+    - 回复间隔：首条真人回复距上条消息 0–600 秒。
+    """
     chats = defaultdict(list)
     for message in messages:
         chats[message['chat_id']].append(message)
     valid, excluded = [], Counter()
     for case in pool:
         context = case.get('context') or []
+        reply = case.get('human_reply') or []
         if not context or context[-1].get('is_self') is not False:
             excluded['self_boundary'] += 1
+            continue
+        if not reply:
+            excluded['source_mismatch'] += 1
             continue
         chat, _, index = case['source_message_id'].rpartition(':')
         index = int(index)
         source = chats.get(chat, [])
-        if index < len(context) or index >= len(source):
+        if index < len(context) or index + len(reply) > len(source):
             excluded['source_missing'] += 1
             continue
         original = source[index - len(context):index]
-        if (not source[index]['is_self'] or [source[index]['text']] != case['human_reply']
+        burst = source[index:index + len(reply)]
+        if (not all(m['is_self'] for m in burst)
+                or [m['text'] for m in burst] != list(reply)
                 or [(m['sender'], m['text'], m['is_self'], m['timestamp']) for m in original]
                 != [(m['sender'], m['text'], m['is_self'], m['timestamp']) for m in context]):
             excluded['source_mismatch'] += 1
             continue
         if not 0 <= source[index]['timestamp'] - source[index - 1]['timestamp'] <= 600:
             excluded['late_reply'] += 1
-            continue
-        if index + 1 < len(source) and source[index + 1]['is_self']:
-            excluded['consecutive_self_reply'] += 1
-            continue
-        if len(context) > 1 and context[-2].get('is_self') is not True:
-            excluded['multiple_incoming'] += 1
             continue
         valid.append(case)
     return valid, dict(excluded)
@@ -148,7 +156,8 @@ def build_pack(args, study):
     pack = {'pack_id': pack_id, 'c0_gen_version': info['id'], 'data_ref': ptr['data'],
             'created': time.strftime('%Y-%m-%d %H:%M:%S'), 'rows': building['rows'],
             'source_audit': {'source_total': len(pool), 'eligible': len(valid), 'excluded': exclusions,
-                             'rule': '对方单条待回复消息 → 本人单条回复；来源逐字段一致；回复间隔不超过 600 秒',
+                             'rule': ('可回复边界（末条非本人）；来源逐字段一致；真人回复为源记录紧接着的连续本人消息；'
+                                      '回复间隔 0–600 秒；连续发言与多条回复不排除（2026-09-23 Owner 裁定评审人口口径）'),
                              'note': ('本版本完整开发集；用于开发校准，不是固定验收'
                                       if args.sample == len(pool) else '受限开发子集，用于模型方向筛选')},
             'sampling': {'seed': args.seed, **counts},
@@ -172,6 +181,7 @@ def main():
     parser.add_argument('--effort', default='high')
     parser.add_argument('--workers', type=int, default=4, choices=range(1, 17))
     parser.add_argument('--build-limit', type=int, default=0, help='只构建少量生成样本以先验证链路')
+    parser.add_argument('--build-only', action='store_true', help='只构建并冻结评估包，不创建对照实验')
     args = parser.parse_args()
     if args.sample < 4:
         parser.error('--sample 至少 4')
@@ -182,6 +192,9 @@ def main():
     if not pack_path.exists():
         pack_id = build_pack(args, args.study)
     if pack_id is None:
+        return
+    if args.build_only:
+        print(f'--build-only：评估包 {pack_id} 已冻结，不创建对照实验', flush=True)
         return
     results = []
     for model in args.models:

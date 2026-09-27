@@ -30,6 +30,11 @@ AI 回复无需重生成；只改特征模型时，输入相同的初判仍可�
 不同 Judge 配置仍按原机制各自随机换位，因此改配置后可能得到不同 A/B 顺序，
 这时对应提示词确实不同，需要计算。没有为提高命中率而改变盲测抽样规则。
 
+LR/GBDT 评测包仅更换 `generation_trace_ref` 来源定位时，沿用同输入、同特征客户端、
+同分区/轮次/采样批次的既有盲序，再按完整请求复用特征。已分配的盲序不覆盖；
+题目、上文、真人或生成回复等实际输入变化不适用。这种来源记录更新不代表新的 data
+版本；数据内容改变仍须创建新版本。
+
 ## 缓存键与失效
 
 每个键包含：缓存格式版本、层级、该层真实输入/依赖、数据分区、题目 ID、轮次、
@@ -44,7 +49,7 @@ AI 回复无需重生成；只改特征模型时，输入相同的初判仍可�
 - 实验 ID、baseline/candidate 角色、版本别名不进入开发集计算身份；它们存入来源。
   这样 A 实验的候选推全后成为 B 实验的基线，相同计算仍能命中。
 - 不跨实例共享；固定集及未知分区还按实验 ID 隔离。缓存不绕过准入、样本冻结、
-  one-shot 或推全检查。
+  数据隔离或推全检查。固定题可跨轮次复用，同条件结果优先走缓存。
 - 不做语义相似缓存；改一个真正影响输入的字段也要重新查键。
 
 模型别名背后的服务端版本无法仅凭字符串自动识别。已知远端升级时，可在新任务中
@@ -116,7 +121,12 @@ python scripts/cache_results.py --instance example-agent history --experiment EX
 python scripts/cache_results.py --instance example-agent history --data-ref d-0003 --version j-0005 --limit 20
 python scripts/cache_results.py --instance example-agent entries --layer llm_request --model MODEL_ID
 python scripts/cache_results.py --instance example-agent get FULL_CACHE_KEY
+python scripts/cache_results.py --instance example-agent reuse-blind-orders --experiment EXP_ID
 ```
+
+`reuse-blind-orders` 为重建包补齐来源定位兼容的盲序缓存键，供已加载旧代码的运行中
+进程直接读取；核对冻结包后只填缺项，不覆盖已分配顺序，不调用模型。返回的 `reused`
+是新增缓存键数（可能包含不同客户端和轮次），不是新增评测题数。
 
 `history --version` 匹配实验绑定的任意版本（基线/候选/裁判等），不是只筛该版本
 亲自产出的那一侧；具体看返回的 branch、kind 和 versions。`entries` 也支持
