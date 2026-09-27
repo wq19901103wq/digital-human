@@ -1,9 +1,10 @@
-"""版本与指针（SOP §1/§6）：四种对象，版本即目录，创建后只读，晋升只切指针。
+"""版本与指针（SOP §1/§6）：版本即目录，创建后只读，晋升只切指针。
 
 对象：
 - data/<d-XXXX>/      数据版本：切分结果、池、人格工作区、manifest（冻结）
 - generators/<g-XXXX>/ 生成器版本：行为配置 + persona/场景自包含快照（不可变）
 - judges/<j-XXXX>/     Judge 版本：判别配置 + 模型 + meta（训练来源）
+- share/<s-XXXX>/      共用背景资料版本：Gen/Judge 各自绑定，不随全局指针漂移
 - experiments/<e-…>/  实验：见 experiment.py（唯一执行状态源）
 
 指针文件含五个版本指针及分支采用凭证；创建/晋升在实例锁内校验并原子写入。
@@ -163,6 +164,8 @@ def current_data_version() -> Path:
 # ---------- 生成器版本 ----------
 
 def generator_behavior(config: dict, source: Path) -> str:
+    from .shares import validate_binding
+    validate_binding(config)
     clean = {k: v for k, v in config.items() if k not in
              {'data_version', 'persona_sha256', 'behavior_sha256'}}
     files = [source / 'persona.md', source / 'learning.json', *sorted((source / 'scenarios').rglob('*')),
@@ -233,6 +236,8 @@ def generator_dir(gid: str) -> Path:
     d = GEN_ROOT / gid
     if not (d / "config.json").exists():
         raise ConfigError(f"生成器版本不存在: {d}")
+    from .shares import validate_binding
+    validate_binding(read_json(d / 'config.json'))
     return d
 
 
@@ -264,6 +269,8 @@ def create_judge_version(
         [p.name for p in root.iterdir()] if root.exists() else [], "j"
     )
     behavior_cfg = dict(behavior_cfg)
+    from .shares import validate_binding
+    validate_binding(behavior_cfg)
     if assets is None and source_dir is not None:
         assets = {name: (source_dir / name).read_bytes()
                   for name in ["prompt.md", *behavior_cfg.get("assets", {})]}
@@ -298,10 +305,13 @@ def judge_dir(jid: str) -> dict[str, Any]:
     d = JUDGE_ROOT / jid
     if not (d / "config.json").exists():
         raise ConfigError(f"Judge 版本不存在: {d}")
+    config = read_json(d / 'config.json')
+    from .shares import validate_binding
+    validate_binding(config)
     return {
         "id": jid,
         "dir": d,
-        "config": read_json(d / "config.json"),
+        "config": config,
         "meta": read_json(d / "meta.json"),
     }
 
@@ -318,6 +328,10 @@ def version_payload(version_dir: Path) -> dict[str, Any]:
     cfg = version_dir / "config.json"
     if cfg.exists():  # 数据版本工作区无 config.json，容忍
         payload["config"] = read_json(cfg)
+        from .shares import validate_binding
+        # Dashboard reads multiple instances concurrently, without switching
+        # the process-wide runtime instance. Resolve Share beside this version.
+        validate_binding(payload['config'], instance=version_dir.parent.parent)
     from ..config import sha256_file
     persona = version_dir / "persona.md"
     if persona.exists():
