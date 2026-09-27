@@ -47,13 +47,13 @@ timeout_seconds、temperature、max_tokens 由冻结模型配置控制；重试�
 ## 实验状态机
 
 ```
-run.py 新建（预检/准入/diff/one-shot 全过才建目录与候选版本）
+run.py 新建（预检/准入/diff 通过后建目录与候选版本，复用同条件有效结果）
   → running（cases.jsonl 追加写；中断后 run.py --exp <id> 续，成功题跳过）
   → finish（唯一入口；experiment_incomplete 保持 running，恢复续跑；
      恢复只跳过 status=ok 的题，failed 题重试）
 ```
 - 准入：非冒烟时构成 == settings 声明；池 ≥ 5000 条。
-- one-shot：fixed 实验按 candidate_fingerprint 查历史实验。
+- 固定题可跨实验复用：按冻结数据、候选、对照和评分条件匹配历史结果，不按候选指纹禁止后续比较。
 - 失败：单题异常 → failed 行；失败率 = 最终状态 failed / 全量题；每题取最后一行，
   retries = 行数 − 题数。
 - 产物唯一事实：spec（含 protocol 快照：flip 轮数/门槛/失败率上限/force_reply，

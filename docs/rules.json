@@ -2,6 +2,13 @@
   "schema": 1,
   "rules": [
     {
+      "id": "dashboard-request-read-scope",
+      "rule": "首页请求只渲染一次，不写静态副本；同次渲染复用实验列表、评估包和版本资产读取，缓存不跨请求或线程，下一次请求可见记录及资产变化。",
+      "enforcement": "code",
+      "code": ["src/dashboard/server.py", "src/dashboard/read_scope.py::scope", "src/dashboard/read_scope.py::once"],
+      "tests": ["tests/test_dashboard_performance.py::test_history_reads_each_spec_once_and_refreshes_changed_records", "tests/test_dashboard_performance.py::test_http_home_renders_once_without_writing_static_reports", "tests/test_dashboard_performance.py::test_shared_packs_and_assets_read_once_but_changes_are_not_hidden", "tests/test_dashboard_performance.py::test_read_scopes_are_concurrent_and_exceptions_do_not_leak_cached_values"]
+    },
+    {
       "id": "generator-case-concurrency",
       "rule": "生成器与 Judge 执行器均使用传入的 1–16 题并发；每线程独立生成及评分组件，完整历史索引在冻结输入保护下每进程仅加载一次；每题独立实录和补验轮次，主线程写入成功断点；续跑先核验冻结输入，仅跳过成功题。",
       "enforcement": "code",
@@ -249,14 +256,14 @@
     },
     {
       "id": "fixed-acceptance",
-      "rule": "固定批次先封存、分配即消耗、不可退回；采用需直接比较和冻结阈值",
+      "rule": "固定题可跨实验复用、实验绑定不可改写；采用需直接比较和冻结阈值",
       "enforcement": "code",
       "code": [
         "src/iteration/acceptance.py::claim",
         "src/iteration/gates.py::require_fixed_entry"
       ],
       "tests": [
-        "tests/test_runtime_controls.py::test_batches_are_unique_bound_and_not_refunded",
+        "tests/test_runtime_controls.py::test_fixed_batches_are_reusable_with_immutable_bindings",
         "tests/test_protocol.py::test_decide_formal_requires_both_conditions"
       ]
     },

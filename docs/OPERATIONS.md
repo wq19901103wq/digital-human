@@ -212,6 +212,10 @@ few-shot 默认仍使用规则召回。版本配置可显式设置 `retriever.re
 
 `python scripts/iterate_branches.py --instance demo limit --name BRANCH --stage development` 持久限制该分支只做开发比较。有收益的开发版仍自动保留，可作为同分支下一提案的起点；不会自动创建固定轮或改生产指针。限制不会中断已在运行的任务。
 
+之后将上限改为 `--stage fixed_test`，会从该分支已通过的开发结果接续，仍按原协议检查固定准入，不重跑开发题。示例排序候选可通过上述 `evaluate_learned_fewshot.py start --stage fixed_test` 单独接续，不启动其他历史分支。
+
+已采用的开发结果不会重复晋级。读取已完成的开发证据时，执行代码可按原实验冻结的 runtime 核对；模型、提示词、数据、学习来源和确认票仍须一致。该兼容仅用于历史证据，不允许变更执行代码后续跑旧实验，也不修改或补签旧记录。
+
 `run --timeout-seconds 180` 或 `worker --kind experiment --timeout-seconds 180` 可提高传输等待下限。每次启动记录操作凭证，仍运行原代码快照，保留请求身份、模型配置和成功断点；等待上限更高的客户端保持原值。
 
 ## 已保存的 GBDT 判别器
@@ -245,7 +249,7 @@ python scripts/iterate_branches.py --instance demo cancel --kind training --job 
 python scripts/iterate_branches.py --instance demo retry --kind training --job study-a
 ```
 
-`kind` 可以是 `training`、`pack` 或 `experiment`。重试只重置调度重试额度和取消标记，不改样本、规格、已成功断点或已消耗验收批次；之后运行调度器，由它选择原代码快照。直接创建的回复包和实验也可以通过这个重试入口交给调度器。
+`kind` 可以是 `training`、`pack` 或 `experiment`。重试只重置调度重试额度和取消标记，不改样本、规格、已成功断点或固定题绑定；固定题可重复使用，不存在已消耗批次。之后运行调度器，由它选择原代码快照。直接创建的回复包和实验也可以通过这个重试入口交给调度器。
 
 | 状态或原因 | 处理 |
 | --- | --- |
@@ -255,7 +259,7 @@ python scripts/iterate_branches.py --instance demo retry --kind training --job s
 | `legacy_runtime_not_frozen` | 使用旧执行器处理旧任务，或创建新任务 |
 | `request_budget_exhausted`、`cost_budget_exhausted` | 检查实例额度和已消耗记录，调整后显式 retry |
 | `deadline_reached`、`cancelled` | 按需要调整截止时间或解除取消，再 retry |
-| `acceptance_exhausted` | 补充新的封存数据，已使用批次不能回收 |
+| 历史 `acceptance_exhausted` | 旧版限制已取消；沿用原固定题恢复任务，不因此取新题或升级 data |
 | `conflict`、`blocked`、`baseline_review` | 检查候选、当前基线及来源条件，由人决定下一方案 |
 
 资源策略参考 [额度模板](../examples/resource-policy.template.json)。失败请求仍消耗额度；缓存命中不新增传输调用，但仍检查取消和截止时间。成本单位是保守预留，不是服务商实付账单。取消的实际生效时间受在途外部调用影响；运行中的调度器可以停止自己持有且身份匹配的任务进程组。
