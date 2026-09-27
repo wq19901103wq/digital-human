@@ -7,6 +7,8 @@ joblib>=1.3         # 模型持久化
 pytest>=8.0         # 测试
 # xgboost>=2.0      # 可选：Judge 小模型另一种选型
 # torch>=2.2,<3    # 可选：全离散 embedding DNN；权重绑定具体运行版本
+# onnxruntime>=1.17,<2  # 可选：Judge search_memory 的本地 BGE 编码器
+# tokenizers>=0.15,<1   # 可选：BGE tokenizer.json，配合 onnxruntime
 
 numpy>=1.24
 scipy>=1.10

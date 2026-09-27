@@ -5,6 +5,7 @@ import ast
 import hashlib
 import json
 import random
+import re
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -18,6 +19,14 @@ from . import corrected_v1 as runtime
 
 MODE = "corrected_pairwise"
 RUNTIME_PATH = Path(runtime.__file__)
+
+# 上下文渲染风格（config['context_render']）：
+# - legacy：历史冻结渲染，字节保持不变，旧版本与特征重放的一致性依赖它；
+# - speaker_roster_v1：代码固定发言人编号（P1=本人，其余按出现顺序），
+#   并在渲染前解析行首“[引用 名字：…”的引用发言人，身份事实不再靠模型从昵称猜测。
+CONTEXT_RENDER_LEGACY = 'legacy'
+CONTEXT_RENDER_SPEAKER_ROSTER = 'speaker_roster_v1'
+_QUOTE_LEAD = re.compile(r'^\[引用\s*([^：:\]]{1,40}?)\s*[：:]')
 
 
 def _json(path: Path):
@@ -132,15 +141,60 @@ class CodexJudgeClient:
                 return raw
 
 
-def blind_case(case: dict, reply_a: list[str], reply_b: list[str]) -> tuple[dict, dict]:
-    """统一消息转来源中立时间线；角色和时间必须来自导出记录。"""
+def _speaker_roster_ids(messages: list[dict]) -> dict[tuple, str]:
+    """代码固定发言人编号：P1=本人（is_self，与消息顺序无关），其余按出现顺序 P2、P3…。
+    编号只依据导出记录中的 sender/is_self，不依赖昵称唯一性或模型推断。"""
+    ids = {("self",): "P1"}
+    for message in messages:
+        if message["is_self"]:
+            continue
+        key = ("other", str(message.get("sender") or "?"))
+        if key not in ids:
+            ids[key] = f"P{len(ids) + 1}"
+    return ids
+
+
+def _resolve_quote_lead(text: str, name_to_pid: dict[str, str]) -> str:
+    """行首“[引用 名字：…”中的名字能对应名册时，改写为“[引用 Pk（名字）：…”；
+    匹配不到保持原文，不猜测。"""
+    match = _QUOTE_LEAD.match(text)
+    if not match:
+        return text
+    name = match.group(1).strip()
+    pid = name_to_pid.get(name)
+    if pid is None:
+        return text
+    return text[:match.start(1)] + f"{pid}（{name}）" + text[match.end(1):]
+
+
+def _roster_fragment(ids: dict[tuple, str], self_name: str) -> str:
+    labels = [f"P1=本人（{self_name}）"]
+    labels += [f"{pid}={key[1]}" for key, pid in ids.items() if key[0] == "other"]
+    return (
+        "<speaker_roster>\n"
+        "发言人名册（编号由导出记录固定；message 的 role=\"self\" 均为 P1=本人，与出现顺序无关）：\n"
+        + "；".join(labels) + "\n"
+        "事实：选项 A 与选项 B 都是由本人（P1）发送的候选回复，不是替最后发言的其他人续写。\n"
+        "每条 message 行首编号即发言人；行首“[引用 Pk（名字）：…”的引用发言人同样由记录解析。\n"
+        "</speaker_roster>")
+
+
+def blind_case(case: dict, reply_a: list[str], reply_b: list[str],
+               config: dict | None = None) -> tuple[dict, dict]:
+    """统一消息转来源中立时间线；角色和时间必须来自导出记录。
+    config['context_render']='speaker_roster_v1' 时附带代码固定的发言人名册与引用解析。"""
     messages = case.get("context") or []
     if not messages or case.get("chat_type") not in {"private", "group"}:
         raise ConfigError("来源裁判 需要聊天类型和完整消息上下文")
     if any(not isinstance(m.get("is_self"), bool) or not m.get("timestamp") for m in messages):
         raise ConfigError("旧数据缺少 is_self/timestamp；请先用迁移脚本补齐裁判上下文元数据")
+    roster = (config or {}).get("context_render", CONTEXT_RENDER_LEGACY) == CONTEXT_RENDER_SPEAKER_ROSTER
+    ids = _speaker_roster_ids(messages) if roster else {}
+    self_name = next((str(m["sender"]) for m in messages if m["is_self"]), "本人")
+    name_to_pid = {key[1]: pid for key, pid in ids.items() if key[0] == "other"}
+    name_to_pid.setdefault(self_name, "P1")
     boundary = max((i for i, m in enumerate(messages) if m["is_self"]), default=-1)
-    fragments = []
+    fragments = [_roster_fragment(ids, self_name)] if roster else []
     for tag, rows in [("conversation_history", messages[:boundary + 1]),
                       ("messages_to_reply", messages[boundary + 1:])]:
         if not rows:
@@ -152,8 +206,14 @@ def blind_case(case: dict, reply_a: list[str], reply_b: list[str]) -> tuple[dict
                 seconds /= 1000
             stamp = datetime.fromtimestamp(seconds, ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
             node = ET.Element("message", role="self" if message["is_self"] else "other", type="text")
-            sender = "我" if message["is_self"] else message["sender"]
-            node.text = f'{sender}（{stamp}）：{message["text"]}'
+            text = str(message["text"])
+            if roster:
+                pid = ids[("self",)] if message["is_self"] else ids[("other", str(message.get("sender") or "?"))]
+                sender = f"{pid} {message['sender']}"
+                text = _resolve_quote_lead(text, name_to_pid)
+            else:
+                sender = "我" if message["is_self"] else message["sender"]
+            node.text = f'{sender}（{stamp}）：{text}'
             rendered.append(ET.tostring(node, encoding="unicode", short_empty_elements=False))
         fragments.append(f"<{tag}>\n" + "\n".join(rendered) + f"\n</{tag}>")
     blind = {"relationship": case["chat_type"], "context_original": fragments,
@@ -168,6 +228,8 @@ class CorrectedJudge:
     mode = MODE
 
     def __init__(self, config: dict, version_dir: Path, client=None, feature_client=None):
+        from ..iteration.shares import require_runtime
+        require_runtime(config)
         self.config = config
         from ..iteration.learning_guard import MaterialSeal
         self._material_seal = MaterialSeal(version_dir)
@@ -215,7 +277,7 @@ class CorrectedJudge:
         swap = cache.memo("blind_order", identity, lambda: random.random() < 0.5)
         human = list(case["human_reply"])
         a, b = (candidate_replies, human) if swap else (human, candidate_replies)
-        blind, metadata = blind_case(case, a, b)
+        blind, metadata = blind_case(case, a, b, self.config)
         tracing.note("blind_mapping", {"candidate_option": "A" if swap else "B", "human_option": "B" if swap else "A",
                                       "blind_case": blind, "context_metadata": metadata})
         prompt = self.template.replace("{{case}}", json.dumps(blind, ensure_ascii=False))

@@ -117,6 +117,40 @@ def test_clean_gbdt_reconstructs_source_without_requests(candidate, monkeypatch)
     assert versions.POINTERS_PATH.read_bytes() == before
 
 
+@pytest.mark.parametrize('policy', ['context_owner_shift_v1', 'unknown'])
+def test_ownership_extension_keeps_original_training_guard(candidate, policy):
+    d = candidate['directory']
+    cfg = audit.read(d/'config.json')
+    cfg['ownership_correction'] = policy
+    save(d/'config.json', cfg)
+    if policy == 'unknown':
+        with pytest.raises(ConfigError):
+            check(candidate)
+    else:
+        assert check(candidate)['promotion_eligible'] is True
+        cfg['feature_llm']['model'] = 'changed'
+        save(d/'config.json', cfg)
+        with pytest.raises(ConfigError):
+            check(candidate)
+
+
+@pytest.mark.parametrize('policy', ['joint_response_features_v1', 'unknown'])
+def test_contribution_extension_preserves_training_guard(candidate, policy):
+    d = candidate['directory']
+    cfg = audit.read(d/'config.json')
+    cfg.update(ownership_correction='context_owner_shift_v1', contribution_correction=policy)
+    save(d/'config.json', cfg)
+    if policy == 'unknown':
+        with pytest.raises(ConfigError):
+            check(candidate)
+    else:
+        assert check(candidate)['promotion_eligible'] is True
+        cfg['feature_llm']['model'] = 'changed'
+        save(d/'config.json', cfg)
+        with pytest.raises(ConfigError):
+            check(candidate)
+
+
 @pytest.mark.parametrize('damage', [None, 'archive', 'missing_binding', 'data', 'weights'])
 def test_archived_code_compatibility_preserves_guard(candidate, damage):
     c, d = candidate, candidate['directory']
@@ -146,7 +180,7 @@ def test_archived_code_compatibility_preserves_guard(candidate, damage):
     assert all(p.read_bytes() == value for p, value in before.items())
 
 
-@pytest.mark.parametrize('operation', ['verify', 'bind'])
+@pytest.mark.parametrize('operation', ['verify', 'bind', 'execution_seal', 'require_materials'])
 def test_adoption_learning_uses_verified_archives(candidate, monkeypatch, operation):
     from src.iteration import gates
     c = candidate
@@ -154,14 +188,22 @@ def test_adoption_learning_uses_verified_archives(candidate, monkeypatch, operat
     expected = sha256_file(code)
     runtime.archive_inputs({str(code): expected})
     code.unlink()
-    monkeypatch.setattr(learning_guard, operation, lambda spec: check(c))
+    if operation != 'require_materials':
+        # Exercise real reconstruction through each entrypoint without creating
+        # an unrelated experiment. Material creation uses its actual signature.
+        monkeypatch.setattr(learning_guard, operation, lambda spec: check(c))
     original = audit.verify
-    action = getattr(gates, operation + '_learning')
-    action({})
+    if operation == 'require_materials':
+        action = lambda: gates.require_learning_materials(c['source_spec']['data_ref'], [c['directory']])
+    elif operation == 'execution_seal':
+        action = lambda: gates.learning_execution_seal({})
+    else:
+        action = lambda: getattr(gates, operation + '_learning')({})
+    action()
     assert audit.verify is original
     (versions.PRIVATE / 'evidence_blobs' / expected).write_text('corrupt')
     with pytest.raises(ConfigError):
-        action({})
+        action()
     assert audit.verify is original
 
 

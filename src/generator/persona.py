@@ -15,17 +15,32 @@ _SCENARIO_BY_CHAT_TYPE = {
     "group": "group_chat.md",
     "private": "friend.md",
 }
+CONTEXT_IDENTITY_POLICY = "explicit-self-v1"
 
 
 class PersonaPromptBuilder:
-    def __init__(self, settings: dict[str, Any], prompt_root: Path):
+    def __init__(self, settings: dict[str, Any], prompt_root: Path, *,
+                 context_identity: str | None = None):
         """prompt_root：生成器版本目录（自包含 persona.md + scenarios/）。
         版本目录由 versions.py 保证存在——没有静默回退，调用方必须显式给出。"""
+        if context_identity not in (None, CONTEXT_IDENTITY_POLICY):
+            raise ConfigError(f"未知的 context_identity 策略: {context_identity!r}")
+        self._context_identity = context_identity
         self._persona_path = prompt_root / "persona.md"
         self._scenarios_dir = prompt_root / "scenarios"
         if not self._persona_path.exists():
             raise ConfigError(f"版本目录缺少人格文件: {self._persona_path}")
         self._persona = self._persona_path.read_text(encoding="utf-8")
+
+    def _history_line(self, message: dict[str, Any]) -> str:
+        sender = str(message.get("sender", "?"))
+        if self._context_identity == CONTEXT_IDENTITY_POLICY:
+            # Only a typed source flag establishes identity; names and truthy
+            # strings/numbers must never turn another participant into self.
+            flag = message.get("is_self")
+            role = "本人" if flag is True else "其他人" if flag is False else "身份未标明"
+            sender = f"[{role}] {sender}"
+        return f"{sender}: {message.get('text', '')}"
 
     def scenario_layer(self, case: dict[str, Any]) -> str:
         name = case.get("scenario") or _SCENARIO_BY_CHAT_TYPE.get(
@@ -44,8 +59,11 @@ class PersonaPromptBuilder:
         style_block: str,
         forced_reply: bool,
     ) -> list[dict[str, str]]:
-        history = "\n".join(
-            f"{m.get('sender', '?')}: {m.get('text', '')}" for m in case.get("context", [])
+        history = "\n".join(self._history_line(m) for m in case.get("context", []))
+        identity_rule = (
+            "<speaker_identity>历史消息的[本人]表示你要代为回复的人，[其他人]表示聊天对象；"
+            "[身份未标明]表示缺少身份标记，不要根据姓名猜测。只以本人的身份接话。</speaker_identity>\n"
+            if self._context_identity == CONTEXT_IDENTITY_POLICY else ""
         )
         unread = case.get("unread") or ""
         if not unread and case.get("context"):
@@ -56,7 +74,7 @@ class PersonaPromptBuilder:
             else ""
         )
         user = (
-            f"<history>\n{history}\n</history>\n"
+            f"{identity_rule}<history>\n{history}\n</history>\n"
             f"<unread>\n{unread}\n</unread>\n"
             f"{self.scenario_layer(case)}"
             f"<style_examples>\n{style_block}\n</style_examples>\n"

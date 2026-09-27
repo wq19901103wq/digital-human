@@ -30,6 +30,8 @@ DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "prompts" / "judge
 
 def build_judge(settings: dict, info: dict):
     """按冻结版本选通道；Codex 裁判不经过生成器的 API 默认配置。"""
+    from ..iteration.shares import require_runtime
+    require_runtime(info['config'])
     from . import normalize_mode
     from .corrected import MODE, CorrectedJudge
     if normalize_mode(info["config"].get("mode")) == MODE:
@@ -41,6 +43,12 @@ def build_judge(settings: dict, info: dict):
             from .fusion import FusionJudge
             return FusionJudge(info['config'], info['dir'])
         if policy == 'gbdt_only':
+            if 'contribution_correction' in info['config']:
+                from .contribution import ContributionJudge
+                return ContributionJudge(info['config'], info['dir'])
+            if 'ownership_correction' in info['config']:
+                from .ownership import OwnershipJudge
+                return OwnershipJudge(info['config'], info['dir'])
             from .gbdt import GBDTJudge
             return GBDTJudge(info['config'], info['dir'])
         if policy == 'lr_only':
@@ -54,6 +62,8 @@ def build_judge(settings: dict, info: dict):
 
 class Judge:
     def __init__(self, judge_cfg: dict[str, Any], llm: ChatClient, prompt_path: Path | None = None):
+        from ..iteration.shares import require_runtime
+        require_runtime(judge_cfg)
         self._cfg = judge_cfg
         mode = judge_cfg.get("mode", "pairwise_llm")
         if mode != "pairwise_llm":

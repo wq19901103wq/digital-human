@@ -1,4 +1,5 @@
-"""抽特征实验只使用能还原实际回复边界的开发样本。"""
+"""评审人口口径（2026-09-23 Owner 裁定）：连续发言、多条回复不排除，
+只核验来源客观一致性（边界、逐字段还原、真人回复归属、回复间隔）。"""
 from copy import deepcopy
 
 import pytest
@@ -23,16 +24,28 @@ def test_verified_source_and_single_reply_are_retained():
     assert clean_cases([case], messages) == ([case], {})
 
 
+def test_multiple_incoming_and_multi_burst_reply_are_retained():
+    """连续发言、多条回复不排除：对方连发、本人多连发回复均为合格人口。"""
+    case, messages = sample()
+    messages[0]['is_self'] = False
+    case['context'][0]['is_self'] = False
+    case['human_reply'] = ['八点', '到了叫我']
+    messages[2]['text'] = '八点'
+    messages.insert(3, {'chat_id': 'group:one', 'sender': '本人', 'text': '到了叫我',
+                        'is_self': True, 'timestamp': 1125})
+    assert clean_cases([case], messages) == ([case], {})
+
+
 @pytest.mark.parametrize('defect,reason', [
     ('self_boundary', 'self_boundary'),
     ('source_text', 'source_mismatch'),
     ('source_role', 'source_mismatch'),
     ('source_missing', 'source_missing'),
     ('late_reply', 'late_reply'),
-    ('self_continuation', 'consecutive_self_reply'),
-    ('multiple_incoming', 'multiple_incoming'),
+    ('reply_text_differs', 'source_mismatch'),
+    ('reply_not_in_source', 'source_mismatch'),
 ])
-def test_invalid_reply_boundaries_are_excluded(defect, reason):
+def test_objective_mismatches_are_excluded(defect, reason):
     case, messages = sample()
     if defect == 'self_boundary':
         case['context'][-1]['is_self'] = True
@@ -44,11 +57,10 @@ def test_invalid_reply_boundaries_are_excluded(defect, reason):
         case['source_message_id'] = 'missing:2'
     elif defect == 'late_reply':
         messages[2]['timestamp'] = 2000
-    elif defect == 'self_continuation':
-        messages[3]['is_self'] = True
-    elif defect == 'multiple_incoming':
-        messages[0]['is_self'] = False
-        case['context'][0]['is_self'] = False
+    elif defect == 'reply_text_differs':
+        case['human_reply'] = ['九点']
+    elif defect == 'reply_not_in_source':
+        case['source_message_id'] = 'group:one:3'
     assert clean_cases([case], messages) == ([], {reason: 1})
 
 

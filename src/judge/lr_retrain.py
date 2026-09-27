@@ -114,6 +114,7 @@ class FeatureReplay:
     def __init__(self, source_dir, source_spec, source_config, rows):
         self.source_dir = Path(source_dir) if source_dir is not None else None
         self.source_spec = source_spec
+        self.source_config = source_config
         self.config = {**source_config['llm'], **source_config.get('feature_llm', {})}
         self.by_id = {str(r['case_id']): r for r in rows}
         self.records = {}
@@ -142,7 +143,7 @@ class FeatureReplay:
             if human not in ('A', 'B') or mapping['candidate_option'] != ('B' if human == 'A' else 'A'):
                 raise ConfigError('来源 trace 的 A/B 身份映射不一致')
             a, b = (case['human_reply'], case['ai_replies']) if human == 'A' else (case['ai_replies'], case['human_reply'])
-            blind, metadata = blind_case(case, a, b)
+            blind, metadata = blind_case(case, a, b, self.source_config)
             if mapping['blind_case'] != blind or cache.digest(mapping['context_metadata']) != cache.digest(metadata):
                 raise ConfigError('来源 trace 的提示词上下文或选项已变化')
             prompt = rt.feature_extractor_prompt(blind)
@@ -176,7 +177,7 @@ class FeatureReplay:
                 def produce():
                     swap = cache.memo('blind_order', identity, lambda: random.random() < .5)
                     a, b = (case['ai_replies'], case['human_reply']) if swap else (case['human_reply'], case['ai_replies'])
-                    blind, metadata = blind_case(case, a, b)
+                    blind, metadata = blind_case(case, a, b, self.source_config)
                     return {'mapping': {'human_option': 'B' if swap else 'A', 'candidate_option': 'A' if swap else 'B',
                         'blind_case': blind, 'context_metadata': metadata}, 'features': extract(client, blind, source_check),
                         'provenance': {'source': 'independent_supplement', 'round': round_index}}
@@ -211,7 +212,7 @@ class LRJudge(CorrectedJudge):
             identity = {'case': case, 'candidate_replies': candidate_replies, 'client': self.feature_client.cache_identity()}
             swap = cache.memo('blind_order', identity, lambda: random.random() < .5)
             a, b = (candidate_replies, case['human_reply']) if swap else (case['human_reply'], candidate_replies)
-            blind, metadata = blind_case(case, a, b)
+            blind, metadata = blind_case(case, a, b, self.config)
             result = {'mapping': {'human_option': 'B' if swap else 'A', 'candidate_option': 'A' if swap else 'B',
                 'blind_case': blind, 'context_metadata': metadata}, 'features': extract(self.feature_client, blind, self._check_sources)}
         mapping, features = result['mapping'], result['features']
