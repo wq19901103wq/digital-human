@@ -22,7 +22,7 @@ from src.iteration import branch_packs, experiment, runner, versions  # noqa: E4
 
 
 def cmd_build(args: argparse.Namespace) -> None:
-    ref = branch_packs.prepare_initial(args.kind, args.sample)
+    ref = branch_packs.prepare_initial(args.kind, args.sample, args.reuse_generations)
     print(f"回复包已创建: {ref}；可用 iterate_branches.py worker --kind pack --job {ref} 恢复")
     branch_packs.build(ref, getattr(args, 'workers', 1))
     print(f"评估包已冻结: {versions.PRIVATE / 'judge_eval' / ref / 'pack.json'}")
@@ -60,6 +60,40 @@ def cmd_embedding(args: argparse.Namespace) -> None:
     print(create(args.study, args.change))
 
 
+def cmd_features(args: argparse.Namespace) -> None:
+    from src.judge.feature_inspection import inspect
+    inspect(Path(args.experiment), args.case, args.share, args.judge, Path(args.output),
+            branch=args.branch, round_index=args.round, conditions=args.condition,
+            memory_index=args.memory_index, memory_model=args.memory_model,
+            reasoning_effort=args.reasoning_effort, extraction_mode=args.extraction_mode)
+    print(f'特征诊断完成（不计入正式识别率）: {Path(args.output) / "report.json"}')
+
+
+def cmd_ownership_report(args: argparse.Namespace) -> None:
+    import json
+    from src.judge.ownership_report import build_report
+    directory = versions.PRIVATE / 'experiments' / args.experiment
+    family = args.feature_family
+    report = build_report(directory, family + '_features')
+    path = directory / (family + '_report.json')
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    print(json.dumps({k: v for k, v in report.items()
+                      if k != 'flagged_or_overridden_cases'}, ensure_ascii=False, indent=2))
+    print(f'纠正统计（仅读已保存实录）: {path}')
+
+
+def cmd_contribution(args: argparse.Namespace) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from src.judge.feature_inspection import inspect_contribution
+    def one(case_id):
+        output = Path(args.output) / case_id
+        inspect_contribution(Path(args.experiment), case_id, args.judge, output,
+                             branch=args.branch, round_index=args.round)
+        print(f'特征诊断完成（不计入正式识别率）: {output / "report.json"}', flush=True)
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        list(pool.map(one, dict.fromkeys(args.case)))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Judge 评估包")
     parser.add_argument("--instance", default=None, help="数字人实例名（默认 env DH_INSTANCE 或 default）")
@@ -70,6 +104,7 @@ def main() -> None:
     b.add_argument("--sample", type=int, default=None,
                    help="可选的规模断言；省略时使用完整冻结清单，不重新抽样")
     b.add_argument("--workers", type=int, default=1)
+    b.add_argument('--reuse-generations', help='复用同数据同生成器的已有开发生成实录，只生成缺项')
     b.set_defaults(func=cmd_build)
     c = sub.add_parser("compare", help="现用 vs 候选（新 Judge 版本）同包校准")
     c.add_argument("--pack", required=True)
@@ -93,6 +128,36 @@ def main() -> None:
     e.add_argument('--study', required=True)
     e.add_argument('--change', required=True)
     e.set_defaults(func=cmd_embedding)
+    f = sub.add_parser('features', help='复用已有 case，诊断有无 Wiki 的背景/逻辑特征（仅诊断）')
+    f.add_argument('--experiment', required=True)
+    f.add_argument('--case', required=True)
+    f.add_argument('--share', required=True, help='供诊断的已冻结共享资料版本')
+    f.add_argument('--judge', required=True, help='沿用该版本的特征抽取模型配置')
+    f.add_argument('--reasoning-effort', choices=['low', 'medium', 'high'],
+                   help='仅覆盖此次诊断的思考深度，记录到结果与请求缓存；不修改冻结 Judge')
+    f.add_argument('--extraction-mode', choices=['joint', 'separate_context'], default='joint',
+                   help='separate_context 先独立缓存纯上文归属，再只读检查回复；默认沿用一步抽取')
+    f.add_argument('--branch', choices=['baseline', 'candidate'], default='candidate')
+    f.add_argument('--round', type=int, default=0)
+    f.add_argument('--output', required=True, help='可续跑的诊断输出目录')
+    f.add_argument('--memory-index', help='可信本地 RPA 消息 BGE pickle 索引；也可用 WECHAT_HISTORY_INDEX_PATH')
+    f.add_argument('--memory-model', help='本地 BGE ONNX 模型目录；也可用 WECHAT_BGE_MODEL_PATH')
+    f.add_argument('--condition', action='append', choices=['context_only', 'with_wiki', 'with_background', 'with_memory'],
+                   help='默认对比 context_only/with_wiki：按账号和已确认别名直接读取 Wiki；其余为旧诊断路径')
+    f.set_defaults(func=cmd_features)
+    o = sub.add_parser('ownership-report', help='从已有正式实录汇总归属纠正与真人误伤；不请求模型')
+    o.add_argument('--experiment', required=True, help='Judge 实验 ID')
+    o.add_argument('--feature-family', choices=['ownership', 'contribution'], default='ownership')
+    o.set_defaults(func=cmd_ownership_report)
+    f = sub.add_parser('contribution-features', help='复用已存盲测回复诊断信息贡献，不重新生成')
+    f.add_argument('--experiment', required=True)
+    f.add_argument('--case', action='append', required=True)
+    f.add_argument('--judge', required=True)
+    f.add_argument('--output', required=True)
+    f.add_argument('--branch', choices=['baseline', 'candidate'], default='candidate')
+    f.add_argument('--round', type=int, default=0)
+    f.add_argument('--workers', type=int, choices=range(1, 9), default=2)
+    f.set_defaults(func=cmd_contribution)
     args = parser.parse_args()
     if getattr(args, "instance", None):
         versions.switch_instance(args.instance)

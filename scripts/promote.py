@@ -4,6 +4,10 @@
 用法：
   python scripts/promote.py gen --exp <实验id>     # 开发/固定生成器实验
   python scripts/promote.py judge --exp <实验id>   # Judge 评估实验（首验或比较晋升）
+
+含 runtime.json 的冻结实验默认在冻结 runtime 内沿用原采用门槛晋升（与该实验的
+冻结协议一致，全程 write_once 收据留痕）；门槛 bug 等异常场景用 --current-gates
+强制按当前代码门槛复核证据后晋升。
 """
 from __future__ import annotations
 
@@ -41,8 +45,12 @@ def main(argv=None) -> None:
     for command in (g, j):
         command.add_argument('--threshold-reason', default=None,
             help='明确修订门槛时：按当前配置复核已有固定成绩并采用，记录用户决定，保留原结论')
+        command.add_argument('--current-gates', action='store_true',
+            help='冻结实验默认沿用原采用门槛；此标志强制按当前代码门槛复核证据后晋升（门槛 bug 等异常场景）')
         command.add_argument('--evidence-runtime', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.threshold_reason is not None and getattr(args, 'current_gates', False):
+        parser.error('--current-gates 与 --threshold-reason 互斥')
     if args.evidence_runtime:
         if args.threshold_reason is None:
             parser.error('冻结来源复核仅用于明确修订门槛')
@@ -52,6 +60,19 @@ def main(argv=None) -> None:
     if getattr(args, "instance", None):
         versions.switch_instance(args.instance)
         print(f"实例: {args.instance}")
+
+    if args.threshold_reason is None and not getattr(args, 'current_gates', False):
+        directory = experiment.load_experiment(args.exp)
+        if (directory / 'runtime.json').exists():
+            expected = 'gen_ab' if args.kind == 'gen' else 'judge_eval'
+            if experiment.spec_of(directory)['kind'] != expected:
+                raise ConfigError('晋级类型与冻结实验不一致')
+            from src.iteration import pack_transport
+            code = pack_transport.launch(directory, instance=versions.PRIVATE.name,
+                job=args.exp, workers=1, seconds=60, kind='promotion')
+            if code:
+                raise SystemExit(code)
+            return
 
     if args.threshold_reason is not None:
         directory = experiment.load_experiment(args.exp)

@@ -32,6 +32,8 @@ class ReplyGenerator:
         prompt_root: Path | None = None,
         pool_path: Path | None = None,
     ):
+        from ..iteration.shares import require_runtime
+        share = require_runtime(gen_cfg, consumer='gen')
         self._settings = settings
         self._cfg = gen_cfg
         # 单客户端或 {"private":…, "group":…}；按 case 聊天类型选择
@@ -51,7 +53,12 @@ class ReplyGenerator:
             require_materials(pool_path.parent.name, [prompt_root])
             self._information_end = json.loads((prompt_root / "learning.json").read_text())["information_end"]
 
-        self._builder = PersonaPromptBuilder(settings, prompt_root=prompt_root)
+        self._background = None
+        if share is not None:
+            from .background import Background
+            self._background = Background(gen_cfg, share, self._history_sources)
+        self._builder = PersonaPromptBuilder(settings, prompt_root=prompt_root,
+                                            context_identity=gen_cfg.get("context_identity"))
         self._check_sources()
 
         ev = settings["evaluation"]
@@ -60,6 +67,12 @@ class ReplyGenerator:
 
         # Selection policies and model reranking require explicit version config.
         switches = gen_cfg.get("retriever", {})
+        if 'source_overlap_policy' in switches:
+            from .learned_selection import POLICY, validate_source_overlap_policy
+            overlap_policy = switches['source_overlap_policy']
+            validate_source_overlap_policy(overlap_policy)
+            if overlap_policy is not None and switches.get('learned') != POLICY:
+                raise ConfigError('source_overlap_policy requires learned few-shot selection')
         self._learned = None
         if switches.get('learned'):
             from .learned_selection import LearnedSelector, POLICY
@@ -131,7 +144,9 @@ class ReplyGenerator:
             selection_trace = {}
             if self._learned is not None:
                 from .learned_selection import recall
-                rows = self._learned.select(case, recall(self._retriever, case),
+                recalled = recall(self._retriever, case,
+                    source_overlap_policy=self._cfg.get('retriever', {}).get('source_overlap_policy'))
+                rows = self._learned.select(case, recalled,
                     count=self._max_shots, budget=self._budget, retriever=self._retriever,
                     check=self._check_sources)
             elif self._selection:
@@ -169,6 +184,9 @@ class ReplyGenerator:
             if self._information_end >= case["input_cutoff"]["timestamp"]:
                 raise HistoryError("生成器静态学习材料晚于本题输入时间，禁止生成或复用")
             messages = self._builder.build_messages(prompt_case(case), self._style_block(case), forced_reply)
+            if self._background is not None:
+                client = self._llm['group' if case.get('chat_type') == 'group' else 'private']
+                messages.insert(1, self._background.message(case, client))
             self._material_seal.check()
             self._history_sources.check()
             return messages

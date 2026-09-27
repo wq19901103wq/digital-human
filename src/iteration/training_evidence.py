@@ -139,7 +139,8 @@ def generations(directory, spec, cases, pool, evidence, complete):
     require(saved['entries'].keys() <= by_id.keys(), 'unselected generation case')
     gen = versions.load_generator(spec['generator_ref'])
     settings = load_settings()
-    builder = PersonaPromptBuilder(settings, gen['dir'])
+    builder = PersonaPromptBuilder(settings, gen['dir'],
+                                   context_identity=gen['config'].get('context_identity'))
     clients = build_clients(settings, gen['config']['llm'])
     if not isinstance(clients, dict):
         clients = {'group': clients, 'private': clients}
