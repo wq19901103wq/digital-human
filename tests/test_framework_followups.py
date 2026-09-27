@@ -118,6 +118,36 @@ def test_migration_rechecks_receipt_before_switch(env, change):
     assert versions.load_pointers() == before
 
 
+def test_rollback_restores_exact_pointer_tuple_and_preserves_migration(env):
+    before = {**versions.load_pointers(), 'iteration_judge': 'j-development',
+              'branch_promotions': {'previous': 'g-0001'}}
+    versions.save_pointers(before)
+    path = baseline.prepare('d-test', 'g-0001', 'j-0001', reason='迁移')
+    original = path.read_bytes()
+    baseline.apply(path.stem)
+    assert baseline.rollback(path.stem, reason='用户撤销迁移') == before
+    assert baseline.rollback(path.stem, reason='恢复中断任务') == before
+    assert path.read_bytes() == original
+    audit = json.loads((versions.PRIVATE / 'baseline_rollbacks' / path.name).read_text())
+    assert audit['after'] == before and audit['performance_claim'] is False
+
+
+@pytest.mark.parametrize('change', ['pointer', 'receipt'])
+def test_rollback_refuses_changed_pointers_or_receipt(env, change):
+    path = baseline.prepare('d-test', 'g-0001', 'j-0001', reason='迁移')
+    baseline.apply(path.stem)
+    if change == 'pointer':
+        versions.save_pointers({**versions.load_pointers(), 'iteration_gen': 'g-newer'})
+    else:
+        receipt = json.loads(path.read_text())
+        receipt['before']['data'] = 'd-forged'
+        write_json(path, receipt)
+    before = versions.load_pointers()
+    with pytest.raises(ConfigError):
+        baseline.rollback(path.stem, reason='撤销')
+    assert versions.load_pointers() == before
+
+
 def test_declaring_future_rows_as_training_cannot_bypass_time_guard(tmp_path):
     data = historical(tmp_path / 'data')
     path = data.directory / 'judge_training.jsonl'

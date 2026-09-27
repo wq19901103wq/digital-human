@@ -54,7 +54,7 @@ def main():
     worker.add_argument("--job", required=True)
     worker.add_argument("--workers", type=int, default=4)
     worker.add_argument("--timeout-seconds", type=float, help="仅提高请求等待上限，保留冻结代码与已有结果")
-    cancel = sub.add_parser("cancel", help="取消指定任务；已用验收批次不会退回")
+    cancel = sub.add_parser("cancel", help="取消指定任务并保留历史结果；固定题仍可复用")
     cancel.add_argument("--kind", choices=list(jobs.FOLDERS), required=True)
     cancel.add_argument("--job", required=True)
     train = sub.add_parser("train", help="提交人工配置的训练流程 JSON")

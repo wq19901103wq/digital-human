@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实验唯一运行入口（SOP §2）：新建自动预检，已有按 ID 恢复。
 
-  # 新建（自动预检：准入/候选版本/diff/one-shot）并运行
+  # 新建（自动预检：准入/候选版本/diff）并运行
   python scripts/run.py --dataset development --change "唯一改动" --override k=v [--limit 5]
 
   # 在原执行器下恢复已有实验；代码变化后由调度器使用冻结快照恢复

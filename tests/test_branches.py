@@ -83,7 +83,7 @@ def test_worker_forwards_case_concurrency_to_both_runners(monkeypatch, kind):
     assert calls == [(directory, {'workers': 4})]
 
 
-def test_parallel_branches_receive_disjoint_sealed_batches(tree, monkeypatch):
+def test_parallel_branches_reuse_the_same_fixed_batch(tree, monkeypatch):
     from src.iteration import acceptance
     (tree / 'judge_eval/pack-validation-test/pack.json').unlink()
     settings = experiment.load_settings()
@@ -96,12 +96,12 @@ def test_parallel_branches_receive_disjoint_sealed_batches(tree, monkeypatch):
     jobs = pass_to_fixed()
     assert len(jobs) == 2
     specs = [experiment.spec_of(experiment.load_experiment(job['id'])) for job in jobs]
-    assert len({spec['acceptance']['batch_id'] for spec in specs}) == 2
+    assert len({spec['acceptance']['batch_id'] for spec in specs}) == 1
     from src.iteration import datasets
     left, right = [datasets.rows_for(spec) for spec in specs]
     assert len(left) == len(right) == 2
-    assert {r['case_id'] for r in left}.isdisjoint(r['case_id'] for r in right)
-    assert acceptance.status('d-0001')['remaining'] == 1
+    assert left == right
+    assert acceptance.status('d-0001')['remaining'] == 3
 
 
 def test_judge_branch_builds_validation_only_after_development_entry(tree, monkeypatch):
@@ -121,11 +121,12 @@ def test_judge_branch_builds_validation_only_after_development_entry(tree, monke
     recipe = json.loads((tree / 'judge_eval' / jobs[0]['id'] / 'recipe.json').read_text())
     assert recipe['dataset'] == 'fixed_test'
     assert len(acceptance.rows(recipe['acceptance'])) == 2
-    assert acceptance.status('d-0001')['consumed'] == 1
+    assert acceptance.status('d-0001')['consumed'] == 0
+    binding = acceptance.status('d-0001')['jobs']
     monkeypatch.setattr(branches, '_entry', lambda *a, **kw: pytest.fail('repeated pack admission'))
     assert branches.advance() == jobs
     assert branches.advance() == jobs
-    assert acceptance.status('d-0001')['consumed'] == 1
+    assert acceptance.status('d-0001')['jobs'] == binding
 
 
 def finish(job, verdict="merge_to_iteration_baseline", failures=0):
@@ -325,15 +326,14 @@ def test_validation_pack_stays_unparsed_until_fixed_entry(tree, monkeypatch):
     assert opened and fixed['id'].endswith('-fixed')
 
 
-def test_one_shot_survives_new_branch_name(tree):
+def test_completed_candidate_can_enter_another_fixed_comparison(tree):
     proposal = submit_gen("a", {"llm": {"model": "mA"}})
     fixed = pass_to_fixed()[0]
     finish(fixed, "reject")
     branches.advance()
     branches.submit("b", "gen", "同一候选换分支", candidate_ref=proposal["candidate_ref"])
-    assert pass_to_fixed() == []
-    blocked = branches.round_of("b/r-0001")
-    assert blocked["phase"] == "blocked" and "one-shot" in blocked["reason"]
+    assert pass_to_fixed()[0]['id'].endswith('-fixed')
+    assert experiment.state_of(experiment.load_experiment(fixed['id']))['verdict'] == 'reject'
 
 
 def test_promotion_receipt_recovers_crash_between_pointer_and_round(tree, monkeypatch):
@@ -541,7 +541,7 @@ def test_data_drift_blocks_without_replacing_sample(tree):
     assert record["phase"] == "blocked" and "禁止自动换样本" in record["reason"]
 
 
-def test_judge_one_shot_ignores_metadata_and_recognizes_legacy_fingerprints(tree):
+def test_judge_legacy_fingerprint_does_not_block_fixed_reuse(tree):
     import hashlib
 
     proposal = submit_judge("a", {"llm": {"model": "jA"}})
@@ -559,8 +559,8 @@ def test_judge_one_shot_ignores_metadata_and_recognizes_legacy_fingerprints(tree
     duplicate = versions.create_judge_version(info["config"], {"different": "origin"}, source_dir=info["dir"])
     branches.submit("b", "judge", "同模型换来源", candidate_ref=duplicate,
                     development_pack="pack-calibration-test", validation_pack="pack-validation-test")
-    assert pass_to_fixed() == []
-    assert "one-shot" in branches.round_of("b/r-0001")["reason"]
+    assert pass_to_fixed()[0]['id'].endswith('-fixed')
+    assert experiment.state_of(directory)['verdict'] == 'reject'
 
 
 def test_two_processes_cannot_promote_over_each_other(tree):
@@ -576,7 +576,7 @@ from src.config import ConfigError
 from src.iteration import promote, versions, learning_guard
 # Same isolated legacy fixture as the parent test: this child tests the
 # cross-process promotion lock, not source reconstruction.
-learning_guard.verify = lambda *a: None
+learning_guard.verify = lambda *a, **kw: None
 root = Path(sys.argv[1])
 versions.PRIVATE = root
 versions.DATA_ROOT = root / 'data'
@@ -662,6 +662,56 @@ def test_development_stage_limit_retains_winner_without_fixed_or_production(tree
         branches.set_stage_limit('limited', 'unknown')
 
 
+@pytest.mark.parametrize('eligible', [True, False])
+def test_raising_stage_limit_reuses_development_and_obeys_entry_gate(tree, monkeypatch, eligible):
+    settings = branches.load_settings()
+    settings['evaluation']['adoption']['fixed_entry_min_net_win_rate'] = .1 if eligible else .5
+    monkeypatch.setattr(branches, 'load_settings', lambda: settings)
+    submit_gen('limited', {'llm': {'model': 'mA'}})
+    branches.set_stage_limit('limited', 'development')
+    assert pass_to_fixed() == []
+    record = branches.round_of('limited/r-0001')
+    directory = experiment.load_experiment(branches._trial_id(record, 'development'))
+    evidence = {name: (directory / name).read_bytes() for name in ('spec.json', 'state.json', 'cases.jsonl')}
+    pointers = versions.load_pointers()
+    branches.set_stage_limit('limited', 'fixed_test')
+    jobs = branches.advance('limited')
+    assert all((directory / name).read_bytes() == blob for name, blob in evidence.items())
+    assert versions.load_pointers() == pointers
+    state = branches.status()[0]
+    assert state['rounds'] == ['r-0001']
+    assert state['current_round']['phase'] == ('fixed_test' if eligible else 'development_accepted')
+    assert len(jobs) == int(eligible)
+    assert all(job['id'].endswith('-fixed') for job in jobs)
+    branches.set_stage_limit('limited', 'fixed_test')
+    assert branches.advance('limited') == jobs
+
+
+@pytest.mark.parametrize('eligible', [True, False])
+def test_restored_basis_reuses_accepted_development_without_new_dev(tree, monkeypatch, eligible):
+    settings = branches.load_settings()
+    settings['evaluation']['adoption']['fixed_entry_min_net_win_rate'] = .1 if eligible else .5
+    monkeypatch.setattr(branches, 'load_settings', lambda: settings)
+    proposal = submit_gen('restored', {'llm': {'model': 'mA'}})
+    branches.set_stage_limit('restored', 'development')
+    assert pass_to_fixed() == []
+    original = branches.basis()
+    directory = experiment.load_experiment('branch-restored-r-0001-dev')
+    evidence = {name: (directory / name).read_bytes() for name in ('spec.json', 'state.json', 'cases.jsonl')}
+    branches.set_stage_limit('restored', 'fixed_test')
+    state = branches.status()[0]
+    branches._new_round(state, proposal, {**original, 'data': 'd-missing'})
+    jobs = branches.advance('restored')
+    assert all((directory / name).read_bytes() == blob for name, blob in evidence.items())
+    assert len(jobs) == int(eligible)
+    assert all(job['id'].endswith('-fixed') for job in jobs)
+    assert not list((tree / 'experiments').glob('branch-restored-r-0003-dev'))
+    record = branches.round_of('restored/r-0003')
+    assert record['phase'] == ('fixed_test' if eligible else 'blocked')
+    if eligible:
+        assert record['carried_development_id'] == directory.name
+
+
 def test_fork_accepted_development_uses_common_control(tree):
     pointers = versions.load_pointers()
     parent = submit_gen('parent', {'llm': {'model': 'mA'}})
@@ -683,9 +733,10 @@ def test_fork_accepted_development_uses_common_control(tree):
     assert versions.load_pointers() == pointers
 
 
+@pytest.mark.parametrize('reuse', ['fork', 'fixed'])
 @pytest.mark.parametrize('invalid', [None, 'missing', 'implementation', 'source',
                                     'data', 'data_implementation', 'missing_data_implementation'])
-def test_fork_historical_receipt_after_executor_migration(tree, monkeypatch, invalid):
+def test_historical_receipt_after_executor_migration(tree, monkeypatch, invalid, reuse):
     from src.config import sha256_file
     from src.iteration import data_guard, gates, runtime
     original_snapshot = data_guard.generation_snapshot
@@ -732,7 +783,17 @@ def test_fork_historical_receipt_after_executor_migration(tree, monkeypatch, inv
         else:
             del spec['data_snapshot']['implementation_sha256']
         write_json(directory / 'spec.json', spec)
-    if invalid:
+    if reuse == 'fixed':
+        monkeypatch.setattr(branches, 'promote_experiment', lambda *a: pytest.fail('repeated development adoption'))
+        branches.set_stage_limit('parent', 'fixed_test')
+        jobs = branches.advance('parent')
+        record = branches.round_of('parent/r-0001')
+        assert record['phase'] == ('blocked' if invalid else 'fixed_test')
+        assert len(jobs) == (0 if invalid else 1)
+        if not invalid:
+            assert jobs[0]['id'] == 'branch-parent-r-0001-fixed'
+            assert all((directory / name).read_bytes() == blob for name, blob in material_bytes.items())
+    elif invalid:
         with pytest.raises((ConfigError, OSError)):
             branches.submit('fork', 'gen', 'count', overrides={'max_shots_per_case': 1},
                             from_branch='parent')

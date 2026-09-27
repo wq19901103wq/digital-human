@@ -78,6 +78,48 @@ def test_initial_pack_uses_the_same_guarded_resume_loop(env, monkeypatch):
     assert jobs.snapshot({'kind': 'pack', 'id': ref})['status'] == 'finished'
 
 
+@pytest.mark.parametrize('changed_material', [False, True])
+def test_pack_checks_once_then_watches_changes_and_reuses_after_validator_revision(env, monkeypatch, changed_material):
+    from unittest.mock import Mock
+    from src.config import sha256_file
+    from src.iteration import versions
+    monkeypatch.setattr(branch_packs, 'build_clients', lambda *args: env.client)
+    ref = branch_packs.prepare_initial()
+    directory = env.root / 'judge_eval' / ref
+    original_map = branch_packs.completed_map
+
+    def completed(function, cases, workers):
+        yield from original_map(function, cases, workers)
+        if changed_material:
+            (env.gdir / 'persona.md').write_text('changed after final result')
+
+    monkeypatch.setattr(branch_packs, 'completed_map', completed)
+    checked = Mock(wraps=learning_guard.verify_generation)
+    monkeypatch.setattr(learning_guard, 'verify_generation', checked)
+    if changed_material:
+        with pytest.raises(ConfigError, match='变化'):
+            branch_packs.build(ref)
+        assert checked.call_count == 1
+        assert not (directory / 'pack.json').exists()
+        return
+    branch_packs.build(ref)
+    assert checked.call_count == 1
+    path = directory / 'pack.json'
+    saved, count = path.read_bytes(), len(env.calls)
+    original_snapshot = learning_guard.snapshot
+
+    def revised(*args, **kwargs):
+        return {**original_snapshot(*args, **kwargs), 'guard_code': {'validator': 'new-revision'}}
+
+    monkeypatch.setattr(learning_guard, 'snapshot', revised)
+    materials = Mock(wraps=learning_guard.require_materials)
+    monkeypatch.setattr(learning_guard, 'require_materials', materials)
+    assert branch_packs.prepare({'ref': ref, 'sha256': sha256_file(path)},
+                                versions.load_pointers(), 'development') == ref
+    assert materials.call_count == 1
+    assert len(env.calls) == count and path.read_bytes() == saved
+
+
 def test_standalone_validation_cannot_read_sealed_answers(env, monkeypatch):
     monkeypatch.setattr(branch_packs.gates, 'require_fixed_entry', lambda *args: {})
     (env.source.directory / 'fixed_test.jsonl').unlink()

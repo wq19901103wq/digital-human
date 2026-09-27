@@ -23,8 +23,19 @@ _validator = ContextVar("result_cache_validator", default=None)
 # Reviewed repository migration: rpa.py -> corrected.py changed module/class
 # names and diagnostic text only. Match the complete bytes, so any subsequent
 # implementation edit receives a new identity rather than reusing this alias.
+# 2026-09-23 reviewed change (context_render=speaker_roster_v1): adds config-
+# gated blind rendering helpers; the default legacy rendering is byte-identical
+# and CodexJudgeClient is untouched, so identities pinned at g-0029..g-0032
+# ranker training remain valid. Aliased by exact bytes; any further edit gets
+# a fresh identity.
 _CODE_DIGEST_ALIASES = {
+    # Explicit Gen background only adds messages for the new policy. Legacy
+    # prompts and generation semantics retain their existing cache identity.
+    "e8949029199ee75ae2cacde29cdf7ab6c5debe499a3c2b2cec2847571d395292":
+        "79a7643e7f65a0094bb70addf11400229e65d2b425385d3b1e0787c68f63b780",
     "ec42a97621e36437caf8e5f2124fd97482e53b4643bfd558d9dfd4fcc8a894be":
+        "8b5b7a9e76d683b87d13f6d3e2c0ee79eb601643690c0c63195b1ab5df1e9071",
+    "06fb0d4a72259580aff98f1c08329899ef6a584f682ca23b83b88f203b79316f":
         "8b5b7a9e76d683b87d13f6d3e2c0ee79eb601643690c0c63195b1ab5df1e9071",
 }
 
@@ -100,13 +111,25 @@ def memo(layer, identity, produce, *, valid=None):
     if identity is None or not current or not current["enabled"]:
         return produce()
     context = current["context"]
+    key = memo_key(layer, identity, context)
+    return current["store"].remember(key, layer, identity, context, produce, valid=valid)
+
+
+def memo_key(layer, identity, context):
     partition = ("development" if context["dataset"] == "development"
                  else f'{context["dataset"]}:{context["experiment_id"]}')
-    # 不同样本和补测轮次仍是独立抽样；候选推全后改为 baseline 不改变键。
-    key = digest({"schema": 1, "layer": layer, "identity": identity, "partition": partition,
-                  "case_id": context["case_id"], "round": context["round"],
-                  "sample_epoch": current["sample_epoch"], "epoch": context["epoch"]})
-    return current["store"].remember(key, layer, identity, context, produce, valid=valid)
+    # 保留旧键格式及独立轮次；兼容复用不能跨固定实验或采样 epoch。
+    return digest({"schema": 1, "layer": layer, "identity": identity, "partition": partition,
+                   "case_id": context["case_id"], "round": context["round"],
+                   "sample_epoch": context["sample_epoch"], "epoch": context["epoch"]})
+
+
+def blind_input(identity):
+    """仅 LR/GBDT 盲序的来源定位可变；其余输入（包括答案正文）仍精确匹配。"""
+    if (not isinstance(identity, dict) or set(identity) != {"case", "candidate_replies", "client"}
+            or not isinstance(identity["case"], dict)):
+        return None
+    return {**identity, "case": {k: v for k, v in identity["case"].items() if k != "generation_trace_ref"}}
 
 
 class Store:
@@ -125,6 +148,8 @@ class Store:
                     id INTEGER PRIMARY KEY, key TEXT NOT NULL, layer TEXT NOT NULL,
                     hit INTEGER NOT NULL, context TEXT NOT NULL, created REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS uses_key ON uses(key);
+                CREATE INDEX IF NOT EXISTS blind_order_case
+                    ON entries(json_extract(identity, '$.case.case_id')) WHERE layer='blind_order';
                 CREATE TABLE IF NOT EXISTS history (
                     id TEXT PRIMARY KEY, experiment_id TEXT, case_id TEXT, data_ref TEXT,
                     dataset TEXT, layer TEXT, status TEXT, payload TEXT NOT NULL);
@@ -158,6 +183,11 @@ class Store:
         # 每个键一把锁，等待者重查缓存；不把网络调用放进 SQLite 写事务。
         with file_lock(self.root / "locks" / (key + ".lock")):
             row = self.get(key)
+            if row is None and layer == "blind_order":
+                source = self.compatible_blind_order(identity, context)
+                if source is not None:
+                    self.save_blind_alias(key, identity, source)
+                    row = self.get(key)
             hit = row is not None and (valid is None or valid(row["value"]))
             if hit:
                 value = row["value"]
@@ -178,6 +208,64 @@ class Store:
                 db.execute("INSERT INTO uses(key,layer,hit,context,created) VALUES (?,?,?,?,?)",
                            (key, layer, int(hit), canonical(context), time.time()))
             return value
+
+    def blind_orders(self, case_id):
+        with self.connect() as db:
+            keys = db.execute("SELECT key FROM entries WHERE layer='blind_order' "
+                              "AND json_extract(identity, '$.case.case_id')=? ORDER BY created,key",
+                              (case_id,)).fetchall()
+        return [self.get(row["key"]) for row in keys]
+
+    def compatible_blind_order(self, identity, context):
+        expected = blind_input(identity)
+        if expected is None:
+            return None
+        for row in self.blind_orders(identity["case"].get("case_id")):
+            if (type(row["value"]) is bool and blind_input(row["identity"]) == expected
+                    and memo_key("blind_order", row["identity"], context) == row["key"]):
+                return row  # 最早的同条件抽样；不读预测、标签或胜负来选择。
+        return None
+
+    def save_blind_alias(self, key, identity, source):
+        """调用方持有目标键锁；不覆盖已经分配的盲序，冻结旧进程也可直接读取。"""
+        origin = {**source["origin"], "cache_reuse": {
+            "source_key": source["key"], "reason": "generation_trace_ref_only"}}
+        blob = canonical(source["value"])
+        with self.connect() as db:
+            db.execute("INSERT OR IGNORE INTO entries VALUES (?,?,?,?,?,?,?)",
+                       (key, "blind_order", canonical(identity), blob,
+                        hashlib.sha256(blob.encode()).hexdigest(), canonical(origin), time.time()))
+
+    def reuse_pack_blind_orders(self, rows):
+        """为重建包填充旧键别名。保持来源的分区/轮次/epoch，不创建任何新抽样。"""
+        counts = {"cases": len(rows), "reused": 0, "existing": 0, "without_source": 0}
+        seen = set()
+        for case in rows:
+            found = False
+            for source in self.blind_orders(case["case_id"]):
+                identity = source["identity"]
+                if (blind_input(identity) is None or type(source["value"]) is not bool
+                        or identity["candidate_replies"] != case["ai_replies"]):
+                    continue
+                target = {**identity, "case": case}
+                if blind_input(target) != blind_input(identity):
+                    continue
+                context = source["origin"]
+                if memo_key("blind_order", identity, context) != source["key"]:
+                    continue
+                found = True
+                key = memo_key("blind_order", target, context)
+                if key in seen:
+                    continue
+                seen.add(key)
+                with file_lock(self.root / "locks" / (key + ".lock")):
+                    if self.get(key) is not None:
+                        counts["existing"] += 1
+                    else:
+                        self.save_blind_alias(key, target, source)
+                        counts["reused"] += 1
+            counts["without_source"] += int(not found)
+        return counts
 
     def record(self, source_id, context, layer, status, payload):
         with self.connect() as db:

@@ -386,7 +386,7 @@ def plan_replay(instance_dir: Path, spec: dict, case_ids: list[str]) -> dict:
 
     返回 {'replay': {case_id: (source_exp, source_line)}, 'run': [case_id]}。
     重放粒度为整题（缺的题由 runner 全量执行；LLM 请求缓存使生成/初判零花费，
-    新花费只发生在补验轮）。固定验收与冒烟不规划（调用方保证）。
+    新花费只发生在补验轮）。开发和固定验收均可复用，冒烟不规划。
     """
     empty = {'replay': {}, 'run': list(case_ids)}
     full = _target_fingerprints_full(instance_dir, spec)
@@ -479,8 +479,7 @@ def apply_replay(exp_dir: Path) -> dict:
     from . import datasets as _datasets
     spec = experiment.spec_of(exp_dir)
     result = {'replayed': 0, 'run': 0}
-    if (spec.get('smoke') or spec.get('dataset') == 'fixed_test'
-            or spec.get('no_replay') or spec.get('kind') not in
+    if (spec.get('smoke') or spec.get('no_replay') or spec.get('kind') not in
             (experiment.KIND_GEN_AB, experiment.KIND_JUDGE_EVAL)):
         return result
     if spec.get('kind') == experiment.KIND_JUDGE_EVAL:

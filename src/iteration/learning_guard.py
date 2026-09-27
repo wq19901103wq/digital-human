@@ -123,7 +123,9 @@ def require_materials(data_ref, directories, role='development'):
     # learning eligibility merely because evaluation moved to a later window.
     audit = datasets.static_sources(data, directories, 'development')
     if audit.get('promotion_eligible') is not True:
-        raise ConfigError('学习材料来源未知或越界：禁止创建、运行、复用或晋升')
+        failures = '; '.join(row['asset'] + ': ' + row.get('error', '学习范围未验证或超出截止时间')
+                             for row in audit.get('assets', []) if not row['verified'])
+        raise ConfigError('学习材料来源未知或越界：禁止创建、运行、复用或晋升；' + failures)
     for directory in directories:
         record = json.loads((directory / 'learning.json').read_text())
         bound = record.get('asset_files', {})
@@ -191,17 +193,27 @@ def bind(spec):
     spec['learning_snapshot'] = snapshot(spec['data_ref'], _directories(spec), role)
 
 
-def verify(spec):
+def same_materials(saved, current):
+    """Validator hashes record provenance, not the identity of data/materials.
+
+    Runtime and scoring implementations remain bound separately. Always run the
+    current source checks before comparing; this does not waive those checks.
+    """
+    return ({k: v for k, v in saved.items() if k != 'guard_code'} ==
+            {k: v for k, v in current.items() if k != 'guard_code'})
+
+
+def verify(spec, *, historical_directory=None):
     _require(bool(spec.get('learning_snapshot')), '实验缺少冻结来源证明；保留旧结果，禁止补签后直接续跑')
     role = spec.get('purpose') or ('judge_development' if spec['kind'] == 'judge_eval'
                                   and spec['dataset'] == 'development' else spec['dataset'])
     current = snapshot(spec['data_ref'], _directories(spec), role)
-    _require(spec['learning_snapshot'] == current, '数据、材料或来源规则变化；旧断点禁止直接复用')
+    _require(same_materials(spec['learning_snapshot'], current), '数据、材料或来源变化；旧断点禁止直接复用')
     if spec.get('acceptance'):
         from .acceptance import rows
         rows(spec['acceptance'], spec)
     from . import gates
-    _require(spec.get('evaluation_materials') == gates.materials(spec), '模型或评分条件已变化')
+    gates.verify_materials(spec, historical_directory=historical_directory)
 
 
 def verify_generation(spec, cases):
@@ -209,7 +221,6 @@ def verify_generation(spec, cases):
     from ..generator.history_sources import load
     seal = RunSeal([versions.data_version_dir(spec['data_ref']),
                     versions.generator_dir(spec['generator_ref'])], spec.get('inputs', {}))
-    require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
     history = load(versions.data_version_dir(spec['data_ref']))
     role = ('judge_training' if spec.get('dataset') == 'training' else
             'judge_development' if spec.get('dataset') == 'development' else spec.get('dataset'))
@@ -235,7 +246,9 @@ def verify_generation(spec, cases):
     if spec.get('learning_snapshot'):
         current = snapshot(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])],
                            spec['learning_snapshot']['role'])
-        _require(current == spec['learning_snapshot'], '生成来源依赖已变化，禁止复用')
+        _require(same_materials(spec['learning_snapshot'], current), '生成来源依赖已变化，禁止复用')
+    else:
+        require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
     seal.check()
     return seal
 
@@ -253,7 +266,8 @@ class MaterialSeal:
             raise ConfigError('学习来源记录无法读取，禁止继续') from exc
         _require(isinstance(evidence, dict), '学习来源证据格式无效，禁止继续')
         from .runtime import evidence_path
-        self.evidence = {evidence_path(p, h): stamp(evidence_path(p, h)) for p, h in evidence.items()}
+        paths = [evidence_path(p, h) for p, h in evidence.items()]
+        self.evidence = {p: stamp(p) for p in paths}
         self.stamps = self._stamps()
         _require(before == (stamp(record) if record.exists() else None), '读取期间学习来源发生变化')
 
@@ -443,6 +457,9 @@ def verify_pack(pack, dataset):
     _require(proof.get('rows_sha256') == cache.digest(pack['rows']), '回复包行内容与生成证明不符')
     from .datasets import pack_cases
     verify_generation(recipe, pack_cases(pack))
+    if recipe.get('generation_reuse'):
+        from .generation_reuse import verify_rows
+        verify_rows(recipe, pack_cases(pack), pack['rows'])
 
 
 def pack_proof(recipe, rows):

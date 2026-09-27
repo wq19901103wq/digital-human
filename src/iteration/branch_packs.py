@@ -21,7 +21,7 @@ _INVALID_GENERATION = "生成结果两次都无效（JSON 结构/非空/条数�
 
 
 @versions.transaction
-def prepare_initial(kind='calibration', sample=None):
+def prepare_initial(kind='calibration', sample=None, reuse_generations=None):
     """Freeze a complete development list before any transport call.
 
     Fixed replies are created only by a branch after binding its acceptance
@@ -45,6 +45,9 @@ def prepare_initial(kind='calibration', sample=None):
               'data_snapshot': data_guard.generation_snapshot(cases, data, [info['config']]),
               'learning_snapshot': learning_guard.snapshot(current['data'], [info['dir']], 'judge_development')}
     learning_guard.verify_generation(recipe, cases)
+    if reuse_generations:
+        from . import generation_reuse
+        recipe['generation_reuse'] = generation_reuse.prepare(recipe, cases, reuse_generations)
     ref = time.strftime('pack-calibration-%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     directory = versions.PRIVATE / 'judge_eval' / ref
     runtime.freeze(directory)
@@ -63,7 +66,6 @@ def prepare(source: dict, current: dict, dataset: str) -> str:
     datasets.assert_pack(versions.data_version_dir(current['data']), pack,
                          'judge_development' if dataset == 'development' else dataset)
     learning_guard.verify_pack(pack, dataset)
-    learning_guard.require_materials(current['data'], [versions.generator_dir(current['production_gen'])])
     if pack["c0_gen_version"] == current["production_gen"]:
         return source["ref"]
     recipe = {"source": source, "data_ref": current["data"],
@@ -114,6 +116,10 @@ def build(ref: str, workers: int = 1) -> None:
                       'rows': load(versions.data_version_dir(recipe['data_ref'])).role(recipe['purpose'])}
         cases = datasets.pack_cases(source)
         seal = learning_guard.verify_generation(recipe, cases)
+        from . import generation_reuse
+        reused, reuse_files = generation_reuse.load(recipe, cases)
+        if reuse_files:
+            seal.files.update(learning_guard.RunSeal(files=reuse_files).files)
         checkpoint = directory / "building.json"
         saved = json.loads(checkpoint.read_text()) if checkpoint.exists() else {"rows": []}
         done = {str(row["case_id"]): row for row in saved["rows"]}
@@ -132,7 +138,8 @@ def build(ref: str, workers: int = 1) -> None:
 
         def generate(case):
             seal.check()
-            if not hasattr(worker, "generator"):
+            saved_generation = reused.get(str(case['case_id']))
+            if saved_generation is None and not hasattr(worker, "generator"):
                 worker.generator = ReplyGenerator(settings, info["config"],
                     build_clients(settings, info["config"]["llm"]),
                     prompt_root=info["dir"], pool_path=data / "fewshot_pool.jsonl")
@@ -141,7 +148,12 @@ def build(ref: str, workers: int = 1) -> None:
                               "baseline_ref": info["id"], "data_ref": recipe["data_ref"]})
             try:
                 with trace.operation("generation", "baseline", 0, {"forced_reply": True}) as op:
-                    result = worker.generator.generate(case, forced_reply=True)
+                    if saved_generation is not None:
+                        from ..tracing import note
+                        note('generation_reuse', saved_generation['source'])
+                        result = saved_generation['result']
+                    else:
+                        result = worker.generator.generate(case, forced_reply=True)
                     op["result"] = result
                 trace.finish("ok")
                 seal.check()
@@ -164,7 +176,8 @@ def build(ref: str, workers: int = 1) -> None:
                 progress.update(completed=len(done), updated_at=time.time())
                 write_json(directory / "progress.json", progress)
             rows = [done[str(case["case_id"])] for case in cases]
-            learning_guard.verify_generation(recipe, cases)
+            seal.check()
+            generation_reuse.verify_rows(recipe, cases, rows)
             write_json(directory / "pack.json", {
                 **source, "pack_id": ref, "c0_gen_version": info["id"], "data_ref": recipe["data_ref"],
                 "rebuilt_from": recipe.get("source"), "rows": rows,

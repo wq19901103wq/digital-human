@@ -304,6 +304,79 @@ def test_generation_checkpoint_cannot_skip_source_validation(env):
     assert env.calls == [] and (directory / 'generations.json').read_bytes() == old
 
 
+def test_validator_revision_preserves_material_identity(env, monkeypatch):
+    directory = create(env)
+    spec = experiment.spec_of(directory)
+    original = guard.snapshot
+
+    def revised(*args, **kwargs):
+        return {**original(*args, **kwargs), 'guard_code': {'validator': 'new-revision'}}
+
+    monkeypatch.setattr(guard, 'snapshot', revised)
+    guard.verify(spec)
+    (env.gdir / 'persona.md').write_text('changed material')
+    with pytest.raises(ConfigError):
+        guard.verify(spec)
+    assert not env.calls
+
+
+@pytest.mark.parametrize('invalid', [None, 'missing', 'implementation', 'source',
+                                    'model', 'unfinished', 'different_spec'])
+def test_completed_learning_evidence_uses_original_executor(env, monkeypatch, invalid):
+    from src.iteration import gates, runtime
+    directory = create(env)
+    snapshot = runtime.verify(directory / 'runtime.json')
+    write_json(directory / 'state.json', {'status': 'finished'})
+    spec = experiment.spec_of(directory)
+    original = gates.materials
+
+    def migrated(value):
+        result = original(value)
+        result['implementation']['judge/judge.py'] = '0' * 64
+        return result
+
+    monkeypatch.setattr(gates, 'materials', migrated)
+    # No changed executor may silently resume a live run.
+    with pytest.raises(ConfigError):
+        guard.verify(spec)
+    if invalid == 'missing':
+        (directory / 'runtime.json').unlink()
+    elif invalid == 'implementation':
+        spec['evaluation_materials']['implementation']['judge/judge.py'] = '1' * 64
+        write_json(directory / 'spec.json', spec)
+    elif invalid == 'source':
+        (snapshot / 'src/judge/judge.py').write_text('changed executor')
+    elif invalid == 'model':
+        (env.gdir / 'persona.md').write_text('changed learning material')
+    elif invalid == 'unfinished':
+        write_json(directory / 'state.json', {'status': 'running'})
+    elif invalid == 'different_spec':
+        spec['baseline_ref'] = spec['candidate_ref']
+    saved = {name: (directory / name).read_bytes() for name in ('spec.json', 'state.json')}
+    if invalid:
+        with pytest.raises(ConfigError):
+            guard.verify(spec, historical_directory=directory)
+    else:
+        guard.verify(spec, historical_directory=directory)
+    assert all((directory / name).read_bytes() == value for name, value in saved.items())
+    assert not env.calls
+
+
+@pytest.mark.parametrize('snapshot', [True, False])
+def test_generation_checks_materials_once_including_legacy_inputs(env, snapshot, monkeypatch):
+    from unittest.mock import Mock
+    spec = {'data_ref': 'd-test', 'generator_ref': 'g-0001', 'dataset': 'training'}
+    if snapshot:
+        spec['learning_snapshot'] = guard.snapshot('d-test', [env.gdir], 'judge_training')
+    else:
+        spec['inputs'] = {str(p.resolve()): sha256_file(p) for p in load(env.source.directory).files}
+    checked = Mock(wraps=guard.require_materials)
+    monkeypatch.setattr(guard, 'require_materials', checked)
+    guard.verify_generation(spec, env.source.roles['judge_training'])
+    assert checked.call_count == 1
+    assert not env.calls
+
+
 def test_unknown_training_origin_rejected_before_client_or_fitter(env, monkeypatch):
     monkeypatch.setattr(features_job, 'CodexJudgeClient', lambda *a: pytest.fail('client must not be built'))
     directory = env.root / 'judge_training/unknown'

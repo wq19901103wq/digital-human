@@ -144,15 +144,16 @@ def test_formal_experiment_rejects_override_and_smoke(priv):
         experiment.create_gen_experiment("fixed_test", "x", {}, limit=5)
 
 
-def test_one_shot(priv, monkeypatch):
+def test_fixed_reuse_preserves_completed_and_incomplete_experiments(priv, monkeypatch):
     # 先推进开发基线，fixed 轮才有可比较的候选（iteration ≠ production）
     e0 = _mk_dev_exp(priv, monkeypatch, model="m0")
     _finish_exp(e0, "merge_to_iteration_baseline")
     promote.promote_gen(e0.name)
     e1 = experiment.create_gen_experiment("fixed_test", "改动A", exp_id="fixed-A")
     finish_with_cases(e1, 'reject', wins=0, losses=2)
-    with pytest.raises(Exception, match="one-shot"):
-        experiment.create_gen_experiment("fixed_test", "改动A（重试）")
+    repeated = experiment.create_gen_experiment("fixed_test", "复用改动A对照", exp_id="fixed-A-reuse")
+    assert experiment.spec_of(repeated)['candidate_ref'] == experiment.spec_of(e1)['candidate_ref']
+    assert experiment.state_of(e1)['verdict'] == 'reject'
     # 开发基线再前进 → 新候选可测；可恢复失败必须恢复原实验
     e_dev = _mk_dev_exp(priv, monkeypatch, model="mB")
     _finish_exp(e_dev, "merge_to_iteration_baseline")
@@ -163,8 +164,10 @@ def test_one_shot(priv, monkeypatch):
     experiment.finish(e2, {'attempted': 6, 'pairs': 0, 'failures': 0,
                           'identified_baseline': 0, 'identified_candidate': 0},
                       {"verdict": "experiment_incomplete", "reason": "y"})
-    with pytest.raises(Exception, match="恢复原实验"):
-        experiment.create_gen_experiment("fixed_test", "改动B（重试）")
+    assert experiment.load_experiment('fixed-B') == e2
+    assert experiment.state_of(e2)['verdict'] == 'experiment_incomplete'
+    with pytest.raises(Exception):
+        experiment.create_gen_experiment("fixed_test", "禁止覆盖原记录", exp_id="fixed-B")
 
 
 def test_full_run_gates(priv):
@@ -560,7 +563,7 @@ def test_validation_pack_build_requires_entry_before_reading_answers(priv, monke
     from scripts import evaluate_judge
     (priv / "data/d-0001/fixed_test.jsonl").unlink()
     with pytest.raises(ConfigError, match="直接比较"):
-        evaluate_judge.cmd_build(Namespace(kind="validation", sample=1000))
+        evaluate_judge.cmd_build(Namespace(kind="validation", sample=1000, reuse_generations=False))
 
 
 @pytest.mark.parametrize('kwargs', [{'candidate_ref': 'j-0002'}, {'judge_overrides': {'llm': {'model': 'new'}}}])

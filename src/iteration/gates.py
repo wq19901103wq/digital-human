@@ -32,11 +32,14 @@ def require_promotable(spec: dict) -> None:
         raise ConfigError(reason)
 
 
-def verify_learning(spec: dict) -> None:
+def verify_learning(spec: dict, *, historical_directory: Path | None = None) -> None:
     """Use the same verified historical-code paths at evaluation and adoption."""
     from . import gbdt_evidence, learning_guard, pack_transport, runtime
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
-        learning_guard.verify(spec)
+        if historical_directory is None:
+            learning_guard.verify(spec)
+        else:
+            learning_guard.verify(spec, historical_directory=historical_directory)
 
 
 def bind_learning(spec: dict) -> None:
@@ -44,6 +47,20 @@ def bind_learning(spec: dict) -> None:
     from . import gbdt_evidence, learning_guard, pack_transport, runtime
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
         learning_guard.bind(spec)
+
+
+def require_learning_materials(data_ref, directories, role='development'):
+    """Creation resolves archived code with the same proof checks as adoption."""
+    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
+        return learning_guard.require_materials(data_ref, directories, role)
+
+
+def learning_execution_seal(spec: dict):
+    """Keep source verification identical for direct and frozen-runtime runs."""
+    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
+        return learning_guard.execution_seal(spec)
 
 
 def judge_templates(spec: dict) -> list[Path]:
@@ -101,6 +118,28 @@ def materials(spec: dict) -> dict:
     if replay_inputs is not None:
         result['saved_draw_inputs'] = replay_inputs
     return result
+
+
+def verify_materials(spec: dict, *, historical_directory: Path | None = None) -> dict:
+    """Completed evidence may use its authenticated executor; live runs may not."""
+    if historical_directory is not None:
+        from . import experiment
+        if (spec != experiment.spec_of(historical_directory) or spec.get('dataset') != 'development'
+                or experiment.state_of(historical_directory).get('status') != 'finished'):
+            raise ConfigError('历史复用仅限原始、已完成的开发对比')
+    frozen, current = spec.get('evaluation_materials'), materials(spec)
+    if frozen == current:
+        return frozen
+    if (historical_directory is None or not isinstance(frozen, dict)
+            or {k: v for k, v in frozen.items() if k != 'implementation'}
+            != {k: v for k, v in current.items() if k != 'implementation'}):
+        raise ConfigError('模型或评分条件已变化')
+    from .runtime import verify_historical_implementation
+    try:
+        verify_historical_implementation(historical_directory, frozen.get('implementation'))
+    except OSError as exc:
+        raise ConfigError('历史执行代码证明缺失，禁止复用') from exc
+    return frozen
 
 
 def development_rows(spec: dict, *, historical_directory: Path | None = None) -> list[dict]:
@@ -190,19 +229,17 @@ def evidence(directory: Path) -> tuple[dict, dict]:
     from . import experiment
     spec, state = experiment.spec_of(directory), experiment.state_of(directory)
     require_promotable(spec)
-    verify_learning(spec)
     if (spec['dataset'] != 'development' or spec.get('smoke') or
             spec.get('purpose') == 'gen_optimization' or state.get('status') != 'finished'):
         raise ConfigError('需要已完成的正式开发对比')
-    frozen = spec.get('evaluation_materials')
-    if frozen is None or frozen != materials(spec):
-        raise ConfigError('模型或评分条件缺少冻结证据，或已发生变化')
+    verify_learning(spec, historical_directory=directory)
+    frozen = verify_materials(spec, historical_directory=directory)
     data = versions.data_version_dir(spec['data_ref'])
     assets = [versions.PRIVATE / ('judges' if ref.startswith('j-') else 'generators') / ref
               for ref in frozen['versions']]
     if datasets.static_sources(data, assets, 'development').get('promotion_eligible') is False:
         raise ConfigError('当前学习来源核验不通过')
-    metrics = confirmed_metrics(directory, development_rows(spec), spec)
+    metrics = confirmed_metrics(directory, development_rows(spec, historical_directory=directory), spec)
     for key, value in metrics.items():
         if key in state.get('metrics', {}) and state['metrics'][key] != value:
             raise ConfigError(f'逐题汇总与已存指标不一致: {key}')
@@ -232,9 +269,12 @@ def fixed_entry(kind: str, data_ref: str, baseline_ref: str, candidate_ref: str,
     candidates = []
     for path in paths:
         spec = experiment.spec_of(path.parent)
-        if (spec.get('kind') == kind and spec.get('dataset') == 'development' and
-                not spec.get('smoke') and spec.get('data_ref') == data_ref and
-                spec.get('candidate_ref') == candidate_ref):
+        if (spec.get('kind') != kind or spec.get('dataset') != 'development' or
+                spec.get('smoke') or spec.get('candidate_ref') != candidate_ref or
+                (evidence_id and path.parent.name != evidence_id)):
+            continue
+        if spec.get('data_ref') == data_ref or (kind == 'gen_ab' and
+                datasets.fixed_refresh_compatible(spec['data_ref'], data_ref)):
             candidates.append((path.parent, spec))
     if kind == 'judge_eval' and development_pack is None and candidates:
         development_pack = candidates[0][1].get('pack_ref')
@@ -257,13 +297,18 @@ def fixed_entry(kind: str, data_ref: str, baseline_ref: str, candidate_ref: str,
             reasons.append(str(exc))
             continue
         need = max(1, ceil(proto['fixed_entry_min_net_win_rate'] * metrics['pairs']))
-        return {'eligible': metrics['net_win_confirmed'] >= need,
+        receipt = {'eligible': metrics['net_win_confirmed'] >= need,
                 'experiment_id': directory.name, 'baseline_ref': baseline_ref,
                 'candidate_ref': candidate_ref, 'data_ref': data_ref,
                 'development_pack': development_pack, 'pairs': metrics['pairs'],
                 'net_win_confirmed': metrics['net_win_confirmed'], 'required_net_win': need,
                 'evidence_sha256': {name: sha256_file(directory / name)
                                     for name in ('spec.json', 'state.json', 'cases.jsonl')}}
+        if spec['data_ref'] != data_ref:
+            receipt['development_data_ref'] = spec['data_ref']
+            receipt['fixed_refresh_sha256'] = sha256_file(
+                versions.data_version_dir(data_ref) / 'purposes.json')
+        return receipt
     detail = '; '.join(dict.fromkeys(reasons))
     raise ConfigError('缺少同条件的生产版→最新开发版直接比较；请先在原开发集运行 --against-production'
                       + (f'（{detail}）' if detail else ''))

@@ -19,6 +19,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("index", help="幂等导入历史记录，仅建立查询索引")
     sub.add_parser("stats")
+    reuse = sub.add_parser("reuse-blind-orders", help="复用重建包的既有盲序；保留已分配顺序，不发起模型请求")
+    reuse.add_argument("--experiment", required=True)
     entries = sub.add_parser("entries", help="按模型、实验和样本查缓存键；get 返回完整请求与结果")
     entries.add_argument("--layer")
     entries.add_argument("--model")
@@ -45,6 +47,16 @@ def main():
         result = cache.import_history(instance)
     elif args.command == "stats":
         result = store.stats()
+    elif args.command == "reuse-blind-orders":
+        from src.config import sha256_file
+        if Path(args.experiment).name != args.experiment or args.experiment in {".", ".."}:
+            parser.error("实验名不能包含路径")
+        spec = json.loads((instance / "experiments" / args.experiment / "spec.json").read_text())
+        pack_root = instance / "judge_eval"
+        pack_path = (pack_root / spec["pack_ref"] / "pack.json").resolve()
+        if not pack_path.is_relative_to(pack_root.resolve()) or sha256_file(pack_path) != spec["pack_sha256"]:
+            parser.error("评测包与冻结实验不一致")
+        result = store.reuse_pack_blind_orders(json.loads(pack_path.read_text())["rows"])
     elif args.command == "get":
         result = store.get(args.key)
     elif args.command == "entries":

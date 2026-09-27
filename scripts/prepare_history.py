@@ -24,6 +24,9 @@ def main():
     source.add_argument('--exports', type=Path)
     source.add_argument('--source-data', help='复用已有版本的冻结原始消息，仅重新切分')
     source.add_argument('--reimport-data', help='从旧版清单指定且哈希一致的原始导出补全消息类型')
+    source.add_argument('--refresh-fixed-data', help='仅换未使用的固定批次；保留学习及开发材料')
+    parser.add_argument('--fixed-seed', type=int, default=43)
+    parser.add_argument('--fixed-chat-cap', type=int, help='仅新固定批次的每聊天上限；不改开发规则')
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--development-start', type=int)
     parser.add_argument('--acceptance-start', type=int)
@@ -32,7 +35,15 @@ def main():
     parser.add_argument('--response-gap-seconds', type=int, default=600)
     parser.add_argument('--reply-gap-seconds', type=int, default=120)
     args = parser.parse_args()
+    if args.fixed_chat_cap is not None and not args.refresh_fixed_data:
+        parser.error('--fixed-chat-cap 仅可用于 --refresh-fixed-data')
     versions.switch_instance(args.instance)
+    if args.refresh_fixed_data:
+        from src.bootstrap.acceptance_refresh import refresh
+        print(json.dumps(refresh(args.refresh_fixed_data, seed=args.fixed_seed,
+                         fixed_chat_cap=args.fixed_chat_cap, build=args.build),
+                         ensure_ascii=False), flush=True)
+        return
     if args.source_data:
         archive = versions.data_version_dir(args.source_data) / 'messages.jsonl'
         source_paths = [archive]

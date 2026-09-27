@@ -241,6 +241,33 @@ def test_unfinished_source_never_replayed(instance):
     assert plan['replay'] == {} and plan['run'] == ['c1', 'c2']
 
 
+@pytest.mark.parametrize('source_dataset', ['fixed_test', 'development'])
+def test_fixed_replay_reuses_only_same_role_and_skips_completed_cases(instance, source_dataset):
+    source = _gen_experiment(instance, name='fixed-source', dataset=source_dataset)
+    measurements.record_experiment(source)
+    target = _gen_experiment(instance, name='fixed-target', dataset='fixed_test')
+    (target / 'cases.jsonl').unlink()
+    (target / 'state.json').unlink()
+    _write(instance / 'data/d-1/fixed_test.jsonl', '\n'.join(
+        json.dumps({'case_id': c}) for c in ('c1', 'c2')))
+    result = measurements.apply_replay(target)
+    if source_dataset == 'development':
+        assert result['replayed'] == 0
+        return
+    assert result['replayed'] == 2
+    before = (target / 'cases.jsonl').read_bytes()
+    originals = [json.loads(line) for line in (source / 'cases.jsonl').read_text().splitlines()]
+    for replayed, original in zip(map(json.loads, before.splitlines()), originals, strict=True):
+        assert {key: replayed[key] for key in original} == original
+    source_rounds = {(r['case_id'], r['side_fp'], r['round_no'], r['round_fp'])
+                     for r in measurements.iter_side_measurements(source)}
+    replay_rounds = {(r['case_id'], r['side_fp'], r['round_no'], r['round_fp'])
+                     for r in measurements.iter_side_measurements(target)}
+    assert replay_rounds == source_rounds
+    assert measurements.apply_replay(target)['replayed'] == 0
+    assert (target / 'cases.jsonl').read_bytes() == before
+
+
 def test_replay_skips_serialization_mismatch(instance, monkeypatch):
     """来源行无法被 writer 序列化逐字节还原时，该题退回执行（评审 P1-2）。"""
     exp = _gen_experiment(instance, name='exp-src')

@@ -136,13 +136,7 @@ def _accepted_source(name: str, kind: str, current: dict) -> dict:
             or result.get('verdict') != 'merge_to_iteration_baseline'):
         raise ConfigError('来源分支的开发采用记录与正式实验不一致')
     gates.require_promotable(spec)
-    frozen, current_materials = spec.get('evaluation_materials', {}), gates.materials(spec)
-    if ({k: v for k, v in frozen.items() if k != 'implementation'}
-            != {k: v for k, v in current_materials.items() if k != 'implementation'}):
-        raise ConfigError('来源开发版的模型或评分条件已变化')
-    if frozen.get('implementation') != current_materials['implementation']:
-        from .runtime import verify_historical_implementation
-        verify_historical_implementation(directory, frozen.get('implementation'))
+    gates.verify_materials(spec, historical_directory=directory)
     metrics = gates.confirmed_metrics(directory,
         gates.development_rows(spec, historical_directory=directory), spec)
     if protocol.decide(metrics, 'development', spec['protocol'])['verdict'] != 'merge_to_iteration_baseline':
@@ -239,6 +233,28 @@ def _trial_id(record: dict, dataset: str) -> str:
     return f"branch-{record['name']}-{record['id']}-{stage}"
 
 
+def _development_id(record: dict) -> str:
+    return record.get('carried_development_id') or _trial_id(record, 'development')
+
+
+def _continue_fixed(state: dict, proposal: dict, current: dict, record: dict) -> None:
+    """Reuse accepted development under unchanged or compatible data conditions."""
+    old_basis = proposal['basis']
+    accepted = state.get('development', {})
+    if (state['kind'] != 'gen' or state.get('stage_limit') != 'fixed_test' or
+            accepted.get('candidate_ref') != proposal['candidate_ref'] or
+            accepted.get('basis') != old_basis or
+            any(current[k] != old_basis[k] for k in ('production_gen', 'production_judge'))):
+        raise ConfigError('数据版本已变化：需提交基于新数据的提案，禁止自动换样本')
+    datasets.fixed_refresh_compatible(old_basis['data'], current['data'], required=True)
+    receipt = gates.require_fixed_entry(experiment.KIND_GEN_AB, current['data'],
+        current['production_gen'], proposal['candidate_ref'], proposal['protocol'],
+        judge_ref=current['production_judge'], evidence_id=accepted['experiment_id'])
+    record.update(phase='fixed_test', baseline_ref=current['production_gen'],
+        candidate_ref=proposal['candidate_ref'], carried_development_id=accepted['experiment_id'],
+        development_comparison=receipt)
+
+
 def _new_round(state: dict, proposal: dict, current: dict) -> dict:
     rounds_dir = _root(state["name"]) / "rounds"
     rid = versions._next_id([p.stem for p in rounds_dir.glob("*.json")], "r")
@@ -252,8 +268,17 @@ def _new_round(state: dict, proposal: dict, current: dict) -> dict:
             if current != proposal['basis']:
                 raise ConfigError('Saved development draws require a new proposal after production changes')
             record['saved_draw_replay'] = proposal['saved_draw_replay']
-        if current["data"] != proposal["basis"]["data"]:
-            raise ConfigError("数据版本已变化：需提交基于新数据的提案，禁止自动换样本")
+        accepted = state.get('development', {})
+        reuse_development = (state['kind'] == 'gen' and state.get('stage_limit') == 'fixed_test'
+                             and current == proposal['basis']
+                             and accepted.get('basis') == current
+                             and accepted.get('candidate_ref') == proposal['candidate_ref'])
+        if current["data"] != proposal["basis"]["data"] or reuse_development:
+            _continue_fixed(state, proposal, current, record)
+            _save_round(record)
+            state['rounds'].append(rid)
+            write_json(_root(state['name']) / 'state.json', state)
+            return record
         old = _snapshot(state["kind"], proposal["origin_ref"])
         proposed = _snapshot(state["kind"], proposal["candidate_ref"])
         base_ref = current[f"production_{state['kind']}"]
@@ -298,7 +323,7 @@ def _ensure_trial(record: dict, dataset: str) -> Path:
             raise ConfigError("冒烟未完成或仍有失败，禁止启动开发全量")
     entry = None
     if dataset == "fixed_test":
-        dev = experiment.load_experiment(_trial_id(record, "development"))
+        dev = experiment.load_experiment(_development_id(record))
         if experiment.state_of(dev).get("verdict") != "merge_to_iteration_baseline" or \
                 experiment.state_of(dev).get("status") != "finished":
             raise ConfigError("开发实验尚未通过，不能进入固定验收")
@@ -327,9 +352,6 @@ def _ensure_trial(record: dict, dataset: str) -> Path:
         pack_ref = record["packs"][actual_dataset]
         _pack_info(pack_ref, record["basis"], actual_dataset)
     fp = experiment._candidate_fingerprint(candidate["config"], candidate["dir"])
-    if dataset == "fixed_test":
-        experiment.check_one_shot(fp, exp_id, experiment.KIND_GEN_AB if kind == "gen" else
-                                  experiment.KIND_JUDGE_EVAL)
     spec = {"id": exp_id, "kind": experiment.KIND_GEN_AB if kind == "gen" else experiment.KIND_JUDGE_EVAL,
             "dataset": actual_dataset, "single_change": record["change"], "role": "production vs branch",
             "baseline_ref": baseline_ref, "candidate_ref": record["candidate_ref"],
@@ -416,7 +438,7 @@ def promote_experiment(exp_id: str) -> dict:
                 record.update(phase='development_accepted', reason='已保留有收益的开发版；本分支仅运行开发比较')
                 _save_round(record)
         return ptr  # 各分支保留自己的开发版，不争抢共享 iteration 指针。
-    dev = experiment.load_experiment(_trial_id(record, "development"))
+    dev = experiment.load_experiment(_development_id(record))
     if experiment.state_of(dev).get("status") != "finished" or \
             experiment.state_of(dev).get("verdict") != "merge_to_iteration_baseline":
         raise ConfigError("缺少同轮候选的开发通过证据")
@@ -440,7 +462,8 @@ def _entry(record, *, required=False):
     return check(experiment.KIND_GEN_AB if record['kind'] == 'gen' else experiment.KIND_JUDGE_EVAL,
         record['basis']['data'], record['basis'][f"production_{record['kind']}"], record['candidate_ref'],
         record['protocol'], judge_ref=record['basis']['production_judge'],
-        development_pack=record['packs'].get('development'))
+        development_pack=record['packs'].get('development'),
+        evidence_id=record.get('carried_development_id'))
 
 
 
@@ -457,7 +480,7 @@ def _fixed_job(record):
         return {'kind': 'experiment', 'id': path.name}
     if record['protocol'].get('gate_schema', 1) >= 2:
         if record['kind'] == 'judge' and 'fixed_test' not in record['packs']:
-            # Check before consuming a new batch. Once allocated, polling the
+            # Check before binding the reusable fixed set. Once bound, polling the
             # same pack does not reconstruct development evidence repeatedly.
             _entry(record, required=True)
             from .branch_packs import prepare, prepare_batch
@@ -558,7 +581,10 @@ def advance(name: str | None = None) -> list[dict]:
                         record.update(phase='rejected', reason=result.get('reason', '未达开发晋级门槛'))
                         _save_round(record)
                         continue
-                    promote_experiment(exp_path.name)
+                    if state.get('development', {}).get('experiment_id') == exp_path.name:
+                        _accepted_source(state['name'], state['kind'], current)
+                    else:
+                        promote_experiment(exp_path.name)
                     # Incremental gains must be verified against production directly; never add them.
                     if state.get('stage_limit') == 'development':
                         record.update(phase='development_accepted', reason='已保留有收益的开发版；本分支仅运行开发比较')
@@ -623,6 +649,14 @@ def set_stage_limit(name: str, stage: str) -> None:
         raise ConfigError('stage limit must be development or fixed_test')
     path = _root(name) / 'state.json'
     state = _read(path)
+    if stage == 'fixed_test' and state.get('stage_limit') == 'development' and state['rounds']:
+        record = round_of(f"{name}/{state['rounds'][-1]}")
+        if record['phase'] == 'development_accepted':
+            # Reuse the finished trial; advance still checks its evidence and
+            # production entry gate before allocating a fixed batch.
+            record['phase'] = 'development'
+            record.pop('reason', None)
+            _save_round(record)
     state['stage_limit'] = stage
     write_json(path, state)
 

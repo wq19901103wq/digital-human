@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare/apply a source-verified baseline migration, separate from promotion."""
+"""Prepare/apply or undo an audited baseline migration, separate from promotion."""
 import argparse
 import json
 import sys
@@ -21,12 +21,17 @@ def main():
         data.add_argument('--' + name, required=True)
     apply = sub.add_parser('apply', help='重新核验凭证后原子切换整组基线；不声称性能提升')
     apply.add_argument('--receipt', required=True)
+    rollback = sub.add_parser('rollback', help='撤销当前迁移，恢复凭证中的原指针并保留记录')
+    rollback.add_argument('--receipt', required=True)
+    rollback.add_argument('--reason', required=True)
     args = parser.parse_args()
     versions.switch_instance(args.instance)
     if args.command == 'prepare':
         result = str(baseline.prepare(args.data, args.generator, args.judge, reason=args.reason))
     elif args.command == 'prepare-data':
         result = str(baseline.prepare_data(args.data, args.report, reason=args.reason))
+    elif args.command == 'rollback':
+        result = baseline.rollback(args.receipt, reason=args.reason)
     else:
         result = baseline.apply(args.receipt)
     print(json.dumps(result, ensure_ascii=False, indent=2))

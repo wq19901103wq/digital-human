@@ -67,7 +67,7 @@ def isolated_legacy_provenance(monkeypatch):
     seal = SimpleNamespace(check=lambda: None)
     monkeypatch.setattr(learning_guard, 'require_materials', lambda *a, **kw: {})
     monkeypatch.setattr(learning_guard, 'bind', lambda *a: None)
-    monkeypatch.setattr(learning_guard, 'verify', lambda *a: None)
+    monkeypatch.setattr(learning_guard, 'verify', lambda *a, **kw: None)
     monkeypatch.setattr(learning_guard, 'execution_seal', lambda *a: seal)
     monkeypatch.setattr(learning_guard, 'verify_pack', lambda *a: None)
     monkeypatch.setattr(learning_guard, 'snapshot', lambda *a: {})

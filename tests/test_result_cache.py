@@ -287,6 +287,88 @@ def test_partial_judge_resume_keeps_blinding_and_initial(tmp_path, bundle, case,
     assert [schema for schema, _ in calls] == [False, True, True]
 
 
+def test_rebuilt_pack_reuses_lr_blinding_and_exact_feature_request(tmp_path, bundle, case, codex, monkeypatch):
+    from src.judge.lr_retrain import LRJudge
+    cfg, directory = bundle
+    cfg = {**cfg, "llm": {"provider": "codex_cli", "model": "luna", "reasoning_effort": "low",
+                         "timeout_seconds": 360, "codex_cli_version": "0.144.1"}}
+    original = {**case, "ai_replies": ["九点"], "generation_trace_ref": "old-generation"}
+    first, _ = judge(tmp_path, LRJudge(cfg, directory), original)
+    monkeypatch.setattr(corrected.random, "random", lambda: .1)
+    rebuilt = {**original, "generation_trace_ref": "reused-generation"}
+    second, log = judge(tmp_path, LRJudge(cfg, directory), rebuilt, "rebuilt")
+    assert first == second and len(codex[0]) == 1
+    hits = [e["data"] for e in log.value["operations"][0]["events"] if e["kind"] == "cache_hit"]
+    assert {"blind_order", "llm_request"} <= {hit["layer"] for hit in hits}
+    source = next(hit for hit in hits if hit["layer"] == "blind_order")["origin"]
+    assert source["experiment_id"] == "a" and source["cache_reuse"]["source_key"]
+
+
+def blind_draw(root, case, *, exp="a", round=0, client="luna", replies=None, produce=lambda: False, **spec):
+    log = trace(root, case, exp, **spec)
+    identity = {"case": case, "candidate_replies": replies or case["ai_replies"], "client": client}
+    with log.operation("judge", "baseline", round, {}):
+        return cache.memo("blind_order", identity, produce)
+
+
+@pytest.mark.parametrize("change", ["context", "human", "candidate", "model", "case_id", "metadata",
+                                    "round", "sample_epoch", "epoch", "fixed"])
+def test_blind_trace_alias_never_relaxes_actual_inputs_or_sampling_scope(tmp_path, case, monkeypatch, change):
+    original = {**case, "ai_replies": ["九点"], "generation_trace_ref": "old"}
+    assert blind_draw(tmp_path, original) is False
+    rebuilt = copy.deepcopy({**original, "generation_trace_ref": "new"})
+    options = {"exp": "b"}
+    if change == "context":
+        rebuilt["context"][0]["text"] = "changed"
+    elif change == "human":
+        rebuilt["human_reply"] = ["changed"]
+    elif change == "candidate":
+        options["replies"] = ["changed"]
+    elif change == "model":
+        options["client"] = "other-model"
+    elif change == "case_id":
+        rebuilt["case_id"] = "other-case"
+    elif change == "metadata":
+        rebuilt["relationship"] = "changed"
+    elif change == "round":
+        options["round"] = 1
+    elif change == "sample_epoch":
+        options["cache"] = {"sample_epoch": "independent"}
+    elif change == "epoch":
+        monkeypatch.setenv("DH_CACHE_EPOCH", "other-epoch")
+    elif change == "fixed":
+        options["dataset"] = "fixed_test"
+    assert blind_draw(tmp_path, rebuilt, produce=lambda: True, **options) is True
+
+
+def test_pack_alias_backfill_preserves_existing_order_and_works_for_frozen_reader(tmp_path, case, monkeypatch):
+    original = {**case, "ai_replies": ["九点"], "generation_trace_ref": "old"}
+    rebuilt = {**original, "generation_trace_ref": "new"}
+    store = cache.get_store(tmp_path / ".cache")
+    with monkeypatch.context() as legacy:
+        legacy.setattr(store, "compatible_blind_order", lambda *_: None)
+        blind_draw(tmp_path, original)
+        blind_draw(tmp_path, rebuilt, exp="b", produce=lambda: True)
+        blind_draw(tmp_path, original, round=1)
+        blind_draw(tmp_path, original, exp="fixed-a", dataset="fixed_test")
+    counts = store.reuse_pack_blind_orders([rebuilt])
+    assert counts == {"cases": 1, "existing": 1, "reused": 2, "without_source": 0}
+    identity = {"case": rebuilt, "candidate_replies": ["九点"], "client": "luna"}
+    # Use the frozen pre-fix key format, without the new compatibility lookup.
+    key = cache.digest({"schema": 1, "layer": "blind_order", "identity": identity,
+                        "partition": "development", "case_id": case["case_id"], "round": 1,
+                        "sample_epoch": "shared-v1", "epoch": "1"})
+    saved = store.get(key)
+    assert saved["value"] is False and saved["origin"]["cache_reuse"]["source_key"]
+    assert blind_draw(tmp_path, rebuilt, exp="b") is True  # existing destination wins
+    assert blind_draw(tmp_path, rebuilt, round=1, produce=lambda: True) is False
+    assert blind_draw(tmp_path, rebuilt, round=2, produce=lambda: True) is True
+    assert blind_draw(tmp_path, rebuilt, exp="fixed-b", dataset="fixed_test", produce=lambda: True) is True
+    assert store.reuse_pack_blind_orders([rebuilt])["reused"] == 0
+    changed = {**rebuilt, "human_reply": ["changed"]}
+    assert store.reuse_pack_blind_orders([changed])["without_source"] == 1
+
+
 def test_pairwise_judge_invalid_result_is_not_cached(tmp_path, generation, case):
     build, calls, answers, _ = generation
     scorer = Judge({}, build()._llm["private"])

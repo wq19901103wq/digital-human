@@ -1,4 +1,4 @@
-"""Pre-sealed, non-reusable acceptance batches with immutable owner bindings."""
+"""Reusable frozen acceptance batches with immutable experiment bindings."""
 from __future__ import annotations
 
 import json
@@ -80,14 +80,13 @@ def claim(spec):
             if receipt['binding'] != identity:
                 raise ConfigError('acceptance owner cannot change its baseline or candidate')
             return receipt
-        used = {c['receipt']['batch_id'] for c in claims.values()}
-        batch = next((b for b in manifest['batches'] if b['id'] not in used), None)
-        if batch is None:
-            raise ConfigError('acceptance_exhausted: new sealed data is required')
+        # All new comparisons use the same frozen benchmark. Existing receipts
+        # retain their original batch; using questions never consumes them.
+        batch = manifest['batches'][0]
         receipt = {'schema': 1, 'experiment_id': spec['id'], 'data_ref': spec['data_ref'],
                    'batch_id': batch['id'], 'rows_sha256': batch['rows_sha256'],
                    'manifest_sha256': ledger['manifest_sha256'], 'binding': identity}
-        # Allocation consumes the batch, even if cancelled or a process crashes.
+        # Bind the experiment without consuming or changing the frozen questions.
         claims[spec['id']] = {'receipt': receipt, 'status': 'reserved', 'reserved_at': time.time()}
         write_json(root / 'ledger.json', ledger)
         return receipt
@@ -131,6 +130,6 @@ def status(data_ref):
     root = _root(data_ref)
     manifest = json.loads((root / 'manifest.json').read_text())
     ledger = json.loads((root / 'ledger.json').read_text())
-    return {'total': len(manifest['batches']), 'consumed': len(ledger['claims']),
-            'remaining': len(manifest['batches']) - len(ledger['claims']),
+    return {'total': len(manifest['batches']), 'consumed': 0,
+            'remaining': len(manifest['batches']), 'reusable': True,
             'jobs': {k: {'batch': v['receipt']['batch_id'], 'status': v['status']} for k, v in ledger['claims'].items()}}

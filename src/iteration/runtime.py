@@ -133,6 +133,10 @@ def evidence_path(name, expected):
     archived = versions.PRIVATE / 'evidence_blobs' / expected
     if p.suffix == '.py' and archived.is_file() and sha256_file(archived) == expected:
         return archived
+    from .pack_transport import snapshot_code_evidence
+    archived = snapshot_code_evidence(sys.modules[__name__], name, expected)
+    if archived is not None:
+        return archived
     raise ConfigError(f'frozen input changed or missing: {p.name}')
 
 

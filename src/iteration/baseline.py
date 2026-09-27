@@ -78,14 +78,43 @@ def prepare_data(data, report, *, reason):
     return path
 
 
-@versions.transaction
-def apply(receipt_id):
+def _receipt(receipt_id):
     if not isinstance(receipt_id, str) or len(receipt_id) != 32 or any(c not in '0123456789abcdef' for c in receipt_id):
         raise ConfigError('非法基线迁移凭证')
     path = versions.PRIVATE / 'baseline_migrations' / (receipt_id + '.json')
     receipt = json.loads(path.read_text())
     if receipt.get('sha256') != digest({k: v for k, v in receipt.items() if k != 'sha256'}):
         raise ConfigError('迁移凭证内容变化')
+    return receipt
+
+
+@versions.transaction
+def rollback(receipt_id, *, reason):
+    """Undo the current migration using its exact saved pointers; keep all evidence."""
+    if not reason or not reason.strip():
+        raise ConfigError('撤销基线迁移必须说明原因')
+    receipt = _receipt(receipt_id)
+    current = versions.load_pointers()
+    target = receipt['before']
+    audit_path = versions.PRIVATE / 'baseline_rollbacks' / (receipt_id + '.json')
+    if current == target and audit_path.exists():
+        return current
+    if current != {**receipt['after'], 'baseline_migration': receipt_id}:
+        raise ConfigError('当前基线已变化；禁止撤销其他迁移或覆盖后续晋升')
+    if not target:
+        raise ConfigError('迁移前无基线，不能恢复为空')
+    audit = dict(schema=1, kind='baseline_rollback', migration=receipt_id,
+                 migration_sha256=receipt['sha256'], before=current, after=target,
+                 reason=reason, created_at=time.time(), performance_claim=False)
+    audit['sha256'] = digest(audit)
+    write_json(audit_path, audit)
+    versions.save_pointers(target)
+    return target
+
+
+@versions.transaction
+def apply(receipt_id):
+    receipt = _receipt(receipt_id)
     before = versions.load_pointers() if versions.POINTERS_PATH.exists() else {}
     target = {**receipt['after'], 'baseline_migration': receipt_id}
     if before == target:

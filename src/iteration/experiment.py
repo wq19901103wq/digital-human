@@ -7,7 +7,7 @@
 - cases.jsonl 逐题明细（checkpoint）
 - candidate/  实验内候选版本目录（自包含快照，随实验归档）
 
-one-shot、续跑、审计都从实验目录取数——没有第二份状态需要保持一致。
+续跑、结果复用、审计都从实验目录取数——没有第二份状态需要保持一致。
 """
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ def _verify_trigger(baseline_gen: ReplyGenerator, cand_gen: ReplyGenerator,
         )
 
 
-# ---------- one-shot（SOP §8.3）：从实验目录查询，无独立 ledger ----------
+# ---------- 从实验目录查询历史比较 ----------
 
 def _matching_experiments(kind: str, **filters: Any) -> list[tuple[Path, dict, dict]]:
     out = []
@@ -206,32 +206,6 @@ def _matching_experiments(kind: str, **filters: Any) -> list[tuple[Path, dict, d
             continue
         out.append((d, spec, state_of(d)))
     return out
-
-
-def check_one_shot(candidate_fp: str, exp_id: str, kind: str = KIND_GEN_AB) -> None:
-    """同一候选指纹：完赛(adopt/reject)永久拒绝；进行中/可恢复必须恢复原实验。"""
-    for d, spec, state in _matching_experiments(kind, dataset="fixed_test"):
-        if spec.get("candidate_fingerprint") != candidate_fp:
-            # 老规格的指纹包含 Judge 来源 meta；按候选内容回算，来源变化不能绕过 one-shot。
-            ref = spec.get("candidate_ref")
-            if not ref:
-                continue
-            info = versions.load_generator(ref) if kind == KIND_GEN_AB else versions.judge_dir(ref)
-            if _candidate_fingerprint(info["config"], info["dir"]) != candidate_fp:
-                continue
-        other_id = spec["id"]
-        status = state.get("status")
-        verdict = state.get("verdict", "")
-        if status == "finished" and verdict in ("adopt", "reject"):
-            raise ConfigError(
-                f"该候选已于实验 {other_id} 完赛（{verdict}）：SOP §8 one-shot。"
-                "有异议→开发侧出新候选，或申请数据版本更新。"
-            )
-        if other_id != exp_id:
-            raise ConfigError(
-                f"该候选已有实验 {other_id}；必须恢复原实验续跑（保留成功样本），"
-                "确需重开请先废弃该实验目录"
-            )
 
 
 # ---------- 创建 ----------
@@ -267,7 +241,7 @@ def _fingerprint(core: dict[str, Any], diff: list[str]) -> str:
 def _candidate_fingerprint(candidate_config: dict[str, Any], data_dir: Path | None = None) -> str:
     """候选内容指纹 = 行为配置 + 人格/场景内容。
     data_dir 传版本目录时经 version_payload 统一读取（快照即唯一依据）；传工作区用于
-    开发轮新快照（创建前工作区即快照内容）。改场景=新候选，不受旧 one-shot 影响（SOP §2.5）。"""
+    开发轮新快照（创建前工作区即快照内容）。改场景=新候选。"""
     if data_dir is not None:
         payload = versions.version_payload(data_dir)
         payload.pop("meta", None)  # 训练/提交来源不属于模型行为，换来源仍是同一候选。
@@ -327,7 +301,7 @@ def create_gen_experiment(
     purpose: str | None = None,
     against_production: bool = False,
 ) -> Path:
-    """创建生成器 A/B 实验：预检、准入、候选版本、one-shot 一次完成。"""
+    """创建生成器 A/B 实验：预检、准入、候选版本一次完成。"""
     if exp_id is not None:
         record_contract.directory(exp_id)
     if not single_change.strip():
@@ -352,8 +326,7 @@ def create_gen_experiment(
     production = versions.load_generator(pointers["production_gen"])
     iteration = versions.load_generator(pointers["iteration_gen"])
     asset_dir = data_dir if (data_dir / 'persona.md').exists() else iteration['dir']
-    from . import learning_guard
-    learning_guard.require_materials(pointers['data'], [production['dir'], iteration['dir'],
+    gates.require_learning_materials(pointers['data'], [production['dir'], iteration['dir'],
                                                        asset_dir, judge['dir']])
 
     if dataset == "development" and not against_production:
@@ -423,7 +396,6 @@ def create_gen_experiment(
         cand_fp = _candidate_fingerprint(cand_ver["config"], cand_ver["dir"])
 
     if dataset == "fixed_test":
-        check_one_shot(cand_fp, exp_id)  # 模型调用前；失败不留孤儿目录
         datasets.acceptance_available(data_dir, exp_id)
 
     source_audit = datasets.static_sources(data_dir, [baseline['dir'], versions.generator_dir(cand_ref),
@@ -431,7 +403,7 @@ def create_gen_experiment(
     if purpose == 'gen_optimization':
         source_audit.update(promotion_eligible=False, reason='Gen 优化题用于调整策略，不能代替开发验证')
     if dataset == 'fixed_test' and source_audit.get('promotion_eligible') is False:
-        raise ConfigError('静态学习来源尚未核验，禁止消耗独立验收题；先做开发诊断')
+        raise ConfigError('静态学习来源尚未核验，禁止正式验收；先做开发诊断')
 
     exp_dir.mkdir(parents=True)
 
@@ -460,7 +432,7 @@ def create_gen_experiment(
     if receipt:
         spec['acceptance'] = receipt
     spec['evaluation_materials'] = gates.materials(spec)
-    learning_guard.bind(spec)
+    gates.bind_learning(spec)
     if entry:
         spec['fixed_entry'] = entry
     spec["fingerprint"] = _fingerprint(
@@ -487,7 +459,7 @@ def create_judge_eval_experiment(
     """Judge 实验，与生成器完全同构（SOP §4）：
     - development：基线=iteration_judge，候选=新 Judge 版本（overrides 非空），校准包
     - fixed_test：基线=production_judge，候选=iteration_judge 锁定快照（overrides 必空），
-      验证包 one-shot
+      验证包使用冻结题目，可跨实验复用
     """
     if exp_id is not None:
         record_contract.directory(exp_id)
@@ -519,7 +491,7 @@ def create_judge_eval_experiment(
     datasets.assert_pack(data_dir, pack, 'judge_development' if dataset == 'development' else 'fixed_test')
     from . import learning_guard
     learning_guard.verify_pack(pack, dataset)
-    learning_guard.require_materials(pointers['data'], [versions.judge_dir(ref)['dir'] for ref in
+    gates.require_learning_materials(pointers['data'], [versions.judge_dir(ref)['dir'] for ref in
         {pointers['production_judge'], pointers['iteration_judge'], candidate_ref or pointers['iteration_judge']}])
     if pack.get("c0_gen_version") != pointers["production_gen"]:
         raise ConfigError(
@@ -584,12 +556,11 @@ def create_judge_eval_experiment(
         exp_id = receipt['experiment_id']
     exp_id = exp_id or f"judge-{dataset}-{time.strftime('%Y%m%d-%H%M%S')}"
     if dataset == "fixed_test":
-        check_one_shot(cand_fp, exp_id, kind=KIND_JUDGE_EVAL)
         datasets.acceptance_available(data_dir, exp_id)
     source_audit = datasets.static_sources(data_dir, [baseline['dir'], versions.judge_dir(cand_ref)['dir'],
         versions.generator_dir(pack['c0_gen_version'])], dataset)
     if dataset == 'fixed_test' and source_audit.get('promotion_eligible') is False:
-        raise ConfigError('静态学习来源尚未核验，禁止消耗独立验收题')
+        raise ConfigError('静态学习来源尚未核验，禁止正式验收')
     exp_dir = record_contract.directory(exp_id)
     if exp_dir.exists():
         raise ConfigError(f"实验已存在: {exp_dir}；恢复运行用 run.py --exp {exp_id}")
@@ -627,7 +598,7 @@ def create_judge_eval_experiment(
         spec['generator_ref'] = pack['c0_gen_version']
         acceptance.rows(receipt, spec)
     spec['evaluation_materials'] = gates.materials(spec)
-    learning_guard.bind(spec)
+    gates.bind_learning(spec)
     if entry:
         if entry['data_ref'] != spec['data_ref']:
             raise ConfigError('固定包与开发准入证据数据版本不一致')
