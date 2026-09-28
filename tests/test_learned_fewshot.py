@@ -485,7 +485,8 @@ def test_frozen_candidate_resume_reuses_version_and_formal_stage(tree, monkeypat
 
 
 @pytest.mark.usefixtures('isolated_legacy_provenance')
-def test_workflow_resume_keeps_one_revision_and_versions_ranker(tree, monkeypatch, tmp_path):
+@pytest.mark.parametrize('from_branch', ['source', None])
+def test_workflow_resume_keeps_one_revision_and_versions_ranker(tree, monkeypatch, tmp_path, from_branch):
     base = versions.load_pointers()['production_gen']
     basis = branches.basis()
     write_json(tree / 'branches/source/state.json', {'development': {'candidate_ref': base, 'basis': basis}})
@@ -504,7 +505,7 @@ def test_workflow_resume_keeps_one_revision_and_versions_ranker(tree, monkeypatc
         return output
     monkeypatch.setattr(learned_gen.learned_sources, 'deploy', deploy)
     monkeypatch.setattr(branches, '_accepted_source', lambda *a: {'candidate_ref': base, 'basis': basis})
-    args = dict(model=tmp_path / 'model', base=base, source_branch='source', name='learned', data='d-0001')
+    args = dict(model=tmp_path / 'model', base=base, source_branch=from_branch, name='learned', data='d-0001')
     first = learned_gen.prepare(tmp_path / 'workflow', **args)
     assert learned_gen.prepare(tmp_path / 'workflow', **args) == first
     assert len(list((tree / 'branches/learned/revisions').glob('*.json'))) == 1

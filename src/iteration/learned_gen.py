@@ -13,7 +13,7 @@ from ..generator import few_shot, history_sources, learned_sources
 from ..generator.few_shot import PersonaFewShotRetriever
 from ..generator.history_sources import require
 from ..generator.learned_selection import LearnedSelector, POLICY, recall
-from ..generator.fewshot_ranker import extraction
+from ..generator.fewshot_ranker import supplemental as extraction
 from . import branches, control, datasets, experiment, pack_transport, runtime, versions
 from .parallel import worker_limit
 from .storage import file_lock, locked, read_json, write_json, write_once_json
@@ -76,10 +76,13 @@ def prepare(output, *, base, name, data, model=None, source_branch=None,
                 'Existing branch differs from requested learned-selector comparison')
         branches.set_stage_limit(name, stage)
         return candidate
-    require(model is not None and source_branch is not None, 'Model requires an accepted source branch')
-    source = read_json(versions.PRIVATE / 'branches' / source_branch / 'state.json')
-    require(current['data'] == data and source.get('development', {}).get('basis') == current and
-            source['development']['candidate_ref'] == base, 'Source branch baseline changed')
+    require(model is not None, 'Evaluation requires a completed model or frozen candidate')
+    if source_branch is None:
+        require(current['production_gen'] == base, 'Production baseline changed')
+    else:
+        source = read_json(versions.PRIVATE / 'branches' / source_branch / 'state.json')
+        require(source.get('development', {}).get('basis') == current and
+                source['development']['candidate_ref'] == base, 'Source branch baseline changed')
     manifest = dict(schema=1, model=str(Path(model).resolve()), base=base, data=data,
                     source_branch=source_branch, name=name, policy=POLICY)
     if stage != 'development':

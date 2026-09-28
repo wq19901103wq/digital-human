@@ -24,7 +24,7 @@ CONTROL_TRANSFORM = {k: v for k, v in action_crosses.TRANSFORM.items() if k != '
 
 
 @threadpool_limits.wrap(limits=1)
-def fit_selected(groups, observations, rows, saved_model, saved_training):
+def fit_selected(groups, observations, rows, saved_model, saved_training, *, transform=None):
     """Keep the control's binary labels, recipe and rounds; fit contexts only."""
     require(saved_model['kind'] == 'fewshot_pairwise_xgboost_v1' and
             not saved_model.get('supervision') and
@@ -40,7 +40,8 @@ def fit_selected(groups, observations, rows, saved_model, saved_training):
     value = deepcopy(saved_model)
     value.update(booster=json.loads(model.save_raw(raw_format='json').decode()),
         vocabulary={k: int(v) for k, v in encoder.vocabulary_.items()},
-        feature_names=encoder.get_feature_names_out().tolist(), feature_transform=action_crosses.TRANSFORM)
+        feature_names=encoder.get_feature_names_out().tolist(),
+        feature_transform=action_crosses.TRANSFORM if transform is None else transform)
     scores = model.predict(xgb.DMatrix(x, nthread=1), output_margin=True)
     require(bool(np.isfinite(scores).all()), 'Nonfinite action-comparison scores')
     return value, scores, dict(selected_recipe=saved_model['recipe'], selected_rounds=saved_model['rounds'],

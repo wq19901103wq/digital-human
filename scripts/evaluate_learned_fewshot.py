@@ -22,7 +22,7 @@ def main():
     selector.add_argument('--model', type=Path)
     selector.add_argument('--candidate', help='Reuse an immutable learned generator version')
     parser.add_argument('--base')
-    parser.add_argument('--source-branch')
+    parser.add_argument('--source-branch', help='Accepted development source; omit to use the current production baseline')
     parser.add_argument('--name')
     parser.add_argument('--data')
     parser.add_argument('--stage', choices=['development', 'fixed_test'], default='development',
@@ -38,8 +38,8 @@ def main():
     else:
         if not all((args.base, args.name, args.data)) or not (args.model or args.candidate):
             parser.error('run/start requires base, name, data and either model or candidate')
-        if (args.model and not args.source_branch) or (args.candidate and args.source_branch):
-            parser.error('source-branch is required only with model; candidate compares against production')
+        if args.candidate and args.source_branch:
+            parser.error('source-branch requires model; candidate compares against production')
         if not 1 <= args.workers <= 16 or not 0 < args.timeout <= 3600:
             parser.error('workers must be within 1–16; timeout must be within (0, 3600]')
         if args.command == 'start':

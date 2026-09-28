@@ -17,7 +17,7 @@ from src.iteration.storage import file_lock, locked, write_json
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'status', 'compare-lr', 'compare-id', 'compare-features', 'compare-models', 'compare-grades', 'compare-actions'])
+    parser.add_argument('command', choices=['run', 'status', 'compare-lr', 'compare-id', 'compare-features', 'compare-models', 'compare-grades', 'compare-actions', 'compare-concern'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--inventory', type=Path)
     parser.add_argument('--source', type=Path, help='Completed training output; reuse its features and labels')
@@ -63,7 +63,9 @@ def main(argv=None):
     if args.command == 'status':
         print(json.dumps(status(args.output), ensure_ascii=False, indent=2))
         return
-    if not all((args.inventory, args.feature_config, args.feature_cache, args.instance)):
+    if args.command == 'compare-concern' and not all((args.source, args.reference, args.feature_cache, args.instance)):
+        parser.error('compare-concern requires --source, --reference, --feature-cache and --instance')
+    if args.command == 'run' and not all((args.inventory, args.feature_config, args.feature_cache, args.instance)):
         parser.error('run requires --inventory, --feature-config, --feature-cache and --instance')
     if not 1 <= args.workers <= 16 or args.passes < 1:
         parser.error('workers must be 1–16; passes must be positive')
@@ -83,6 +85,13 @@ def main(argv=None):
                 time.sleep(.1)
             print(json.dumps(dict(pid=process.pid, output=str(args.output),
                                   running=process.poll() is None, exit_code=process.poll()), ensure_ascii=False))
+        return
+    if args.command == 'compare-concern':
+        from src.generator.fewshot_ranker.concern_comparison import run
+        result = run(args.source, args.reference, args.output, feature_cache=args.feature_cache,
+                     instance=args.instance, workers=args.workers, passes=args.passes)
+        print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],
+                             supplemental_contexts=result['supplemental_contexts']), ensure_ascii=False, indent=2))
         return
     options = vars(args)
     options.pop('command')

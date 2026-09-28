@@ -58,7 +58,8 @@ def feature_rows(case, rows, refs, values, *, transform=None):
         action_expander = action_crosses.expand
     result = []
     for example in rows:
-        tk, ck, rk = refs[(case['case_id'], example['id'])]
+        keys = refs[(case['case_id'], example['id'])]
+        tk, ck, rk = keys[:3]
         row = combine(case, example,
             {**values[tk], **context_local(case)},
             {**values[ck], **context_local(example, example=True)},
@@ -67,6 +68,12 @@ def feature_rows(case, rows, refs, values, *, transform=None):
         row['id_cross.chat_id'] = identity_crosses.pair(row, 'target.chat_id', 'example_context.chat_id')
         if action_expander is not None:
             row = action_expander(row)
+        if (transform or {}).get('self_concern') is not None:
+            from .fewshot_ranker import concern
+            require(transform['self_concern'] == concern.VERSION,
+                    'Unsupported self concern feature transform')
+            require(len(keys) == 5, 'Self concern feature references are missing')
+            row = concern.expand(row, values[keys[3]], values[keys[4]])
         result.append(row)
     return result
 
@@ -103,8 +110,18 @@ class LearnedSelector:
         self.cache = Path(feature_cache)
 
     def tasks(self, case, rows):
-        return extraction.prepare([dict(target_id=case['case_id'], target=case,
-            candidates=[dict(example=row) for row in rows])], self.proof['feature_identity'])
+        groups = [dict(target_id=case['case_id'], target=case,
+            candidates=[dict(example=row) for row in rows])]
+        tasks, refs = extraction.prepare(groups, self.proof['feature_identity'])
+        policy = self.model.get('feature_transform', {}).get('self_concern')
+        if policy is not None:
+            from .fewshot_ranker import concern
+            require(policy == concern.VERSION, 'Unsupported self concern feature transform')
+            extra, extra_refs = concern.prepare(groups, self.proof['feature_identity'])
+            require(not tasks.keys() & extra.keys(), 'Feature request key collision')
+            tasks.update(extra)
+            refs = {key: (*value, *extra_refs[key]) for key, value in refs.items()}
+        return tasks, refs
 
     def select(self, case, rows, *, count, budget, retriever, check):
         if not rows or count <= 0:
@@ -112,7 +129,11 @@ class LearnedSelector:
         from .fewshot_ranker.boosting import score_document
         check()
         tasks, refs = self.tasks(case, rows)
-        values = {key: extraction.extract_one(self.cache, key, task, self.client)
+        extractor = extraction
+        if self.model.get('feature_transform', {}).get('self_concern') is not None:
+            from .fewshot_ranker import supplemental
+            extractor = supplemental
+        values = {key: extractor.extract_one(self.cache, key, task, self.client)
                   for key, task in tasks.items()}
         scores = score_document(self.model, feature_rows(case, rows, refs, values,
             transform=self.model.get('feature_transform')))

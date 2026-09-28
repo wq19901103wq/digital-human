@@ -24,6 +24,12 @@ def serving_runtime(manifest):
         require(manifest['feature_transform']['reply_action_crosses'] == VERSION,
                 'Unsupported ranker action transform')
         names += ('src/generator/fewshot_ranker/action_crosses.py',)
+    if manifest.get('feature_transform', {}).get('self_concern'):
+        from .fewshot_ranker.concern import VERSION
+        require(manifest['feature_transform']['self_concern'] == VERSION,
+                'Unsupported ranker concern transform')
+        names += ('src/generator/fewshot_ranker/concern.py',
+                  'src/generator/fewshot_ranker/supplemental.py')
     require(all(name in bound and sha256_file(ROOT / name) == bound[name]
                 for name in names), 'Ranker feature/scoring runtime changed from training')
     return {name: bound[name] for name in names}
@@ -54,8 +60,12 @@ def deployment_recipe(parent, child, reference, model_dir, dependencies):
         return TRANSFORM
     from .fewshot_ranker.action_comparison import KIND
     from .fewshot_ranker.action_crosses import TRANSFORM as action_transform
-    require(parent['kind'] == KIND and child['feature_transform'] ==
-            parent['feature_transform'] == action_transform, 'Unsupported ranker deployment recipe')
+    from .fewshot_ranker.concern_comparison import KIND as concern_kind
+    from .fewshot_ranker.concern import TRANSFORM as concern_transform
+    transforms = {KIND: action_transform, concern_kind: concern_transform}
+    transform = transforms.get(parent['kind'])
+    require(transform is not None and child['feature_transform'] ==
+            parent['feature_transform'] == transform, 'Unsupported ranker deployment recipe')
     control = reference / 'xgb_chat_pair'
     control_manifest = _completed(control, dependencies)
     reference_manifest = read_json(reference / 'manifest.json')
@@ -76,7 +86,34 @@ def deployment_recipe(parent, child, reference, model_dir, dependencies):
             original_detail['selected_recipe'] and model['rounds'] == original['rounds'] ==
             detail['selected_rounds'] == original_detail['selected_rounds'],
             'Action model changed labels, recipe or stopping rounds')
-    return action_transform
+    if parent['kind'] == concern_kind:
+        verify_concern(parent, model_dir.parent, dependencies)
+    return transform
+
+
+def verify_concern(parent, directory, dependencies):
+    """Reconstruct independent supplemental views from the original frozen data."""
+    from .fewshot_ranker import concern
+    from .fewshot_ranker.architecture_comparison import feature_rows
+    from .ranker_report import load_completed
+    source = Path(parent['source'])
+    manifest, groups, observations, _, _, _ = load_completed(source)
+    identity = manifest['features']['client']
+    tasks, refs = concern.prepare(groups, identity)
+    expected = dict(client=identity, request_keys_sha256=digest(sorted(tasks)), count=len(tasks))
+    require(parent['features'] == expected, 'Concern feature request binding differs')
+    names = ('supplemental_tasks.json', 'supplemental_values.json', 'feature_matrix.json')
+    dependencies.update(directory/name for name in names)
+    require(read_json(directory/names[0]) == tasks, 'Concern views differ from original contexts')
+    values = read_json(directory/names[1])
+    require(set(values) == set(tasks), 'Concern extracted context coverage differs')
+    for key, request in tasks.items():
+        concern.validate(values[key], request)
+    raw = feature_rows(read_json(source/'feature_matrix.json')['rows'], True)
+    rows = [concern.expand(row, *(values[key] for key in refs[(obs['target_id'], obs['example_id'])]))
+            for row, obs in zip(raw, observations)]
+    require(read_json(directory/names[2]) == dict(manifest_sha256=digest(parent), rows=rows),
+            'Concern training matrix differs from independent contexts')
 
 
 def _completed(directory, dependencies):
