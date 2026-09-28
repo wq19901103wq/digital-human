@@ -1,0 +1,21 @@
+{
+  "blocked_paths": [
+    "instances",
+    "private",
+    ".env",
+    ".env.*",
+    "data",
+    "runs",
+    "dashboard"
+  ],
+  "blocked_words": [
+    "qianwang",
+    "wangyihan",
+    "yihanwang"
+  ],
+  "blocked_word_exempt": [
+    "scripts/scrub_sensitive.py",
+    "config/public_boundary.json"
+  ],
+  "_note": "blocked_words 明文列出是刻意的：门禁需要字面量匹配；脱敏效果不依赖对该清单保密（实例名非凭证）。"
+}

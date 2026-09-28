@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED = {'.git', '.venv', '__pycache__', '.pytest_cache', '.ruff_cache',
+EXCLUDED = {'.git', '.venv', '__pycache__', '.pytest_cache', '.ruff_cache', '.worktrees',
             'instances', 'private', 'data', 'runs', 'dashboard', 'build', 'dist', '.env', '.dashboard.pid'}
 PATTERNS = {
     'personal_home': re.compile(r'(?:/Users/|/home/)[A-Za-z][A-Za-z0-9_.-]*/'),
