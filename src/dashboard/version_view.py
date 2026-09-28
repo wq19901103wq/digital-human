@@ -12,7 +12,7 @@ from . import report
 from ..iteration import datasets
 from .changes import snapshot_delta
 
-KINDS = {'data': '数据版本', 'generators': '生成器快照', 'judges': 'Judge 版本'}
+KINDS = {'data': '数据版本', 'generators': '生成器快照', 'judges': 'Judge 版本', 'share': 'Share 共享资料'}
 DATASETS = {'development': ('开发集', 'dev_pool.jsonl'), 'fewshot': ('风格示例池', 'fewshot_pool.jsonl')}
 DATASETS.update({key: value for key, value in datasets.ROLES.items() if key not in ('development', 'fixed_test')})
 PAGE_SIZE = 20
@@ -24,7 +24,7 @@ def _directory(instance: Path, kind: str, ref: str) -> Path:
     directory = instance / kind / ref
     if not directory.resolve().is_relative_to(instance.resolve()):
         raise PermissionError('版本路径越界')
-    marker = 'manifest.json' if kind == 'data' else 'config.json'
+    marker = 'manifest.json' if kind in ('data', 'share') else 'config.json'
     if directory.is_symlink() or (directory / marker).is_symlink():
         raise PermissionError('版本快照不能通过符号链接读取')
     if not directory.is_dir() or not (directory / marker).is_file():
@@ -43,6 +43,9 @@ def _files(directory: Path, kind: str) -> dict[str, Path]:
 
 
 def _current(instance: Path, kind: str, ref: str) -> str:
+    if kind == 'share':
+        from .share_view import current_bindings
+        return ' / '.join(current_bindings(instance, ref)) or '无当前基线绑定'
     pointers = report._baseline_pointers(instance)
     keys = {'data': [('data', '当前数据')],
             'generators': [('production_gen', '当前生产基线'), ('iteration_gen', '当前开发基线')],
@@ -66,7 +69,7 @@ def _generator_summary(instance: Path) -> str:
 def index_html(instance: Path) -> str:
     body = '<p class="eyebrow">VERSIONS</p><h1>版本档案</h1>' + report._baseline_summary(instance) + _generator_summary(instance)
     for kind, label in KINDS.items():
-        marker = 'manifest.json' if kind == 'data' else 'config.json'
+        marker = 'manifest.json' if kind in ('data', 'share') else 'config.json'
         rows = []
         for path in sorted((instance / kind).glob('*/' + marker), reverse=True):
             ref = path.parent.name
@@ -75,6 +78,8 @@ def index_html(instance: Path) -> str:
             if kind == 'data':
                 info = report._e('全量历史 · 按用途清单 · 全局时间边界' if cfg.get('schema') == 2 else
                                 cfg.get('refreeze_reason') or cfg.get('source') or '来源未记录')
+            elif kind == 'share':
+                info = f'{len(cfg.get("files", {}))} 个资料文件 · 独立版本；运行时使用由模型配置决定'
             elif kind == 'generators':
                 info = '材料来自 ' + report._version_link(instance, 'data', cfg.get('data_version'))
             else:
@@ -252,6 +257,9 @@ def _purposes(instance: Path, directory: Path, url: str) -> str:
 
 def detail_html(instance: Path, kind: str, ref: str, query: dict) -> str:
     directory = _directory(instance, kind, ref)
+    if kind == 'share':
+        from .share_view import detail_html as share_detail
+        return share_detail(instance, directory, query)
     files = _files(directory, kind)
     url = report._version_url(instance, kind, ref)
     marker = 'manifest.json' if kind == 'data' else 'config.json'
@@ -260,6 +268,9 @@ def detail_html(instance: Path, kind: str, ref: str, query: dict) -> str:
             f'<p>{report._badge(_current(instance, kind, ref))}</p>'
             '<p class="help">以下内容直接读取此版本保存的文件；关联实验和当前用途按现有记录显示。</p>')
     body += report._baseline_summary(instance)
+    if kind in ('generators', 'judges'):
+        from .share_view import binding_html
+        body += '<p>此版本绑定的 Share：' + binding_html(instance, kind, ref) + '</p>'
     if kind == 'generators':
         body += '<p>人格与场景材料来自 ' + report._version_link(instance, 'data', cfg.get('data_version')) + '；实际评测数据见关联实验。</p>'
     if kind == 'data':

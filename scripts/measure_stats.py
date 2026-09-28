@@ -12,7 +12,7 @@
 
 分组一律用指纹（借 measurements 公共库），不用裸 ref（评审 P2-7）。
 输出 JSON 到 instances/<名>/analysis/measure-stats-<日期>.json。
-用法: python scripts/measure_stats.py --instance example-agent
+用法: python scripts/measure_stats.py --instance <实例名>
 """
 from __future__ import annotations
 

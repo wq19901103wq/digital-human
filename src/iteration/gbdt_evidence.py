@@ -65,6 +65,15 @@ def verify(directory, record, original, study, source_spec, arm):
     cfg, old_cfg = read(directory / 'config.json'), read(original / 'config.json')
     expected = {**old_cfg, 'decision_policy': 'gbdt_only', 'scorer_file': 'scorer.json',
         'assets': {**old_cfg['assets'], **additions, 'learning.json': sha256_file(directory / 'learning.json')}}
+    if 'ownership_correction' in cfg:
+        from ..judge.ownership import validate_policy
+        validate_policy(cfg['ownership_correction'])
+        expected['ownership_correction'] = cfg['ownership_correction']
+    if 'contribution_correction' in cfg:
+        from ..judge.contribution import validate_policy
+        validate_policy(cfg['contribution_correction'])
+        require('ownership_correction' in cfg, 'Contribution correction requires ownership baseline')
+        expected['contribution_correction'] = cfg['contribution_correction']
     require(cfg == expected, 'GBDT feature configuration differs from reconstructed source')
     spec = read(sweep / 'spec.json')
     paths = [study / arm / name for name in

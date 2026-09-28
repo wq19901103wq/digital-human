@@ -58,7 +58,7 @@ def test_evaluation_cannot_report_success_with_persistent_failures(tmp_path, mon
 
 @pytest.mark.parametrize('codes,expected,phases', [([1, 0, 0], 'finished', 3), ([0, 1], 'stopped', 2)])
 def test_pipeline_requires_successful_independent_audit(tmp_path, monkeypatch, codes, expected, phases):
-    directory = tmp_path / 'instances/example-agent/judge_training/test-study'
+    directory = tmp_path / 'instances/test-instance/judge_training/test-study'
     feature = {'model': 'gpt-5.6-sol', 'reasoning_effort': 'high'}
     job.save_once(directory / 'spec.json', {'feature_config': feature, 'data_ref': 'd-0011',
                  'generator_ref': 'g-0017', 'source_judge': 'j-0012'})

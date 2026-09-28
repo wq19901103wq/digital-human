@@ -252,6 +252,7 @@ def _branch_baselines(instance_dir: Path) -> str:
 
 
 def _baseline_summary(instance_dir: Path) -> str:
+    from .share_view import binding_html
     pointers = _baseline_pointers(instance_dir)
     prepared = [p.parent.name for p in sorted((instance_dir / 'data').glob('*/purposes.json'), reverse=True)
                 if p.parent.name != pointers.get('data')]
@@ -260,13 +261,19 @@ def _baseline_summary(instance_dir: Path) -> str:
     rows = []
     for label, kind, folder in [('生成器', 'gen', 'generators'), ('Judge', 'judge', 'judges')]:
         rows.append(f'<tr><th scope="row">{label}</th>'
-                    f'<td>{_version_link(instance_dir, folder, pointers.get("production_" + kind))}</td>'
-                    f'<td>{_version_link(instance_dir, folder, pointers.get("iteration_" + kind))}</td></tr>')
+                    f'<td>{_version_link(instance_dir, folder, pointers.get("production_" + kind))}'
+                    f'<div>Share：{binding_html(instance_dir, folder, pointers.get("production_" + kind))}</div></td>'
+                    f'<td>{_version_link(instance_dir, folder, pointers.get("iteration_" + kind))}'
+                    f'<div>Share：{binding_html(instance_dir, folder, pointers.get("iteration_" + kind))}</div></td></tr>')
+    share_refs = sorted(p.parent.name for p in (instance_dir / 'share').glob('*/manifest.json'))
+    share_links = '、'.join(_version_link(instance_dir, 'share', ref) for ref in share_refs) or '暂无版本'
     return ('<section class="panel baseline-summary" id="baselines"><h2>当前基线</h2>'
             '<p>当前数据：' + _version_link(instance_dir, 'data', pointers.get('data')) + '</p>'
             + prepared_html +
             '<div class="table-wrap"><table><thead><tr><th>对象</th><th>当前生产基线</th><th>当前开发基线</th></tr></thead>'
             '<tbody>' + ''.join(rows) + '</tbody></table></div>'
+            '<p>Share 资料版本：' + share_links + '</p>'
+            '<p class="help">Gen、Judge 分别绑定 Share；未绑定表示该模型配置未引用 Share。资料已保存不等于基线已使用。</p>'
             '<p class="help">标准单线开发评测：创建时的开发基线 vs 候选；固定验收：创建时的生产基线 vs 开发候选。'
             '多分支迭代各轮以当时的生产基线为起点。实验开始后对照版本冻结，基线变化需新建对比，历史结果不改写。</p>'
             '<p class="help">创建版本、训练、重试和评测完成均不会自动切换基线；只有晋级才会更新对应基线。'
@@ -1189,6 +1196,8 @@ def live_payload(instance_dir: Path, run_id: str = '', *, cases_revision: str = 
     regions['workflows'] = _workflows_region(instance_dir, runs)
     pointer_file = instance_dir / 'pointers.json'
     revision = str(pointer_file.stat().st_mtime_ns) if pointer_file.exists() else 'none'
+    revision += ':' + ','.join(f'{p.parent.name}:{p.stat().st_mtime_ns}' for p in
+                              sorted((instance_dir / 'share').glob('*/manifest.json')))
     if revision != config_revision:
         regions['configuration'] = _baseline_summary(instance_dir)
     return {'regions': regions, 'config_revision': revision}

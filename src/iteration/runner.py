@@ -1,7 +1,7 @@
 """生成器 A/B 跑题循环（SOP §3/§4）：从实验取规格，跑完交回 experiment.finish。
 
 本模块执行 spec 冻结的全部 Baseline/Candidate 题目并统计。
-预检/准入/one-shot 在 experiment.create；晋升在 promote；状态在 experiment.finish。
+预检/准入在 experiment.create；晋升在 promote；状态在 experiment.finish。
 """
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ def _run_gen_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path:
     spec = experiment.spec_of(exp_dir)
     if spec["kind"] != experiment.KIND_GEN_AB:
         raise ConfigError(f"不是生成器实验: {spec['kind']}")
-    from .learning_guard import execution_seal
-    seal = execution_seal(spec)
+    from .gates import learning_execution_seal
+    seal = learning_execution_seal(spec)
     state = experiment.state_of(exp_dir)
     if state.get("status") == "finished":
         _logger.info("实验已完赛(%s)，直接出报告", state.get("verdict"))
@@ -266,8 +266,8 @@ def run_judge_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path
         raise ConfigError(f"不是 Judge 校准实验: {spec['kind']}")
     from .learning_guard import verify_repair
     verify_repair(spec)
-    from .learning_guard import execution_seal
-    seal = execution_seal(spec)
+    from .gates import learning_execution_seal
+    seal = learning_execution_seal(spec)
     state = experiment.state_of(exp_dir)
     if state.get("status") == "finished":
         report.write_run(exp_dir)

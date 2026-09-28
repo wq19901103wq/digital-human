@@ -3,7 +3,7 @@
 
 幂等：已入库的实验自动跳过（按行比对）；与运行时写入共用 measurements 公共库。
 用法：
-  python scripts/backfill_measurements.py --instance example-agent [--dry-run]
+  python scripts/backfill_measurements.py --instance <实例名> [--dry-run]
 """
 from __future__ import annotations
 

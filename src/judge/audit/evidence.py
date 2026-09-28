@@ -4,13 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 
-BASE = ROOT / 'instances/example-agent'
+BASE = ROOT / 'instances' / os.environ.get('DH_INSTANCE', 'default')
 
 
 def read(path):

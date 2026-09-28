@@ -123,7 +123,7 @@ def test_parallel_failure_stops_other_writer_and_does_not_continue(tmp_path, mon
 @pytest.mark.parametrize('shared,generation_workers,evaluation_workers', [(False, 2, None), (True, 16, 16)])
 def test_staged_pipeline_joins_training_and_generation_before_evaluation(
         tmp_path, monkeypatch, shared, generation_workers, evaluation_workers):
-    study = tmp_path / 'instances/example-agent/judge_training/test-study'
+    study = tmp_path / 'instances/test-instance/judge_training/test-study'
     feature = {'model': 'gpt-5.6-sol', 'reasoning_effort': 'high'}
     write_json(study / 'spec.json', {'feature_config': feature, 'data_ref': 'd-0011',
                                    'generator_ref': 'g-0017', 'source_judge': 'j-0012'})

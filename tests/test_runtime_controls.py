@@ -44,7 +44,11 @@ def test_archived_code_does_not_bless_changed_data_or_missing_evidence(env, tmp_
 
 
 @pytest.mark.parametrize('changed', ['none', 'code', 'manifest', 'logical_path', 'data'])
-def test_exact_runtime_snapshot_is_historical_code_evidence(env, tmp_path, changed):
+@pytest.mark.parametrize('executor', ['live', 'old_transport'])
+def test_exact_runtime_snapshot_is_historical_code_evidence(env, tmp_path, changed, executor):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from src.iteration import pack_transport
     root = tmp_path / 'framework'
     code = root / 'scripts/train.py'
     code.parent.mkdir(parents=True)
@@ -62,12 +66,23 @@ def test_exact_runtime_snapshot_is_historical_code_evidence(env, tmp_path, chang
         write_json(path, {**json.loads(path.read_text()), 'schema': 999})
     elif changed == 'logical_path':
         original = root / 'different/train.py'
-    if changed == 'none':
-        assert runtime.evidence_path(str(original), checksum) == saved / 'scripts/train.py'
-        assert not (env.root / 'evidence_blobs').exists()
-    else:
-        with pytest.raises(ConfigError, match='changed or missing'):
-            runtime.evidence_path(str(original), checksum)
+    module = runtime
+    context = nullcontext()
+    if executor == 'old_transport':
+        def old_lookup(name, expected):
+            raise ConfigError('frozen input changed or missing')
+        module = SimpleNamespace(**{name: getattr(runtime, name) for name in
+            ('ConfigError', 'versions', 'json', 'digest', 'sha256_file')}, evidence_path=old_lookup)
+        context = pack_transport.archived_runtime_paths(module)
+    before = module.evidence_path
+    with context:
+        if changed == 'none':
+            assert module.evidence_path(str(original), checksum) == saved / 'scripts/train.py'
+            assert not (env.root / 'evidence_blobs').exists()
+        else:
+            with pytest.raises(ConfigError, match='changed or missing'):
+                module.evidence_path(str(original), checksum)
+    assert module.evidence_path is before
 
 
 def test_threshold_cli_uses_verified_frozen_executor(env, monkeypatch):
@@ -106,6 +121,30 @@ def test_threshold_cli_rejects_wrong_executor_and_changed_snapshot(env, monkeypa
     monkeypatch.setattr(cli.subprocess, 'run', lambda *a, **k: pytest.fail('must not launch'))
     with pytest.raises(ConfigError, match='runtime source changed'):
         cli.main(args)
+
+
+@pytest.mark.parametrize('kind', ['gen', 'judge'])
+def test_ordinary_promotion_cli_uses_frozen_transport_and_rejects_wrong_kind(env, monkeypatch, kind):
+    from scripts import promote as cli
+    from src.iteration import pack_transport, promote
+    directory = env.root / 'experiments/completed'
+    directory.mkdir(parents=True)
+    (directory / 'spec.json').write_text(json.dumps({'kind': 'gen_ab' if kind == 'gen' else 'judge_eval'}))
+    (directory / 'runtime.json').write_text('{}')
+    calls = []
+    monkeypatch.setattr(pack_transport, 'launch', lambda path, **kw: calls.append((path, kw)) or 0)
+    monkeypatch.setattr(promote, 'promote_gen', lambda *a, **k: pytest.fail('must not use live gates'))
+    monkeypatch.setattr(promote, 'promote_judge', lambda *a, **k: pytest.fail('must not use live gates'))
+    cli.main([kind, '--exp', 'completed'])
+    assert calls == [(directory, dict(instance=env.root.name, job='completed', workers=1,
+                                    seconds=60, kind='promotion'))]
+    with pytest.raises(ConfigError, match='类型与冻结实验不一致'):
+        cli.main(['judge' if kind == 'gen' else 'gen', '--exp', 'completed'])
+    assert len(calls) == 1
+    monkeypatch.setattr(pack_transport, 'launch', lambda *a, **kw: 9)
+    with pytest.raises(SystemExit) as result:
+        cli.main([kind, '--exp', 'completed'])
+    assert result.value.code == 9
 
 
 def test_request_quota_is_atomic_across_processes(env):
@@ -147,7 +186,7 @@ def test_cost_reservation_is_retained_on_failure(env):
             pytest.fail('quota overspent')
 
 
-def test_batches_are_unique_bound_and_not_refunded(env):
+def test_fixed_batches_are_reusable_with_immutable_bindings(env):
     data_ref = 'd-test'
     assert acceptance.seal(data_ref, 1)['batches'] == 2
     spec = {'id': 'first', 'kind': 'gen_ab', 'data_ref': data_ref, 'baseline_ref': 'g-1',
@@ -158,13 +197,15 @@ def test_batches_are_unique_bound_and_not_refunded(env):
         acceptance.claim({**spec, 'candidate_ref': 'g-3'})
     second_spec = {**spec, 'id': 'second'}
     second = acceptance.claim(second_spec)
-    assert {r['case_id'] for r in acceptance.rows(first)}.isdisjoint(r['case_id'] for r in acceptance.rows(second))
+    assert first['batch_id'] == second['batch_id']
+    assert acceptance.rows(first) == acceptance.rows(second)
     acceptance.transition({**spec, 'acceptance': first}, 'finished')
     with pytest.raises(ConfigError, match='cannot be reopened'):
         acceptance.transition({**spec, 'acceptance': first}, 'opened')
-    with pytest.raises(ConfigError, match='exhausted'):
-        acceptance.claim({**spec, 'id': 'third'})
-    assert acceptance.status(data_ref)['remaining'] == 0
+    assert acceptance.claim({**spec, 'id': 'third'})['batch_id'] == first['batch_id']
+    status = acceptance.status(data_ref)
+    assert status['remaining'] == 2 and status['consumed'] == 0 and status['reusable']
+    assert len(status['jobs']) == 3
 
 
 def test_public_gate_checks_history_even_after_file_is_removed(tmp_path):
