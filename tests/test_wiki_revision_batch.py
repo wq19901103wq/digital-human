@@ -211,12 +211,16 @@ def test_group_and_topic_revision_export_keep_their_nonperson_subject(tmp_path, 
     assert read_json(knowledge)['subject'].get('kind') != kind
 
 
-def test_role_revision_follows_prior_revision_and_checks_the_entire_source_chain(tmp_path):
-    from test_wiki_revision_roles import RoleClient
+@pytest.mark.parametrize('engine', ['roles_v1', 'roles_claims_v2'])
+def test_role_revision_follows_prior_revision_and_checks_the_entire_source_chain(tmp_path, engine):
+    if engine == 'roles_v1':
+        from test_wiki_revision_roles import RoleClient
+    else:
+        from test_wiki_revision_claims import RoleClient
     source, prior, knowledge = prepared(tmp_path)
     revision_batch.run(prior, client=KeepClient())
     next_batch = tmp_path / 'role-revision'
-    revision_batch.prepare(prior, next_batch, engine='roles_v1')
+    revision_batch.prepare(prior, next_batch, engine=engine)
     pending = delivery.inspect([source, prior, next_batch])
     assert pending['summary']['records'] == 0
     assert pending['jobs'][0]['stage'] == 'revision_pending'
@@ -252,6 +256,16 @@ def test_source_validation_compatibility_preserves_only_exact_generation_inputs(
         'wiki_revision_batch.py': revision_batch.SOURCE_CHECK_RUNNER_SHA256}
     assert revision_batch.compatible_pipeline(frozen, engine)
     frozen['wiki_revision.py'] = 'changed'
+    assert not revision_batch.compatible_pipeline(frozen, engine)
+
+
+@pytest.mark.parametrize('engine', ['legacy', 'roles_v1', 'roles_claims_v2'])
+def test_claims_dispatch_compatibility_cannot_change_engine_or_source_bytes(engine):
+    frozen = revision_batch.pipeline(engine) | {
+        'wiki_revision_batch.py': revision_batch.CLAIMS_DISPATCH_RUNNER_SHA256}
+    assert revision_batch.compatible_pipeline(frozen, engine) == (engine != 'roles_claims_v2')
+    backend = Path(revision_batch.engine_for(engine).__file__).name
+    frozen[backend] = 'changed'
     assert not revision_batch.compatible_pipeline(frozen, engine)
 
 

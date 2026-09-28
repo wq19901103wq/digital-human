@@ -16,6 +16,7 @@ def locator(path):
 
 LEGACY_RUNNER_SHA256 = 'd6db8d19f19e2f57091a39ca58302c28e0d42a6920bf7d73bfba51a4ac556641'
 SOURCE_CHECK_RUNNER_SHA256 = '03b4d8731658131b7af3e1e33894494bc4c2af09c0c81f907529acc68ecc476a'
+CLAIMS_DISPATCH_RUNNER_SHA256 = '736fde993739e55c34eeec297381842a2a9f9c7788619983d89f4f88f47bcb95'
 
 
 def engine_for(name):
@@ -24,6 +25,9 @@ def engine_for(name):
     if name == 'roles_v1':
         from . import wiki_revision_roles
         return wiki_revision_roles
+    if name == 'roles_claims_v2':
+        from . import wiki_revision_claims
+        return wiki_revision_claims
     raise ValueError('unknown semantic revision engine')
 
 
@@ -39,9 +43,15 @@ def compatible_pipeline(frozen, engine):
     current = pipeline(engine)
     if frozen == current:
         return True
+    # Adding the claims engine leaves both existing engines byte-identical.
+    # The new semantic engine has its own module binding and cannot use this alias.
+    if engine in ('legacy', 'roles_v1') and frozen == (
+            current | {Path(__file__).name: CLAIMS_DISPATCH_RUNNER_SHA256}):
+        return True
     # Source validation changes admission only. The engine, model requests,
     # cached decisions and exports are byte-identical for either engine.
-    if frozen == (current | {Path(__file__).name: SOURCE_CHECK_RUNNER_SHA256}):
+    if engine in ('legacy', 'roles_v1') and frozen == (
+            current | {Path(__file__).name: SOURCE_CHECK_RUNNER_SHA256}):
         return True
     # The legacy engine, inputs, schema, cache and export are unchanged. Only
     # the runner gained an explicit alternative engine and chained sources.

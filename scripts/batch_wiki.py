@@ -29,7 +29,7 @@ def main():
     continuation.add_argument('--parent', type=Path, help='补充批次对应的新人物批次')
     revision = commands.add_parser('prepare-revision', help='保留原批次，新增全记录回源语义修订')
     revision.add_argument('--source', required=True, type=Path)
-    revision.add_argument('--engine', choices=['legacy', 'roles_v1'], default='legacy')
+    revision.add_argument('--engine', choices=['legacy', 'roles_v1', 'roles_claims_v2'], default='legacy')
     members = commands.add_parser('prepare-members', help='由原始群成员表和聊天 API 导出补建人物页')
     members.add_argument('--members', required=True, type=Path)
     members.add_argument('--page', action='append', required=True, type=Path)
