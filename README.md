@@ -82,6 +82,21 @@ graph TD
 
 更多操作（测试、后台工作台、流程约束）见 `docs/SOP.md`。
 
+### 私有后台访问
+
+`scripts/serve_dashboard.py` 只监听 `127.0.0.1:8080`。页面、接口及文件下载统一要求
+HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首次启动自动生成独立的
+`owner` 账号及随机密码，保存在 `~/.config/digital-human/dashboard-auth.json`，权限为
+`0600`，不在仓库或网页服务目录内。重启沿用原凭据；凭据损坏或权限不安全时拒绝访问。
+浏览器首次打开原后台地址时输入该文件中的账号、密码即可。不要将凭据放进分享 URL。
+
+部署后使用统一入口验证匿名拒绝和认证访问（只输出状态，不输出密码或私有正文）：
+
+```bash
+.venv/bin/python scripts/check.py dashboard --instance <实例名> \
+  --base-url https://<后台域名> --share <Share版本>
+```
+
 ## 项目结构
 
 | 路径 | 职责 |

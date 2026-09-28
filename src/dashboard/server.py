@@ -9,6 +9,7 @@ SOP §8.5：fixed_test 轮次的 cases.jsonl 含固定集真人答案，线上�
 from __future__ import annotations
 
 import functools
+import hmac
 import http.server
 import json
 import os
@@ -16,6 +17,8 @@ import re
 import socketserver
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from . import auth
 
 ROOT = Path(__file__).resolve().parents[2]  # src/dashboard/server.py → 项目根
 
@@ -25,7 +28,36 @@ def _instances_root():
 
 
 class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
-    """固定集逐题明细访问控制（SOP §8.5）。"""
+    """Owner authentication and fixed-test detail isolation (SOP §8.5)."""
+
+    def __init__(self, *args, auth_file: Path | None = None, **kwargs):
+        self.auth_file = auth_file if auth_file is not None else auth.credentials_path()
+        super().__init__(*args, **kwargs)
+
+    def _authorized(self) -> bool:
+        try:
+            expected = auth.authorization(self.auth_file)
+        except (OSError, ValueError):
+            self.send_error(503, 'Dashboard authentication unavailable')
+            return False
+        supplied = self.headers.get_all('Authorization', [])
+        if len(supplied) == 1 and hmac.compare_digest(supplied[0].encode(), expected.encode()):
+            return True
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="Private dashboard", charset="UTF-8"')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        return False
+
+    def end_headers(self):
+        self.send_header('Cache-Control', 'private, no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        super().end_headers()
+
+    def do_HEAD(self):  # noqa: N802
+        if self._authorized():
+            super().do_HEAD()
 
     def translate_path(self, path):
         import posixpath
@@ -38,6 +70,8 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
         return str(ROOT.joinpath(*parts))
 
     def do_GET(self):  # noqa: N802
+        if not self._authorized():
+            return
         from . import report
         url = urlsplit(self.path)
         parts = unquote(url.path).strip('/').split('/')
@@ -206,13 +240,16 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def serve(port: int = 8080) -> None:
+    auth_file = auth.credentials_path()
+    auth.initialize(auth_file)
     handler = functools.partial(_AuditGuardHandler, directory=str(ROOT))
     os.chdir(ROOT)
 
     class _Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True  # 必须在构造/bind 之前生效
 
-    with _Server(("", port), handler) as httpd:
+    with _Server(("127.0.0.1", port), handler) as httpd:
         print(f"后台已启动: http://localhost:{port}/dashboard/index.html")
+        print(f"Private dashboard login credentials: {auth_file}", flush=True)
         print("按 Ctrl+C 停止")
         httpd.serve_forever()

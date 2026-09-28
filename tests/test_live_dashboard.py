@@ -101,7 +101,11 @@ def test_finished_state_keeps_timing_but_does_not_look_running(tmp_path, monkeyp
 @pytest.fixture
 def live_server(tmp_path, monkeypatch):
     monkeypatch.setattr(server, 'ROOT', tmp_path)
-    handler = functools.partial(server._AuditGuardHandler, directory=str(tmp_path))
+    # Content-specific tests; real authentication is exercised in test_dashboard_auth.
+    class ContentHandler(server._AuditGuardHandler):
+        def _authorized(self):
+            return True
+    handler = functools.partial(ContentHandler, directory=str(tmp_path))
     httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

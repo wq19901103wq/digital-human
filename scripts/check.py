@@ -209,8 +209,12 @@ def check_materials(args, report):
 
 
 def check_dashboard(args, report):
-    from src.dashboard.diagnostics import inspect
+    from src.dashboard.diagnostics import inspect, inspect_access
     from src.iteration import versions
+    if args.base_url:
+        report.run('dashboard_access', lambda: inspect_access(args.base_url, args.instance, args.share,
+                                                             download=args.download))
+        return
     report.run('dashboard_render', lambda: inspect(versions.PRIVATE))
 
 
@@ -253,6 +257,10 @@ def main(argv=None):
                            help='同时使用正式运行器的保护重建材料；无模型请求')
     dashboard = sub.add_parser('dashboard', help='只读分析首页及实时接口渲染耗时、体积与调用热点')
     dashboard.add_argument('--instance', required=True)
+    dashboard.add_argument('--base-url', help='只读检查部署后的匿名拒绝及登录访问；远程必须为 HTTPS')
+    dashboard.add_argument('--share', nargs='+', default=[], help='需核验页面及 XML 下载的 Share 版本')
+    dashboard.add_argument('--download', choices=['knowledge.json', 'wiki.xml'], default='knowledge.json',
+                           help='Share 下载文件；XML 快照使用 wiki.xml')
     args = parser.parse_args(argv)
     if args.mode == 'experiment' and args.gate == 'fixed-entry' and not args.exp:
         parser.error('--gate fixed-entry 需要 --exp 正式开发实验 ID')

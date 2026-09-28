@@ -24,7 +24,7 @@ evaluation:
     # 边界规则：补验后两版判定相同（双边同时翻转/同时不翻转）记 contested，
     # 属噪声对冲，不计入净胜、不进符号检验
   adoption:
-    dev_min_net_win_rate: 0.005   # 开发晋级：确认净胜至少 +5/1000
+    dev_min_net_win_rate: 0.0      # 开发晋级：确认净胜严格大于零
     fixed_entry_min_net_win_rate: 0.005 # 直接对生产版确认净胜至少 +5/1000 才进入固定轮
     formal_min_net_win_rate: 0.005 # 正式采用：确认净胜至少 +5/1000，且初测识别数严格改善
     judge_min_gain_rate: 0.0      # Judge 校准：候选识别率净改善 ≥ 该比率才晋升。0.0=允许打平

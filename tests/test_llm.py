@@ -121,7 +121,7 @@ def test_openai_has_one_retry_layer_and_honors_parameters(settings, monkeypatch)
 
 def test_project_env_loads_without_overriding_explicit_env(tmp_path, monkeypatch):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config/settings.yaml").write_text("llm: {}\n")
+    (tmp_path / "config/settings-default.yaml").write_text("llm: {}\n")
     (tmp_path / ".env").write_text("TEST_PROJECT_KEY=from-file\nTEST_PROJECT_OVERRIDE=from-file\n")
     monkeypatch.delenv("TEST_PROJECT_KEY", raising=False)
     monkeypatch.setenv("TEST_PROJECT_OVERRIDE", "explicit")
