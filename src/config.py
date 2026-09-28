@@ -58,7 +58,7 @@ def sha256_file(path: Path) -> str:
 
 
 def settings_path() -> Path:
-    return Path(os.environ.get("DH_SETTINGS_FILE", str(ROOT / "config" / "settings.yaml"))).resolve()
+    return Path(os.environ.get("DH_SETTINGS_FILE", str(ROOT / "config" / "settings-default.yaml"))).resolve()
 
 
 def load_settings() -> dict[str, Any]:

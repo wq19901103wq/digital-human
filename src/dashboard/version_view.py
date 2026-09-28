@@ -44,7 +44,10 @@ def _files(directory: Path, kind: str) -> dict[str, Path]:
 
 def _current(instance: Path, kind: str, ref: str) -> str:
     if kind == 'share':
-        from .share_view import current_bindings
+        try:
+            from .share_view import current_bindings
+        except ImportError:
+            return 'share_view 未入库'
         return ' / '.join(current_bindings(instance, ref)) or '无当前基线绑定'
     pointers = report._baseline_pointers(instance)
     keys = {'data': [('data', '当前数据')],
@@ -258,7 +261,10 @@ def _purposes(instance: Path, directory: Path, url: str) -> str:
 def detail_html(instance: Path, kind: str, ref: str, query: dict) -> str:
     directory = _directory(instance, kind, ref)
     if kind == 'share':
-        from .share_view import detail_html as share_detail
+        try:
+            from .share_view import detail_html as share_detail
+        except ImportError:
+            return report._page(KINDS[kind], '<p>share_view 未入库</p>')
         return share_detail(instance, directory, query)
     files = _files(directory, kind)
     url = report._version_url(instance, kind, ref)
@@ -269,8 +275,11 @@ def detail_html(instance: Path, kind: str, ref: str, query: dict) -> str:
             '<p class="help">以下内容直接读取此版本保存的文件；关联实验和当前用途按现有记录显示。</p>')
     body += report._baseline_summary(instance)
     if kind in ('generators', 'judges'):
-        from .share_view import binding_html
-        body += '<p>此版本绑定的 Share：' + binding_html(instance, kind, ref) + '</p>'
+        try:
+            from .share_view import binding_html
+            body += '<p>此版本绑定的 Share：' + binding_html(instance, kind, ref) + '</p>'
+        except ImportError:  # share_view 随 share 展示线入库前，版本页不因可选区块断裂
+            pass
     if kind == 'generators':
         body += '<p>人格与场景材料来自 ' + report._version_link(instance, 'data', cfg.get('data_version')) + '；实际评测数据见关联实验。</p>'
     if kind == 'data':
