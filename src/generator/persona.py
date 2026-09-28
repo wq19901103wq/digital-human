@@ -58,6 +58,8 @@ class PersonaPromptBuilder:
         case: dict[str, Any],
         style_block: str,
         forced_reply: bool,
+        *,
+        source_context=None,
     ) -> list[dict[str, str]]:
         history = "\n".join(self._history_line(m) for m in case.get("context", []))
         identity_rule = (
@@ -68,6 +70,10 @@ class PersonaPromptBuilder:
         unread = case.get("unread") or ""
         if not unread and case.get("context"):
             unread = str(case["context"][-1].get("text", ""))
+        if source_context is not None:
+            history = source_context.history
+            identity_rule = source_context.identity_rule
+            unread = source_context.unread
         force_rule = (
             "\n<force_reply>评测模式：本题必须给出回复，不得输出空 replies。</force_reply>"
             if forced_reply

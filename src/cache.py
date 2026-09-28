@@ -29,6 +29,10 @@ _validator = ContextVar("result_cache_validator", default=None)
 # ranker training remain valid. Aliased by exact bytes; any further edit gets
 # a fresh identity.
 _CODE_DIGEST_ALIASES = {
+    # Reviewed explicit source_participants_v1 rendering. Legacy messages and
+    # output parsing are unchanged; new messages retain distinct cache keys.
+    "5969906163561bff564bc06cd1f8a0e6a2556b1dceb4b07e1860989b3ce96783":
+        "79a7643e7f65a0094bb70addf11400229e65d2b425385d3b1e0787c68f63b780",
     # Explicit Gen background only adds messages for the new policy. Legacy
     # prompts and generation semantics retain their existing cache identity.
     "e8949029199ee75ae2cacde29cdf7ab6c5debe499a3c2b2cec2847571d395292":

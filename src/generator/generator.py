@@ -57,6 +57,12 @@ class ReplyGenerator:
         if share is not None:
             from .background import Background
             self._background = Background(gen_cfg, share, self._history_sources)
+        from .source_projection import validate_policy
+        self._context_projection = gen_cfg.get('context_projection')
+        validate_policy(self._context_projection)
+        if self._context_projection is not None:
+            if self._history_sources is None or gen_cfg.get('context_identity') is not None:
+                raise ConfigError('context_projection requires historical sources and exclusive rendering')
         self._builder = PersonaPromptBuilder(settings, prompt_root=prompt_root,
                                             context_identity=gen_cfg.get("context_identity"))
         self._check_sources()
@@ -183,7 +189,14 @@ class ReplyGenerator:
             self._history_sources.validate(case)
             if self._information_end >= case["input_cutoff"]["timestamp"]:
                 raise HistoryError("生成器静态学习材料晚于本题输入时间，禁止生成或复用")
-            messages = self._builder.build_messages(prompt_case(case), self._style_block(case), forced_reply)
+            options = {}
+            if self._context_projection is not None:
+                from .source_projection import project_validated
+                projection = project_validated(case, self._history_sources)
+                options['source_context'] = projection
+                tracing.note('source_projection', {'policy': self._context_projection, **projection.stats})
+            messages = self._builder.build_messages(prompt_case(case), self._style_block(case),
+                                                    forced_reply, **options)
             if self._background is not None:
                 client = self._llm['group' if case.get('chat_type') == 'group' else 'private']
                 messages.insert(1, self._background.message(case, client))
