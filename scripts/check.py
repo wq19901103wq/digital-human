@@ -231,6 +231,10 @@ def main(argv=None):
     tests.add_argument('--tests', nargs='+', help='相关测试文件；省略不运行 pytest')
     tests.add_argument('--full', action='store_true', help='运行全部离线回归')
     code.add_argument('--demo-output', help='另运行合成演示；输出目录须为空')
+    wiki = sub.add_parser('wiki', help='核对 Wiki 批次产物及已知转发称呼归属问题；不生成事实')
+    wiki.add_argument('--batch', action='append', required=True, type=Path)
+    wiki.add_argument('--require-complete', action='store_true', help='批次仍有未完成任务时检查失败')
+    wiki.add_argument('--catalog', type=Path, help='同时核对已交付对象正文及 JSON、XML、离线卡片')
     judge = sub.add_parser('judge', help='开发轮材料和已存观察；不创建评测、不请求、不切基线')
     judge.add_argument('--instance', required=True)
     judge.add_argument('--pack', required=True)
@@ -269,6 +273,12 @@ def main(argv=None):
     report = Report(args.mode)
     if args.mode == 'code':
         check_code(args, report)
+    elif args.mode == 'wiki':
+        from src.bootstrap.wiki_delivery import require_valid
+        with offline():
+            report.run('wiki_artifacts', lambda: require_valid(args.batch,
+                require_complete=args.require_complete, catalog=args.catalog))
+        report.value.update(evaluation_started=False, model_requests_prohibited=True)
     else:
         from src.iteration import versions
         from src.config import ConfigError

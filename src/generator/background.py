@@ -9,6 +9,7 @@ import json
 
 from .. import cache, tracing
 from ..config import ConfigError
+from ..bootstrap import wiki_prompt
 from ..judge.memory_dense import configured
 from ..judge.memory_search import SearchMemory, parse_plan
 from ..judge.wiki_lookup import diagnostic_projection
@@ -66,7 +67,9 @@ class Background:
         self.path = share['dir'] / 'content' / 'knowledge.json'
         self.signature = stamp(self.path)
         self.knowledge = json.loads(self.path.read_text())
-        expected = self.knowledge.get('source_manifest', {}).get('messages', {}).get('sha256')
+        self.structured = self.knowledge.get('schema') == 'wiki_structured_v1'
+        expected = (self.knowledge.get('coverage', {}).get('sha256') if self.structured else
+                    self.knowledge.get('source_manifest', {}).get('messages', {}).get('sha256'))
         if expected != sources.hashes['messages.jsonl']:
             raise ConfigError('Share 的原始消息来源与本次数据不一致')
         memory = self.policy['memory']
@@ -104,8 +107,35 @@ class Background:
             return (source_chat == e.get('chat_id') and source_chat not in excluded
                     and source_chat.split(':', 2)[1] == account
                     and message.message_id not in blocked
-                    and message.timestamp == e.get('observed_at')
+                    and message.timestamp == e.get('timestamp' if self.structured else 'observed_at')
+                    and (not self.structured or (
+                        e.get('sha256') == self.sources.hashes['messages.jsonl']
+                        and e.get('sender_id') == (message.event or {}).get('sender_id')
+                        and e.get('is_self') == message.is_self))
                     and message.timestamp < cutoff)
+
+        if self.structured:
+            span = case['source_span']
+            accounts = {account}
+            if chat.startswith('private:'):
+                accounts.add(chat.split(':', 2)[2])
+            accounts.update((m.event or {}).get('sender_id') for m in
+                self.sources.chats[chat][span['start']:span['reply_start']])
+            # A prior fact cannot borrow an identity established by a later or
+            # excluded source. Account/role bindings need the same admission as
+            # the fact itself; hiding only an unsupported display name is unsafe.
+            entities = [e for e in self.knowledge['entities']
+                        if e.get('evidence_refs') and all(prior(r) for r in e['evidence_refs'])]
+            known = {e['id'] for e in entities}
+            knowledge = dict(self.knowledge, entities=entities)
+            for table in wiki_prompt.TABLES:
+                knowledge[table] = [r for r in self.knowledge[table]
+                                    if wiki_prompt.entity_refs(r) <= known]
+            view = (wiki_prompt.project(knowledge, accounts, chat, prior)
+                    if knowledge['subject']['entity_id'] in known else None)
+            return view or dict(
+                schema='wiki_prompt_v1', self_person_id='person:' + account,
+                identities=[], facts=[], coverage={'page': 'no_matching_account'})
 
         # No case-specific correction, unlocated Wiki assertion, or future source.
         facts = [f for f in self.knowledge.get('fact_claims', [])
