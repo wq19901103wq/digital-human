@@ -252,7 +252,10 @@ def _branch_baselines(instance_dir: Path) -> str:
 
 
 def _baseline_summary(instance_dir: Path) -> str:
-    from .share_view import binding_html
+    try:
+        from .share_view import binding_html
+    except ImportError:  # share_view 随 share 展示线入库前，主页不因可选区块断裂
+        binding_html = None
     pointers = _baseline_pointers(instance_dir)
     prepared = [p.parent.name for p in sorted((instance_dir / 'data').glob('*/purposes.json'), reverse=True)
                 if p.parent.name != pointers.get('data')]
@@ -260,11 +263,15 @@ def _baseline_summary(instance_dir: Path) -> str:
         _version_link(instance_dir, 'data', ref) for ref in prepared[:3]) + '</p>') if prepared else ''
     rows = []
     for label, kind, folder in [('生成器', 'gen', 'generators'), ('Judge', 'judge', 'judges')]:
+        production = pointers.get('production_' + kind)
+        iteration = pointers.get('iteration_' + kind)
+        production_share = f'<div>Share：{binding_html(instance_dir, folder, production)}</div>' if binding_html else ''
+        iteration_share = f'<div>Share：{binding_html(instance_dir, folder, iteration)}</div>' if binding_html else ''
         rows.append(f'<tr><th scope="row">{label}</th>'
-                    f'<td>{_version_link(instance_dir, folder, pointers.get("production_" + kind))}'
-                    f'<div>Share：{binding_html(instance_dir, folder, pointers.get("production_" + kind))}</div></td>'
-                    f'<td>{_version_link(instance_dir, folder, pointers.get("iteration_" + kind))}'
-                    f'<div>Share：{binding_html(instance_dir, folder, pointers.get("iteration_" + kind))}</div></td></tr>')
+                    f'<td>{_version_link(instance_dir, folder, production)}'
+                    f'{production_share}</td>'
+                    f'<td>{_version_link(instance_dir, folder, iteration)}'
+                    f'{iteration_share}</td></tr>')
     share_refs = sorted(p.parent.name for p in (instance_dir / 'share').glob('*/manifest.json'))
     share_links = '、'.join(_version_link(instance_dir, 'share', ref) for ref in share_refs) or '暂无版本'
     return ('<section class="panel baseline-summary" id="baselines"><h2>当前基线</h2>'

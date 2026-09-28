@@ -44,3 +44,15 @@ scripts/legacy/
 /docs/SOURCE-JUDGE-ALIGNMENT.md
 /docs/WIKI-KNOWLEDGE.md
 /.worktrees/
+/tests/test_dnn_continuation.py
+/tests/test_guarded_audit_cohorts.py
+/tests/test_guarded_history_rerun.py
+/tests/test_history_stage_scheduling.py
+/tests/test_history_training.py
+/tests/test_judge_dataset_rerun.py
+/tests/test_judge_temporal.py
+/tests/test_learning_material_repair.py
+/tests/test_lr_dataset_training.py
+/tests/test_lr_retrain.py
+/tests/test_pairwise_policy_comparison.py
+/tests/test_pairwise_tuning.py
