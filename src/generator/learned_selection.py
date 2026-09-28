@@ -78,7 +78,8 @@ def feature_rows(case, rows, refs, values, *, transform=None):
     return result
 
 
-def choose(rows, scores, retriever, *, count, budget):
+def choose(rows, scores, retriever, *, count, budget, decisions=None):
+    """Select complete examples; optionally record the exact rejection reasons."""
     require(len(rows) == len(scores), 'Ranker score count differs from recall')
     selected, content_seen, source_seen = [], set(), set()
     for row, score in sorted(zip(rows, scores), key=lambda p: (-float(p[1]), str(p[0]['id']))):
@@ -86,12 +87,21 @@ def choose(rows, scores, retriever, *, count, budget):
         content = digest(dict(context=[{'sender': m['sender'], 'text': m['text']}
             for m in row['context_messages']], reply=row['reply']))
         source = digest([row['context_message_ids'], row['reply_message_ids']])
-        if content in content_seen or source in source_seen or len(selected) >= count:
+        detail = dict(example_id=row['id'], score=float(score))
+        if decisions is not None:
+            decisions.append(detail)
+        if content in content_seen or source in source_seen:
+            detail['decision'] = 'duplicate'
+            continue
+        if len(selected) >= count:
+            detail['decision'] = 'count_limit'
             continue
         proposed = [*selected, row]
         block, ids = retriever.render_selected(proposed, max_chars=budget)
         if ids != [x['id'] for x in proposed] or len(block) > budget:
+            detail['decision'] = 'budget'
             continue
+        detail.update(decision='selected', combined_chars=len(block))
         selected.append(row)
         content_seen.add(content)
         source_seen.add(source)

@@ -2,10 +2,13 @@
 """Report completed few-shot ranker AUC and paired selection versus the frozen baseline."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+os.environ.setdefault('OMP_NUM_THREADS', '1')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.generator.fewshot_ranker.pipeline import status
@@ -15,6 +18,8 @@ from src.iteration.storage import file_lock, locked, read_json, write_json
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'diagnose-selection':
+        return diagnose_selection(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--training-output', required=True, type=Path)
     parser.add_argument('--wait', action='store_true', help='Wait for the current training process to complete')
@@ -54,6 +59,23 @@ def main(argv=None):
                 parser.error('training is still running; use --wait')
             time.sleep(15)
         print(json.dumps(report(output), ensure_ascii=False, indent=2), flush=True)
+
+
+def diagnose_selection(argv):
+    from src.generator.selection_analysis import report as diagnose
+    from src.iteration import versions
+    parser = argparse.ArgumentParser(description='Cached-only development selection diagnosis')
+    parser.add_argument('--instance', required=True)
+    parser.add_argument('--generator', required=True)
+    parser.add_argument('--spec', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--budgets', type=int, nargs='+', required=True)
+    parser.add_argument('--case-id', action='append', default=[])
+    args = parser.parse_args(argv)
+    versions.switch_instance(args.instance)
+    value = diagnose(args.output, spec_path=args.spec, generator=args.generator,
+        budgets=args.budgets, case_ids=args.case_id)
+    print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == '__main__':
