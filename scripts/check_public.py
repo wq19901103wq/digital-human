@@ -48,10 +48,19 @@ def inspect(name, content, allowed):
 
 
 def candidates(root):
+    ignored = set()
+    if (root / '.git').exists():
+        out = subprocess.run(['git', '-C', str(root), 'ls-files', '--others',
+                              '--ignored', '--exclude-standard', '-z', '--directory'],
+                             capture_output=True).stdout
+        ignored = {p.decode() for p in out.split(b'\0') if p}
     for path in root.rglob('*'):
         relative = path.relative_to(root)
         if (relative.parts[0] in EXCLUDED or any(p == '__pycache__' or p.endswith('.egg-info') for p in relative.parts)
                 or path.name.startswith('.env.')):
+            continue
+        rel = relative.as_posix()
+        if rel + '/' in ignored or rel in ignored or any(rel.startswith(p) for p in ignored if p.endswith('/')):
             continue
         if path.is_symlink():
             yield relative.as_posix(), None
