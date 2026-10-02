@@ -200,6 +200,45 @@ def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, objec
         supplement.run(output, object_workers=object_workers)
 
 
+@pytest.mark.parametrize('object_workers', [1, 3])
+def test_skip_incomplete_preserves_supplement_failure_and_advances_pending(tmp_path, monkeypatch,
+                                                                       object_workers):
+    library = tmp_path / 'wiki'
+    (library / 'groups').mkdir(parents=True)
+    (library / 'topics').mkdir()
+    (library / 'groups/123@chatroom.md').write_text('# 群\n- 群聊 ID：123@chatroom\n')
+    (library / 'topics/运动.md').write_text('# 运动\n- [1970-01-01] peer @ 群: 原始消息中的运动安排\n')
+    messages = source(tmp_path, [dict(row('group:self:123@chatroom', 'peer', 1000,
+        '原始消息中的运动安排'), chat_name='群')])
+    parent, output = tmp_path / 'parent', tmp_path / 'supplement'
+    wiki_batch.prepare(library, messages, parent, 'self', {})
+    supplement.prepare(parent, output)
+    calls = []
+    real_generate = scope.generate
+
+    def fake(*args, **kwargs):
+        calls.append(args[0]['id'])
+        if len(calls) == 1:
+            return dict(stage='incomplete', errors=['semantic gap'])
+        return real_generate(*args, **kwargs, client=ScopeClient())
+
+    monkeypatch.setattr(scope, 'generate', fake)
+    failed = supplement.run(output, attempts=1, max_jobs=1)
+    failed_id = next(iter(failed['jobs']))
+    failure = dict(failed['jobs'][failed_id])
+    state = supplement.run(output, object_workers=object_workers, max_jobs=1, skip_incomplete=True)
+    assert state['stage'] == 'incomplete' and state['counts'] == {'incomplete': 1, 'complete': 1}
+    assert state['jobs'][failed_id] == failure
+    assert calls[0] != calls[1]
+    supplement.run(output, skip_incomplete=True)
+    assert len(calls) == 2
+    assert supplement.run(output)['stage'] == 'complete'
+    assert len(calls) == 3 and calls[0] == calls[2]
+    messages.write_text(messages.read_text() + '\n')
+    with pytest.raises(ValueError, match='messages changed'):
+        supplement.run(output, skip_incomplete=True)
+
+
 def test_parallel_supplement_uses_worker_local_sqlite_connections(tmp_path, monkeypatch):
     library = tmp_path / 'wiki'
     (library / 'groups').mkdir(parents=True)

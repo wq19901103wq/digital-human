@@ -78,6 +78,42 @@ def test_batch_refuses_changed_raw_source(tmp_path):
         batch.run(output)
 
 
+@pytest.mark.parametrize('object_workers', [1, 3])
+def test_skip_incomplete_preserves_failure_and_runs_pending_without_charging_job_limit(tmp_path, monkeypatch,
+                                                                                     object_workers):
+    _, _, output = inputs(tmp_path)
+    calls = []
+
+    def repair(wiki, messages, directory, account, self_account, config, **kwargs):
+        calls.append(account)
+        if len(calls) == 1:
+            return dict(stage='incomplete', errors=['semantic gap'])
+        write_json(directory / 'content/knowledge.json', dict(schema='wiki_structured_v1',
+            subject=dict(account=account, self_account=self_account, entity_id='target'),
+            entities=[dict(id='target', account=account, kind='person', label='测试',
+                           identity_status='exact_account', evidence_refs=[])],
+            attributes=[], relations=[], events=[], addresses=[], evidence={}))
+        return dict(stage='complete')
+
+    monkeypatch.setattr(batch.wiki_repair, 'repair', repair)
+    failed = batch.run(output, attempts=1, max_jobs=1)
+    failed_id = next(iter(failed['jobs']))
+    failure = dict(failed['jobs'][failed_id])
+    state = batch.run(output, object_workers=object_workers, max_jobs=1, skip_incomplete=True)
+    assert state['stage'] == 'incomplete'
+    assert state['counts'] == {'incomplete': 1, 'complete': 1}
+    assert state['jobs'][failed_id] == failure
+    assert calls[0] != calls[1]
+    batch.run(output, skip_incomplete=True)
+    assert len(calls) == 2
+    assert batch.run(output)['stage'] == 'complete'
+    assert len(calls) == 3 and calls[0] == calls[2]
+    completed = state['jobs'][next(job_id for job_id in state['jobs'] if job_id != failed_id)]
+    Path(completed['knowledge']).write_text('{}')
+    with pytest.raises(ValueError, match='artifact changed'):
+        batch.run(output, skip_incomplete=True)
+
+
 def test_status_distinguishes_live_job_from_interrupted_saved_work(tmp_path, monkeypatch):
     _, _, output = inputs(tmp_path)
     assert batch.status(output)['counts']['pending'] == 2

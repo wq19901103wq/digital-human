@@ -147,7 +147,7 @@ def status(output):
                 coverage_gaps=manifest['summary']['gaps'])
 
 
-def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None):
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_incomplete=False):
     """Continue missing jobs; successful exact-input work is never requested again."""
     if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
         raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
@@ -162,7 +162,7 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None):
             raise ValueError('raw source changed after batch preparation')
         state = read_json(output / 'progress.json', default=dict(jobs={}))
         state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']),
-                     object_workers=object_workers, workers=workers)
+                     object_workers=object_workers, workers=workers, skip_incomplete=skip_incomplete)
         def save():
             state['counts'] = dict(Counter(v['stage'] for v in state['jobs'].values()))
             state['updated_at'] = time.time()
@@ -176,6 +176,8 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None):
                     if sha256_file(Path(prior['knowledge'])) != prior['sha256']:
                         raise ValueError('completed batch artifact changed')
                     wiki_prompt.export(prior['knowledge'], output / 'prompt' / job['id'])
+                    continue
+                if skip_incomplete and prior.get('stage') == 'incomplete':
                     continue
                 yield job
 

@@ -43,6 +43,7 @@ def main():
     run.add_argument('--object-workers', type=int, default=1, help='同时整理的聊天对象数')
     run.add_argument('--attempts', type=int, default=2)
     run.add_argument('--max-jobs', type=int)
+    run.add_argument('--skip-incomplete', action='store_true', help='保留失败缺口，先推进未执行和中断的对象')
     revise = commands.add_parser('revise', help='修订已完成内容；复用有效记录和修订缓存')
     revise.add_argument('--workers', type=int, default=4)
     revise.add_argument('--object-workers', type=int, default=1, help='同时修订的聊天对象数')
@@ -98,7 +99,8 @@ def main():
         manifest = json.loads((output / 'manifest.json').read_text())
         backend = wiki_supplement if manifest['schema'] == 'wiki_supplement_v1' else wiki_batch
         value = backend.run(output, workers=args.workers, object_workers=args.object_workers,
-                            attempts=args.attempts, max_jobs=args.max_jobs)
+                            attempts=args.attempts, max_jobs=args.max_jobs,
+                            skip_incomplete=args.skip_incomplete)
         value = {k: v for k, v in value.items() if k != 'jobs'}
     print(json.dumps(value, ensure_ascii=False), flush=True)
     return 0 if args.command == 'status' or value.get('stage', 'complete') == 'complete' else 1

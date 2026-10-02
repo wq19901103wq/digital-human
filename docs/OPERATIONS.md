@@ -290,6 +290,8 @@ python scripts/iterate_branches.py --instance demo retry --kind training --job s
 
 资源策略参考 [额度模板](../examples/resource-policy.template.json)。失败请求仍消耗额度；缓存命中不新增传输调用，但仍检查取消和截止时间。成本单位是保守预留，不是服务商实付账单。取消的实际生效时间受在途外部调用影响；运行中的调度器可以停止自己持有且身份匹配的任务进程组。
 
+Wiki 原批次可用 `scripts/batch_wiki.py run --output instances/demo/background/wiki-batch --skip-incomplete --max-jobs 4 --object-workers 4` 先推进尚未执行或中断的对象，避免已知语义失败反复占满时间片。该选项适用于人物生成和补充批次，不适用于修订批次；保留失败项的错误、尝试次数和覆盖缺口，不将其计为完成，也不改变冻结输入、来源检查或完成产物校验。默认仍会重试未完成项，修复失败原因后可去掉该选项续跑。
+
 ## 维护与发布
 
 修改框架前保留可恢复版本，避免改动旧任务绑定的文件。运行快照能保存执行代码，环境仍需要维护；不要把安装最新版依赖当作旧任务恢复方案。
