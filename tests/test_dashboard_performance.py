@@ -97,6 +97,29 @@ def test_shared_packs_and_assets_read_once_but_changes_are_not_hidden(tmp_path, 
     assert reads[asset] == 2
 
 
+def test_pack_summary_reuses_only_metadata_and_invalidates_on_file_changes(tmp_path, monkeypatch):
+    from src.dashboard.pack_metadata import summary
+    pack = tmp_path / 'pack.json'
+    _write(pack, {'c0_gen_version': 'g-1', 'rows': [{'private': 'sample'}]})
+    calls = []
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        calls.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+    assert summary(pack) == {'c0_gen_version': 'g-1'}
+    summary(pack)['c0_gen_version'] = 'mutation'
+    assert summary(pack) == {'c0_gen_version': 'g-1'}
+    assert calls == [pack]
+    _write(pack, {'c0_gen_version': 'g-2', 'rows': []})
+    assert summary(pack) == {'c0_gen_version': 'g-2'}
+    assert calls == [pack, pack]
+    pack.unlink()
+    assert summary(pack) == {}
+
+
 def test_read_scopes_are_concurrent_and_exceptions_do_not_leak_cached_values():
     barrier = Barrier(2)
 

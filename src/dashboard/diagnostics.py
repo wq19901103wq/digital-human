@@ -61,9 +61,12 @@ def inspect_access(base_url: str, instance: str, shares: list[str], *, auth_file
     results = []
 
     def request(path, method, headers, expected):
+        # On loopback, exercise the forwarded-access boundary rather than local bypass.
+        forwarded = ({'Forwarded': 'for=192.0.2.1'}
+                     if url.hostname in ('localhost', '127.0.0.1', '::1') else {})
         try:
             response = opener.open(Request(base_url.rstrip('/') + path, method=method,
-                headers={'User-Agent': 'DigitalHuman-Dashboard-Check/1.0', **headers}), timeout=20)
+                headers={'User-Agent': 'DigitalHuman-Dashboard-Check/1.0', **forwarded, **headers}), timeout=20)
         except HTTPError as exc:
             response = exc
         with response:

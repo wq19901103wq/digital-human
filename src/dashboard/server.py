@@ -11,10 +11,12 @@ from __future__ import annotations
 import functools
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
 import socketserver
+import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -30,11 +32,15 @@ def _instances_root():
 class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
     """Owner authentication and fixed-test detail isolation (SOP §8.5)."""
 
+    _live_render_lock = threading.Lock()
+
     def __init__(self, *args, auth_file: Path | None = None, **kwargs):
         self.auth_file = auth_file if auth_file is not None else auth.credentials_path()
         super().__init__(*args, **kwargs)
 
     def _authorized(self) -> bool:
+        if self._local_direct():
+            return True
         try:
             expected = auth.authorization(self.auth_file)
         except (OSError, ValueError):
@@ -48,6 +54,29 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
         return False
+
+    def _local_direct(self) -> bool:
+        """Allow loopback origins only; forwarded requests still require credentials."""
+        try:
+            if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                return False
+        except ValueError:
+            return False
+        if any(name.lower().startswith('x-forwarded-') or name.lower() in
+               {'forwarded', 'via', 'x-real-ip', 'cf-connecting-ip', 'true-client-ip'}
+               for name in self.headers):
+            return False
+        hosts = self.headers.get_all('Host', [])
+        port = self.server.server_address[1]
+        allowed = {f'{host}:{port}' for host in ('localhost', '127.0.0.1', '[::1]')}
+        if port == 80:
+            allowed.update(('localhost', '127.0.0.1', '[::1]'))
+        if len(hosts) != 1 or hosts[0].lower() not in allowed:
+            return False
+        if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
+            return False
+        origins = self.headers.get_all('Origin', [])
+        return not origins or origins == [f'http://{hosts[0]}']
 
     def end_headers(self):
         self.send_header('Cache-Control', 'private, no-store')
@@ -120,11 +149,20 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
                 content = json.dumps(trace_view.payload(target, parts[4], query.get('revision', [''])[0],
                     operation=int(operation) if operation is not None else None), ensure_ascii=False)
             elif api:
-                query = parse_qs(url.query)
-                payload = report.live_payload(directory, run,
-                    cases_revision=query.get('cases_revision', [''])[0],
-                    config_revision=query.get('config_revision', [''])[0])
-                content = json.dumps(payload, ensure_ascii=False)
+                if not self._live_render_lock.acquire(blocking=False):
+                    self.send_response(503)
+                    self.send_header('Retry-After', '3')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                try:
+                    query = parse_qs(url.query)
+                    payload = report.live_payload(directory, run,
+                        cases_revision=query.get('cases_revision', [''])[0],
+                        config_revision=query.get('config_revision', [''])[0])
+                    content = json.dumps(payload, ensure_ascii=False)
+                finally:
+                    self._live_render_lock.release()
             else:
                 content = report._render_run_html(report._load_run(target)) if run else report.dashboard_html(directory / 'experiments')
         except FileNotFoundError:
@@ -239,16 +277,63 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
         pass  # 静态后台不刷访问日志
 
 
+class DashboardServer(socketserver.ThreadingTCPServer):
+    """Bound in-flight requests, including clients that stop sending or reading."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 16
+    max_requests = 4
+    connection_timeout = 15
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(self.max_requests)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        request.settimeout(self.connection_timeout)
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.2)
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\n'
+                                b'Retry-After: 3\r\nCache-Control: no-store\r\n'
+                                b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request, client_address):
+        import sys
+        # Browser polling aborts are normal; avoid retaining large render tracebacks.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(port: int = 8080) -> None:
+    import faulthandler
+    import signal
+    if hasattr(signal, 'SIGUSR1'):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     auth_file = auth.credentials_path()
     auth.initialize(auth_file)
     handler = functools.partial(_AuditGuardHandler, directory=str(ROOT))
     os.chdir(ROOT)
 
-    class _Server(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True  # 必须在构造/bind 之前生效
-
-    with _Server(("127.0.0.1", port), handler) as httpd:
+    with DashboardServer(("127.0.0.1", port), handler) as httpd:
         print(f"后台已启动: http://localhost:{port}/dashboard/index.html")
         print(f"Private dashboard login credentials: {auth_file}", flush=True)
         print("按 Ctrl+C 停止")

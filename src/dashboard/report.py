@@ -18,6 +18,7 @@ from ..iteration.storage import atomic_write
 
 from .components import _e, _version_url, _version_link, _pre, _details, _badge, _title, _run_url
 from .read_scope import once, scope
+from .pack_metadata import summary as _pack_summary
 
 _UI = Path(__file__).resolve().parent
 _LABELS = {
@@ -330,7 +331,7 @@ def _baseline_context(run: dict, *, compact: bool = False) -> str:
         different.append('评测数据与当前不同')
     if judge:
         pack_ref = spec.get('pack_ref')
-        pack = _json(instance / 'judge_eval' / pack_ref / 'pack.json') if pack_ref else {}
+        pack = _pack_summary(instance / 'judge_eval' / pack_ref / 'pack.json') if pack_ref else {}
         if pack.get('c0_gen_version') and pointers.get('production_gen') and pack['c0_gen_version'] != pointers['production_gen']:
             different.append('评估包的生成器与当前生产基线不同')
     elif pointers.get('production_judge') and spec.get('judge_ref') != pointers['production_judge']:
@@ -625,7 +626,7 @@ def _history_versions(run: dict) -> str:
                   f'<span class="version-comparison"><small>本轮候选</small>{version(spec.get("candidate_ref"))}</span>')
     if spec.get('kind') == 'judge_eval':
         pack_ref = spec.get('pack_ref')
-        pack = _json(run['instance_dir'] / 'judge_eval' / pack_ref / 'pack.json') if pack_ref else {}
+        pack = _pack_summary(run['instance_dir'] / 'judge_eval' / pack_ref / 'pack.json') if pack_ref else {}
         generator, judge = version(pack.get('c0_gen_version'), 'generators'), comparison
     else:
         generator, judge = comparison, version(spec.get('judge_ref'), 'judges')

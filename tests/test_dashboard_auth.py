@@ -1,4 +1,4 @@
-"""Anonymous requests must never reach dashboard renderers or downloadable files."""
+"""Local direct access is password-free; forwarded access requires owner credentials."""
 import functools
 import http.server
 import json
@@ -63,7 +63,7 @@ def test_wrong_credentials_do_not_read_files(private_server, value):
     base, _, _ = private_server
     with pytest.raises(HTTPError) as caught:
         urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml',
-                        headers={'Authorization': value}))
+                        headers={'Authorization': value, 'Forwarded': 'for=192.0.2.1'}))
     assert caught.value.code == 401
 
 
@@ -104,9 +104,42 @@ def test_credentials_fail_closed(private_server, failure):
         credentials.rename(target)
         credentials.symlink_to(target)
     with pytest.raises(HTTPError) as caught:
-        urlopen(base + '/instances/demo/share/s-0005/content/wiki.xml')
+        urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml',
+                        headers={'Forwarded': 'for=192.0.2.1'}))
     assert caught.value.code == 503
     assert b'SYNTHETIC_PRIVATE' not in caught.value.read()
+
+
+@pytest.mark.parametrize('method', ['GET', 'HEAD'])
+@pytest.mark.parametrize('headers', [{}, {'Authorization': 'Basic stale-browser-password'}])
+def test_local_direct_access_needs_no_credentials(private_server, method, headers):
+    base, _, credentials = private_server
+    credentials.unlink()
+    with urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml',
+                         method=method, headers=headers)) as response:
+        assert response.status == 200
+        assert response.headers.get('WWW-Authenticate') is None
+
+
+@pytest.mark.parametrize('headers', [
+    {'Host': 'public.example'}, {'Host': 'localhost.evil.example'},
+    {'Forwarded': 'for=127.0.0.1'}, {'X-Forwarded-Proto': 'https'},
+    {'CF-Connecting-IP': '127.0.0.1'}, {'X-Real-IP': '127.0.0.1'},
+    {'Via': 'proxy'}, {'Sec-Fetch-Site': 'cross-site'},
+    {'Origin': 'https://public.example'},
+])
+def test_local_proxy_or_cross_origin_requires_auth(private_server, headers):
+    base, _, _ = private_server
+    with pytest.raises(HTTPError) as caught:
+        urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml', headers=headers))
+    assert caught.value.code == 401
+
+
+def test_local_access_preserves_fixed_answer_guard(private_server):
+    base, _, _ = private_server
+    with pytest.raises(HTTPError) as caught:
+        urlopen(base + '/instances/demo/data/d-0001/fixed_test.jsonl')
+    assert caught.value.code == 403
 
 
 def test_restart_preserves_private_credentials(tmp_path):
