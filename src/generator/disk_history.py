@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import copy
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,7 @@ import time
 import uuid
 
 
-MODE = 'source_offsets_parallel_read_parse_v2'
+MODE = 'source_offsets_indexed_terms_eligibility_v4'
 CAPACITY = 256
 FEATURES = ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
             '_group_participant_profiles_by_id', '_terms_by_id')
@@ -59,7 +60,9 @@ def database(source, binding, build):
             pending = target.with_suffix('.' + uuid.uuid4().hex + '.building')
             connection = sqlite3.connect(pending)
             try:
-                connection.execute('PRAGMA cache_size=-2048')
+                # 构建期允许断电丢页：.building 仅在显式发布后改名，损坏即整体重建。
+                connection.execute('PRAGMA synchronous=OFF')
+                connection.execute('PRAGMA cache_size=-65536')
                 build(connection)
                 connection.commit()
                 connection.close()
@@ -162,6 +165,51 @@ class BoundedReader:
                 raise KeyError(identity)
             return json.loads(records[0][0])
         return self.cached(self.features, identity, load)
+
+    def term_overlaps(self, terms):
+        """Read only matching postings, with the frozen Counter overlap formula."""
+        overlaps = Counter()
+        items = list(terms.items())
+        for start in range(0, len(items), CAPACITY):
+            part = dict(items[start:start + CAPACITY])
+            placeholders = ','.join('?' for _ in part)
+            for term, identity, count in self.query(
+                    f'SELECT term,id,count FROM terms WHERE term IN ({placeholders})', tuple(part)):
+                overlaps[identity] += min(part[term], count)
+        return overlaps
+
+    def context_length(self, identity):
+        """示例正文拼接长度（冻结 len(\" \".join(context)) 公式），建索引时物化。"""
+        lengths = getattr(self, '_context_lengths', None)
+        if lengths is None:
+            lengths = {}
+            for value, length in self.query('SELECT id, context_length FROM examples ORDER BY position'):
+                lengths[value] = length
+            self._context_lengths = lengths
+        return lengths.get(identity, 0)
+
+    def excluded_ids(self, case, excluded=None):
+        """Use indexed boundaries/message IDs; an eligible duplicate still permits its ID."""
+        from src.generator.history import validate_case
+        cutoff = validate_case(case)
+        target = tuple(case['reply_message_ids'])
+        chats = tuple(case.get('history_excluded_chat_ids', ()))
+        target_sql = ','.join('?' for _ in target) or 'NULL'
+        time_allowed = ('(end_timestamp < ? OR (? = 1 AND end_timestamp = ? AND order_verified = 1 '
+                        'AND chat = ? AND end_index <= ?))')
+        ordered = cutoff.get('order_verified') is True
+        time_params = (cutoff['timestamp'], int(ordered), cutoff['timestamp'],
+                       case['source_span']['chat_id'], cutoff['index'] + 1 if ordered else 0)
+        chat_condition = f'chat IN ({",".join("?" for _ in chats)})' if chats else '0'
+        conflict = (f'position IN (SELECT position FROM example_messages '
+                    f'WHERE message_id IN ({target_sql}))') if target else '0'
+        # 直接计算允许集（时间索引范围扫描 + 少量冲突/聊天排除），
+        # 被禁集 = 全池 id - 允许集；避免对 blocked 集合做相关子查询逐行回表。
+        allowed = (f'SELECT id FROM examples WHERE {time_allowed} AND NOT ({chat_condition}) '
+                   f'AND NOT ({conflict})')
+        statement = f'SELECT DISTINCT id FROM examples WHERE id NOT IN ({allowed})'
+        parameters = (*time_params, *chats, *target)
+        return set(excluded or ()) | {identity for identity, in self.query(statement, parameters)}
 
     def close(self):
         if getattr(self.local, 'reading', False):
@@ -322,12 +370,19 @@ def load_examples(self, original, module):
         return self._rows
     flags = {key: value for key, value in vars(self).items() if type(value) is bool}
     binding = dict(kind='examples', hashes=self._history_sources.hashes, flags=flags,
-                   source_code=checksum(module.__file__),
-                   guard_code=checksum(__import__('src.generator.history_sources', fromlist=['']).__file__))
+                   source_code=checksum(module.__file__))
 
     def build(connection):
         connection.execute('CREATE TABLE examples(position INTEGER PRIMARY KEY, id TEXT, offset INTEGER, '
-                           'size INTEGER, header TEXT, buckets TEXT, features TEXT)')
+                           'size INTEGER, header TEXT, buckets TEXT, features TEXT, '
+                           'chat TEXT, end_timestamp REAL, end_index INTEGER, order_verified INTEGER, '
+                           'latest_situations TEXT, latest_profile TEXT, latest_turn_form TEXT, '
+                           'group_participant_profile TEXT, context_length INTEGER)')
+        connection.execute('CREATE TABLE example_messages(message_id TEXT, position INTEGER, '
+                           'PRIMARY KEY(message_id,position)) WITHOUT ROWID')
+        connection.execute('CREATE TABLE terms(term TEXT, id TEXT, count INTEGER, '
+                           'PRIMARY KEY(term,id)) WITHOUT ROWID')
+        connection.execute('CREATE INDEX term_ids ON terms(id)')
         position = 0
         def chunk(lines, offsets):
             nonlocal position
@@ -349,9 +404,21 @@ def load_examples(self, original, module):
                         break
                 else:
                     raise ValueError('frozen loader changed a historical example')
-                connection.execute('INSERT INTO examples VALUES(?,?,?,?,?,?,?)',
+                span = row['source_span']
+                connection.execute('INSERT INTO examples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (position, identity, offset, size, encoded({key: row[key] for key in HEADERS if key in row}),
-                     encoded(buckets), encoded(values, ordered=True)))
+                     encoded(buckets), encoded(values, ordered=True), span['chat_id'],
+                     span['end_timestamp'], span['end'], int(span.get('order_verified') is True),
+                     json.dumps(sorted(values['_latest_situations_by_id']), ensure_ascii=False),
+                     json.dumps(values['_latest_profiles_by_id'], ensure_ascii=False, sort_keys=True),
+                     values['_latest_turn_forms_by_id'],
+                     json.dumps(values['_group_participant_profiles_by_id'], ensure_ascii=False),
+                     len(' '.join(row['context']))))
+                connection.executemany('INSERT OR IGNORE INTO example_messages VALUES(?,?)',
+                    ((message, position) for message in row['context_message_ids'] + row['reply_message_ids']))
+                connection.execute('DELETE FROM terms WHERE id=?', (identity,))
+                connection.executemany('INSERT INTO terms VALUES(?,?,?)',
+                    ((term, identity, count) for term, count in values['_terms_by_id'].items()))
                 position += 1
         with self.path.open('rb') as stream:
             lines, offsets, offset = [], [], 0
@@ -366,6 +433,8 @@ def load_examples(self, original, module):
             if lines:
                 chunk(lines, offsets)
         connection.execute('CREATE INDEX example_ids ON examples(id,position)')
+        connection.execute('CREATE INDEX example_times ON examples(end_timestamp)')
+        connection.execute('CREATE INDEX example_chats ON examples(chat)')
         self._history_sources.check()
 
     connection = database(self.path, binding, build)
@@ -387,8 +456,18 @@ def load_examples(self, original, module):
                 for key in keys:
                     getattr(self, name).setdefault((group, key), []).append(row)
         identities = dict.fromkeys(str(row['id']) for row in self._rows)
-        for name in FEATURES:
-            setattr(self, name, FeatureMap(reader, identities, name))
+        small = ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
+                 '_group_participant_profiles_by_id')
+        for name in small:
+            setattr(self, name, {})
+        for (identity, situations, profile, turn_form, participants) in connection.execute(
+                'SELECT id, latest_situations, latest_profile, latest_turn_form, '
+                'group_participant_profile FROM examples ORDER BY position'):
+            self._latest_situations_by_id[identity] = set(json.loads(situations))
+            self._latest_profiles_by_id[identity] = json.loads(profile)
+            self._latest_turn_forms_by_id[identity] = turn_form
+            self._group_participant_profiles_by_id[identity] = tuple(json.loads(participants))
+        self._terms_by_id = FeatureMap(reader, identities, '_terms_by_id')
         self._mtime_ns = self.path.stat().st_mtime_ns
         self._history_sources.check()
     except BaseException:
@@ -399,11 +478,17 @@ def load_examples(self, original, module):
 
 @contextmanager
 def disk_storage(module):
-    """Keep frozen validation/ranking functions; change only their storage containers."""
+    """Reuse certified storage and exact indexed operations, keeping frozen ranking."""
+    path = Path(__file__).resolve().with_name('indexed_retrieval.py')
+    spec = importlib.util.spec_from_file_location('_digital_human_indexed_retrieval', path)
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
     from src.generator import history_sources
     original_sources = history_sources.HistorySources.__init__
     original_load = module.PersonaFewShotRetriever._load
     original_retrieve = module.PersonaFewShotRetriever.retrieve
+    original_approved = module.PersonaFewShotRetriever.is_approved
+    indexed = adapter.indexed_retrieve(original_retrieve)
     readers = []
     def sources(self, directory):
         load_sources(self, directory, history_sources)
@@ -415,17 +500,37 @@ def disk_storage(module):
             readers.append(reader)
         return rows
     def retrieve(self, *args, **kwargs):
-        return [dict(row) for row in original_retrieve(self, *args, **kwargs)]
+        self._load()
+        method = indexed if getattr(self, '_disk_reader', None) is not None else original_retrieve
+        return [dict(row) for row in method(self, *args, **kwargs)]
+    def approved(self):
+        if self._history_sources is not None:
+            self._history_sources.check()
+        try:
+            report = json.loads(self.path.with_name('report.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return False
+        if self.render_path or not report.get('history_policy'):
+            return original_approved(self)
+        if report.get('review_status') != 'approved' or not report.get('examples_sha256'):
+            return False
+        self._history_sources = history_sources.load(self.path.parent)
+        self.history_policy = self._history_sources.purpose['history_policy']
+        if report['examples_sha256'] != self._history_sources.hashes['fewshot_pool.jsonl']:
+            return False
+        return bool(self._load())
     history_sources._load.cache_clear()
     try:
         history_sources.HistorySources.__init__ = sources
         module.PersonaFewShotRetriever._load = examples
         module.PersonaFewShotRetriever.retrieve = retrieve
+        module.PersonaFewShotRetriever.is_approved = approved
         yield
     finally:
         history_sources.HistorySources.__init__ = original_sources
         module.PersonaFewShotRetriever._load = original_load
         module.PersonaFewShotRetriever.retrieve = original_retrieve
+        module.PersonaFewShotRetriever.is_approved = original_approved
         history_sources._load.cache_clear()
         for reader in readers:
             reader.close()

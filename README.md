@@ -18,7 +18,7 @@ GAN 里生成器造样本、判别器打假，双方在对抗中一起变强。D
 
 和 GAN 还有一个关键不同：这里的判别器不可微，而且会犯错——我们实测相邻两次独立判定，结论翻转率约三分之一。所以单次判定只是描述值：有分歧的题两侧各自补做若干轮独立判定、按多数票出最终判定，净胜是核心判定指标——个别门槛还有叠加约束，如固定验收除净胜达标外还要求识别数严格改善。围绕这个框架还有两个工程判断：
 
-1. **迭代越快越容易过拟合测试集。** 固定验收批次一次性分配、用完即消耗，同一候选不得重复评测；训练数据按全局时间窗口与学习 / 验收隔离切分，防泄露靠规则不靠自觉。
+1. **迭代越快越容易过拟合测试集。** 固定验收沿用既有题集，可跨轮次、跨候选复用；同条件成功结果直接复用，只续跑缺项，不为已使用过题集重新抽题。训练数据按全局时间窗口与学习 / 验收隔离切分，防泄露靠规则不靠自觉。
 2. **主观感知提升 ≠ 统计显著提升。** 有收益的候选先成为下一轮开发基线；替换生产版本必须与生产直接对比、净胜达标才算数。
 
 ## 系统架构
@@ -67,7 +67,7 @@ graph TD
 
 净胜（补验多数票裁决后的胜题数 − 负题数，打平不计）是核心判定指标：开发阶段候选对照分支的开发基线，准入 / 验收阶段对照生产版本。
 
-一个候选从想法到生产：**冒烟**（接线验证）→ **开发**（净胜 > 0，成为该分支下一轮的开发基线）→ **固定准入**（与生产直接对比，不消耗验收批次）→ **固定验收**（消耗一次性固定批次，净胜达标才可替换生产）→ **推全**（指针切换，其他分支基于新版本全量重测、基线对齐）。
+一个候选从想法到生产：**冒烟**（接线验证）→ **开发**（净胜 > 0，成为该分支下一轮的开发基线）→ **固定准入**（核验与生产直接对比的开发证据）→ **固定验收**（复用既有固定题集和同条件成功结果，净胜达标才可替换生产）→ **推全**（指针切换，其他分支基于新版本全量重测、基线对齐）。
 
 多分支调度器支持多个方向并行迭代（人格提示词、场景规则、对话节奏等），每个分支有自己的开发基线指针，与生产基线互不干扰。为了让每次判定都可复现，判定记录按（被测版本, 题目, 轮次）留存：同一条件下的重复实验直接复用历史判定，只缺部分补验轮的题只跑缺的轮——这是迭代能跑快的基础设施。
 
@@ -118,17 +118,17 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
 
 ### 先说结论：慢在哪里
 
-当前“检索”不是从数据库索引里直接取最相关的 12 条，而是：**扫描历史池做隔离 → 取一个可能很大的候选桶 → 逐条读取、解码、打分 → 把整个桶排序 → 才取 12 条**。同一题通常走两路召回，合并后才进入最多 24 条候选的学习排序。
+原实现的“检索”不是从数据库索引里直接取最相关的 12 条，而是：**扫描历史池做隔离 → 取一个可能很大的候选桶 → 逐条读取、解码、打分 → 把整个桶排序 → 才取 12 条**。同一题通常走两路召回，合并后才进入最多 24 条候选的学习排序。
 
 因此，最后只使用 3 条示例，不代表前面只读取或处理了 3 条。把正文与词表放到磁盘，解决的是大量 Python 对象常驻内存的问题，**没有自动把全池过滤和大桶扫描变成索引 Top-K 查询**。
 
-同时，实验入口仍有全池批准检查、学习材料校验、ranker 来源重建；运行中的材料变更检查也还会递归遍历文件。它们与检索、模型请求是不同阶段，均有显著耗时。当前计时中的整次检索锁等待接近零，不能继续把慢笼统归因于“读取有锁”。
+本次实现将**历史示例 terms、时间/聊天/消息资格索引持久化到 SQLite**，逐题查询匹配词的 postings 和禁止使用的 ID，不再用 Python 全池遍历做这两项工作。候选桶逐条规则打分与全量排序保持不变，不是 SQL Top-K，也没有改候选池或评分。另将未变学习材料与 ranker 的完整核验结论持久化，续跑复用而非重复重建。冷启动的索引构建、摘要/完整性检查和运行中文件变更检测仍有成本；细节与测速边界见第 13 节。
 
 ### 1. 一道题的完整链路
 
 ```text
 加载冻结 Data / Gen / Judge 及来源绑定
-  → 检查历史池、学习材料与 ranker 证明
+  → 复用未变 Data 批准与学习材料/ranker 核验凭据；新绑定才全量核验
   → 读取当前题的上下文、时间边界和来源 ID
   → 最近 3 条消息组成 query：基础召回最多 12 条
   → 最近 1 条消息组成 query：基础召回最多 12 条
@@ -163,7 +163,7 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
 
 在真正计算相关性前，还要按当前题筛来源：
 
-- `history.filter_rows` 遍历历史池，保留可用于该题的示例；随后还会遍历池构造排除 ID。
+- 原始 `history.filter_rows` 遍历历史池、随后再次遍历构造排除 ID；当前受支持的冻结执行器以 `disk_history.BoundedReader.excluded_ids` 的索引查询等价替换（第 13.2 节），不改变禁止使用集合。
 - 检查历史时间边界、聊天用途隔离、目标回复来源与示例来源不交叉等。
 - 基础边界逻辑可识别经过认证的同秒顺序；学习召回额外要求 `source_span.end_timestamp < input_cutoff.timestamp`，即示例历史年龄严格为正。
 - 可选 `exclude_reply_in_context_v1` 会在两路合并后排除“示例回复已经出现在目标上下文”的整条例子，不额外补召回。此项不是下面列出的四个历史版本默认启用项。
@@ -196,7 +196,7 @@ length  = 1 / (1 + abs(query_length - context_length) / 20)
 
 随后遍历排序结果施加多样性限制：笑声形态最多 2 条，同一 `incoming_act / response_move` 组合最多 3 条，直到选够本路的 12 条或候选耗尽。
 
-令历史池规模为 `N`、本次候选桶大小为 `B`：当前单路结构包含 `O(N)` 的资格过滤、`O(B)` 的读取/打分和 `O(B log B)` 的排序。一次正式 Data 的池约有 **100,807 条**；`B` 随题目与 flags 改变，现有 profile 尚未逐次记录它，不能假设每路只扫描 12 或 24 条。
+令历史池规模为 `N`、本次候选桶大小为 `B`：原单路结构包含 Python `O(N)` 资格过滤、`O(B)` 读取/打分和 `O(B log B)` 排序。新适配器将前者替换为索引查询，词法重叠从匹配 postings 批量取得，**后两项仍保留**；SQL 返回数量也可能很大，不能称常数时间。一次正式 Data 的池约有 **100,807 条**；`B` 随题目与 flags 改变，现有 profile 尚未逐次记录它，不能假设每路只扫描 12 或 24 条。
 
 ### 4. 特征：哪些来自大模型，哪些在本地计算
 
@@ -247,10 +247,10 @@ length  = 1 / (1 + abs(query_length - context_length) / 20)
 | 层 | 实际存储/访问方式 | 仍然存在的开销 |
 |---|---|---|
 | 原始消息与示例正文 | 原始 JSONL 留在磁盘，SQLite 保存 offset / size；需要字段时 `os.pread` 再 `json.loads` | 每条读取、JSON 解码、Python 对象创建 |
-| 示例特征与词频 | SQLite 保存 features；按示例 ID 查询后 JSON 解码 | 大桶扫描仍会产生大量单条查询和解码 |
+| 示例特征与词频 | SQLite 保存 features 与预计算词频 postings；词法重叠批量查询匹配 term | 其余规则特征与正文仍有单条查询/解码 |
 | header 与候选桶 | header、桶的 ID/位置等轻量结构仍在内存 | 没有做到“所有对象均不占内存” |
-| SQLite 读连接 | worker/thread 各自独立只读连接，`query_only=ON`，配置 256 KiB page cache，mmap 关闭 | 多 worker 的独立连接/缓存及同时访问；不是共享连接串行执行 |
-| 单条正文/特征复用 | 当前 adapter 各保留本 worker 最近 1 条记录，不是正文/特征各维护 256 项 LRU | 重复跨记录访问仍需重新读取和解码 |
+| SQLite 读连接 | `disk_history.BoundedReader` 共用一个只读连接，短 `RLock` 包住 SQL；2 MiB page cache，mmap 关闭 | 单次 SQL 串行；并不锁住整题检索。`disk_source_reads` 的独立来源读取连接是另一层 |
+| 单条正文/特征复用 | 当前 `disk_history` 的正文和特征各有最多 256 项 `OrderedDict` | 有界缓存不覆盖大桶；不能把另一层的最近单条复用当成本层实现 |
 | 来源 offset | 按小窗口复用位置映射 | 仍需按题目/示例访问来源消息 |
 | 完整召回结果缓存 | 每个 retriever 的进程内有界 `OrderedDict`，最多 128 项，payload 预算 4 MiB | 不同 query 通常不能命中；进程退出后不保留 |
 
@@ -266,28 +266,28 @@ SELECT features FROM examples WHERE id=? ORDER BY position DESC LIMIT 1;
 
 锁须分开看：
 
-- **已去掉的大锁**：不同 query 的整个检索过程不再统一串行；SQLite 读操作不再争用一个共享连接。
+- **已去掉的大锁**：不同 query 的整个检索过程不再统一串行。当前磁盘历史 adapter 的单次 SQL 仍受共享连接短锁保护，不能声称所有 SQL 都是 worker 私有连接。
 - **仍有的短锁**：资源生命周期登记、缓存结构访问；同一 query key 或特征请求 key 的重复计算用去重锁，避免两个 worker 同时生产相同缓存。
 - **材料校验锁**：避免同时重建同一份学习材料证明。它与查询锁不同，已有计时单列等待。
 - **无须混为一谈**：只读数据库访问不要求应用把整个检索锁住，但共享缓存写入、资源关闭和内容寻址结果发布仍有并发一致性问题。
 
-“取消正文 LRU”不等于“所有缓存都删除了”：当前最近单条记录复用与完整召回结果缓存是两件事。后者在本次快照有实际命中，下面单独列出；这些参数是核查结果，不是此次新改动。
+正文/特征有界缓存与完整召回结果缓存是两件事。本文只描述当前实际代码，不把此前其他读取层的改造误写成 `disk_history` 已删除 LRU。本次改动是持久化 terms/资格索引和材料凭据，并未顺带重构这些缓存。
 
 ### 7. 历史池校验与来源校验究竟在做什么
 
 | 检查 | 检查内容 | 当前重复问题 |
 |---|---|---|
 | Data 建版质量审计 | 导入、切分、来源、用途隔离，生成质量报告，合格后 finalize | 该阶段做必要全量审计是合理的；核查 Data 已有 passed 证据 |
-| 历史池批准 `history_pool_approval` | `PinnedRetriever` 初始化调用 `original.is_approved()`，审计池中示例是否能与源消息/边界对应 | 已有建版证明仍不阻止初始化再次全池审计；进程内共享不能覆盖重启/轮换 |
+| 历史池批准 `history_pool_approval` | 磁盘适配器复用 Data 的 approved 报告、池摘要与绑定来源 | 冷开仍核对来源摘要并开/建索引；未知或无历史证明的池回退原逻辑 |
 | 历史来源 `history_source_validation` | 核对上下文/回复消息的 ID、字段、位置与原记录一致 | 大量逐示例检查会触发来源位置查询、消息读取和解码 |
-| 学习材料 `material_validation_full` | `learning_guard.require_materials` 检查静态来源、学习资产集合/摘要、冻结引用 | 首次、不同绑定或不同材料集合仍会全量检查 |
-| ranker 来源重建 | 按冻结材料复原 ranker 的学习/特征来源，核对模型证明 | 它不是每题预测；入口复核也可能重新遍历大量来源材料 |
+| 学习材料 `material_validation_full` | 新材料闭包做完整核验，保存结果供未变绑定复用 | 首次、依赖变化、未知配方仍会全量检查；持久命中不再全量重建 |
+| ranker 来源重建 | 新材料按冻结证据重建来源；持久命中恢复原已验证结果 | 它不是每题预测；仍核对依赖状态与实际读取过的训练缓存项 |
 | 材料封印捕获/检查 | `MaterialSeal` 记录文件及 evidence stamps，运行时确认未改变 | 当前 `check` 仍会对资产目录 `rglob + stat`，不是常数时间开关 |
 | 逐题隔离 | 时间边界、留出用途、目标答案与示例来源隔离 | 每题条件不同，需保留语义，但无需因此重复静态全池审计 |
 
-工作区的 `material_reuse.py` 已做**进程内**同 Data、目录集合、角色的证明复用；不代表未改变的数据版本已能跨进程启动直接复用所有静态审计。
+`material_reuse.py` 同时提供**进程内复用和磁盘 receipt**：按 Data、目录集合、角色定位凭据，依赖封印、ranker evidence stamps、训练环境和实际读取过的训练缓存项均未改变时，恢复已验证结论，不再重建整份证明。未知依赖闭包或凭据不匹配仍回退全量核验，详见第 13.5 节。
 
-已明确的优化方向是：**新数据版本建立时做必要全量校验，Gen/Judge 对已校验、未改变的版本复用证明；运行期只做必要的变更检查与逐题隔离**。这次技术说明核查时，该跨启动复用方向还没有完整落实，不能写成已消除这些耗时。校验实现代码摘要用于溯源，本身不应成为重跑成功题目的理由；模型、样本、评分条件或来源变化仍按冻结规则处理。
+运行边界是：**新数据版本建立时做必要全量校验，Gen/Judge 对已校验、未改变的版本复用证明；运行期只做必要的变更检查与逐题隔离**。磁盘凭据已在实际任务中命中，但首次索引构建及目录变更检查仍有成本，不能写成所有准备耗时已消除。校验实现代码摘要用于溯源，本身不应成为重跑成功题目的理由；模型、样本、评分条件或来源变化仍按冻结规则处理。
 
 ### 8. Profile：每个耗时项到底是什么
 
@@ -357,7 +357,7 @@ SELECT features FROM examples WHERE id=? ORDER BY position DESC LIMIT 1;
 
 本次完整召回入口 44 次，命中 31 次、实际计算 13 次；整次召回锁等待累计 0.000061 秒。实际任务已有新增成功，观察到的成功速度约为此前的 3.25 倍；**不同续跑题、缓存冷热状态和模型响应时间不同，这不是严格同题 A/B，也不证明代码本身有固定 3.25 倍加速**。本次两类模型调用次数更多，回复调用平均 73.18 秒，不能把两片的模型累计秒直接解释为服务端变慢比例。
 
-此结果说明基础召回等待明显减少，但剩余瓶颈并未消除：每次新进程仍有全池批准，运行期仍反复扫描材料封印，模型响应也需等待。跨启动静态核验复用尚未完整落实，不将它宣称为已经完成。表中累计值仍是嵌套、可跨线程重叠的调用时间，不能相加当墙钟占比。
+此结果说明当时基础召回等待明显减少，但剩余瓶颈并未消除：该历史版本冷启动仍有全池批准，运行期仍反复扫描材料封印，模型响应也需等待。后续磁盘凭据与 terms 索引的实现和证据边界见第 13 节，不能用本表证明后续改造的收益。表中累计值仍是嵌套、可跨线程重叠的调用时间，不能相加当墙钟占比。
 
 300 秒是首次进入生成/评判后停止提交新题的工作预算，不是进程寿命。本次题执行阶段墙钟为 1563.39 秒，另有入口准备；到期后必须等待已提交题完成并持久化，不能强杀在途请求。因此以 7 / 300 秒计算吞吐会严重高估。固定验收仍未完成，这 7 题是新增已保存结果，不是候选已通过验收。
 
@@ -383,8 +383,8 @@ SELECT features FROM examples WHERE id=? ORDER BY position DESC LIMIT 1;
 
 | 状态 | 内容 | 当前边界 |
 |---|---|---|
-| 已随配套功能提交入库 | 正文/特征磁盘化、worker 独立 SQL 连接、最近单条记录复用、完整召回结果缓存、进程内材料证明复用、分阶段 profile | 有实际运行计时；源码发布不证明整体收益已验收 |
-| 已明确、尚未完整落实 | 全量静态校验前移到 Data 建版；未变绑定跨启动复用，不在 Gen/Judge 再次全扫 | 保留逐题隔离与必要变更检测，不能把“少检查”误写为“取消数据边界” |
+| 已随配套功能提交入库 | 正文/特征磁盘化、独立来源读取连接、最近单条记录复用、完整召回结果缓存、进程内材料证明复用、分阶段 profile | 历史示例 SQL 连接仍共享；源码发布不证明整体收益已验收 |
+| 当前配套改造 | terms/资格磁盘索引、Data 已批准结论复用、未变材料磁盘 receipt、固定入口离线等价测速 | 有持久凭据命中；冷索引构建和实际成功吞吐仍须分别验收，详见第 13 节 |
 | 可针对根因评估、尚未实现 | 合并/批量读取减少逐条 SQL 与 JSON 解码，复用同题两路的合法候选集合，减少重复目录遍历与模型加载 | 需保持原候选、分数、稳定排序与冻结条件等价，不能悄悄截小候选池或改评分 |
 | 尚缺证据 | 按阶段的资源归因与整体成功吞吐对照 | 不能把局部耗时下降、缓存命中或任务启动状态当成实验交付 |
 
@@ -412,7 +412,7 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 
 ### 12. 逐步代码对照：输入、执行频率、输出与成本
 
-以下均为 `f9866fd` 的**真实源码摘录**，不是伪代码；每段只摘对应步骤，完整分支见文件链接。源码行号会随后续提交变化，因此同时给出函数名。它们解释当前机制，不声称全部历史实验执行的都是当前 HEAD：transport 可以加载冻结的归档实现，实际运行还须看该任务的 runtime、配置和 profile。第 8 节的历史计时不是本次文档更新的新测量。
+以下均为优化前提交 `f9866fd` 的**真实源码摘录**，不是伪代码；每段只摘对应步骤，完整分支见文件链接。源码行号会随后续提交变化，因此同时给出函数名。它们用于解释原瓶颈，不代表第 13 节改造后的当前实现：transport 可以加载冻结的归档实现，实际运行还须看该任务的 runtime、配置和 profile。第 8 节的历史计时不是本次文档更新的新测量。
 
 #### 12.1 Data 建版：全量质量审计属于这里
 
@@ -785,7 +785,137 @@ worker 数影响并行题数，不消除单题内顺序步骤。完成后按最�
 | 运行中文件/证据变化 | 防止读取期间绑定材料被替换 | 沿用入口证明，做必要变化检测 | seal 的目录遍历仍反复发生 |
 | 模型输出/单项缓存完整性 | 输出可能无效，缓存可能损坏或条件不同 | 新结果或读取单项缓存时 | 不应与全量静态审计混称 |
 
-**不应保留的重复工作是：条件未变却在 Gen/Judge 入口反复全量批准同一 Data、重建同一材料证明。不能删除的是数据边界本身和逐题条件。** 本次仅补齐实现说明与源码对照，没有把这些未完成改造或新测速写成已完成，也没有恢复实验或 Wiki。
+**不应保留的重复工作是：条件未变却在 Gen/Judge 入口反复全量批准同一 Data、重建同一材料证明。不能删除的是数据边界本身和逐题条件。** 上述第 12 节保留优化前的代码说明；当前实现、仍存在的成本与验收方法见第 13 节。既有实验与 Wiki 沿原入口续跑，不因文档或性能改造更换题集、对照或正式版本。
+
+### 13. 当前实现：持久 terms、批准复用与离线等价测速
+
+本节对应当前配套改造；第 12 节保留的是优化前源码。执行链为：**入口绑定冻结任务 → 复用材料凭据 → 开/建历史索引 → 每题 SQL 资格过滤与 postings 求交 → 原候选评分和排序 → 原精排与渲染 → 原生成/评判及逐题持久化**。性能 adapter 不更换实验的样本、模型、Judge 或评分规则。
+
+#### 13.1 索引冷建、发布和后续复用
+
+入口：[`disk_history.py`](src/generator/disk_history.py) 的 `load_examples` / `database`。索引 identity 绑定 adapter 字节、冻结来源摘要、retriever 布尔 flags 和被适配实现摘要。完整 SQLite 与校验凭据才是可复用产物；`.building` 不是已发布索引，不能被其他任务读作完成结果。
+
+`database` 的发布段落：
+
+```python
+                build(connection)
+                connection.commit()
+                connection.close()
+                receipt = dict(identity=identity, sha256=checksum(pending))
+                pending_manifest = pending.with_suffix('.json')
+                pending_manifest.write_text(encoded(receipt))
+                os.replace(pending, target)
+                os.replace(pending_manifest, manifest)
+```
+
+跨进程构建锁防止同 identity 同时建两份。后续启动读取原索引，不重做词表，但仍检查索引文件摘要并执行 `PRAGMA quick_check`；打开大索引也不是零成本。在途构建时修改 adapter 字节会改变 identity，所以不能把正在构建的结果当成与新代码可复用。
+
+首次构建目前仍昂贵：`load_examples` 每 256 行复制一个临时 retriever，调用冻结 `_load` 核验并取得原特征，再物化到 SQLite。因此**terms 已实现一次计算、后续复用，不等于首次准备已消除**。冷建涉及来源读、JSON 解码、原特征计算、SQL 写入和索引创建，不能把整个冷建时间叫作一次 query 检索时间。
+
+#### 13.2 每题资格集合如何变成 SQL
+
+入口：`BoundedReader.excluded_ids`。`examples` 保存账号、截止时间、顺序是否可核验及原位置，`example_messages(message_id, position)` 保存来源消息关系。每题先用原 `history.validate_case` 取得 cutoff，再查询：
+
+- 截止时间之前的示例；同一秒仅在原顺序证明允许时放行。
+- 排除本题要求留出的聊天。
+- 排除与目标真人回复 message ID 冲突的示例。
+- 重复 ID 中只要存在合法行，仍按原集合语义允许该 ID。
+
+这替换的是原 `filter_rows` 的全池 Python 结构读取与来源判断，**没有删除逐题隔离**。最终排除 ID 查询仍包含 `SELECT DISTINCT id ... NOT IN (allowed)`，可能扫描 ID 集；不能声称所有全池访问或候选遍历都已经消失。
+
+#### 13.3 terms 在什么时候计算，如何召回
+
+建表和物化片段来自 `load_examples`：
+
+```python
+        connection.execute('CREATE TABLE terms(term TEXT, id TEXT, count INTEGER, '
+                           'PRIMARY KEY(term,id)) WITHOUT ROWID')
+        connection.execute('CREATE INDEX term_ids ON terms(id)')
+```
+
+```python
+                connection.execute('DELETE FROM terms WHERE id=?', (identity,))
+                connection.executemany('INSERT INTO terms VALUES(?,?,?)',
+                    ((term, identity, count) for term, count in values['_terms_by_id'].items()))
+```
+
+示例 terms 只在索引构建时由冻结特征实现计算。重复 ID 保持原字典的最后行覆盖语义；query terms 仍按本题计算。每路召回调用 `BoundedReader.term_overlaps` 批量读取匹配的 postings，原公式不变：
+
+```python
+    def term_overlaps(self, terms):
+        """Read only matching postings, with the frozen Counter overlap formula."""
+        overlaps = Counter()
+        items = list(terms.items())
+        for start in range(0, len(items), CAPACITY):
+            part = dict(items[start:start + CAPACITY])
+            placeholders = ','.join('?' for _ in part)
+            for term, identity, count in self.query(
+                    f'SELECT term,id,count FROM terms WHERE term IN ({placeholders})', tuple(part)):
+                overlaps[identity] += min(part[term], count)
+        return overlaps
+```
+
+上下文拼接长度同样在建索引时保存，用于原 `1 / (1 + abs(query_length - sample_length) / 20)` 公式。当前 `context_length` 第一次调用仍将所有 ID→长度载入一个内存字典，不是所有特征都完全无常驻副本。
+
+#### 13.4 哪些评分代码没有改
+
+入口：[`indexed_retrieval.py`](src/generator/indexed_retrieval.py) 的 `indexed_retrieve`。adapter 解析冻结函数 AST，只精确替换资格集合、terms 相交与长度读取；**候选桶循环、特征项、分数公式、稳定排序、精排和最终渲染均保留**。这不是 SQL Top-K，也未为提速截小候选池。
+
+适配成功必须恰好识别一处资格块、一处词法块和一处候选循环，而且原函数不能带闭包；否则保持原函数：
+
+```python
+    transform = Indexed()
+    tree = transform.visit(tree)
+    if (transform.exclusions, transform.lexical, transform.loops) != (1, 1, 1) or original.__closure__:
+        return original
+```
+
+这是兼容冻结历史实现的 adapter，不是另一个召回算法。真正的精排仍由 `learned_selection` 与冻结 ranker 执行，相关规则见第 4、5 节。
+
+#### 13.5 材料与 ranker 的跨启动复用
+
+入口：[`material_reuse.py`](src/iteration/material_reuse.py) 的 `verified_materials` / `read_receipt`。凭据包含原审计结果、依赖封印、ranker stamps、训练依赖版本，以及全量核验实际读取过的训练缓存项。只有全部匹配才恢复原证明，不能仅凭实验 ID 或“文件存在”跳过。
+
+```python
+                    with timing('material_validation_receipt_read'):
+                        verified = read_receipt(module, path, receipt_key, seal, rankers,
+                                                environment, check_cache)
+                    if verified is None:
+                        with capture_cache() as cache_rows:
+                            audit = full(data_ref, directories, role)
+```
+
+已匹配的路径：
+
+```python
+                    else:
+                        audit = copy.deepcopy(verified[2])
+                        if profile is not None:
+                            profile.record('material_validation_persistent_reused', 0.0)
+```
+
+未知依赖配方、资产/证据改变、缓存项不一致或训练环境改变，回退原全量核验。`MaterialSeal.check` 的递归目录检查仍有成本；ranker 的生产推理与其训练来源证明是两件事，receipt 复用后者，不改变前者。
+
+当前真实运行 profile 已记录 `material_validation_persistent_reused` 命中；同时仍有首次 `material_validation_full`。前者说明未变结论可以复用，不说明所有方向的冷启动成本已消失，更不等于候选通过正式验收。
+
+#### 13.6 如何测耗时且不重跑成功模型请求
+
+固定入口：[`scripts/check.py`](scripts/check.py) 的 `retrieval` 子命令，复用模块为 [`retrieval_profile.py`](src/iteration/retrieval_profile.py)。从原实验读取冻结 runtime 和既有题集的前 N 题，不新抽题、不生成回复、不评判、不写实验 cases，不动生产指针。
+
+```bash
+.venv/bin/python scripts/check.py --output runs/retrieval-profile.json retrieval \
+  --instance example-agent --exp existing-experiment --cases 3 --repeats 1
+```
+
+`compare` 交替原函数 / 索引函数的先后顺序，分别累计 `recall_seconds` 与 `render_seconds`；比较召回结果的全部字段、顺序和渲染字节，不一致就失败。报告还单列 `preparation_seconds`，包含索引打开或冷建，不能把它藏在 query 耗时之外。
+
+边界：`scope=recall_and_render_only`，每题测两路基础召回；**不覆盖完整语义特征链或所有正式题目，不替代实验验收**。可用 `--materials` 附加材料跨上下文复用耗时；结果应分开报告冷准备、原/索引召回、材料命中与真实任务新增速度，不能将嵌套累计时间相加当墙钟时间。
+
+#### 13.7 续跑与尚未解决的成本
+
+原实验 transport 使用既有题集、冻结绑定和成功缓存，只提交尚未完成项。时间片停止提交后会等在途题持久化；首次惰性准备可能长于时间片，不能强杀后宣称已完成。Wiki 同样沿原批次进度和自动修订入口续接，身份与语义待核实项保留缺口。
+
+当前剩余成本是：首次索引仍经冻结 `_load` 构建；SQLite 完整摘要与完整性检查；资格排除 ID 集扫描；原候选评分循环及细粒度解码；共享短 SQL 锁；材料封印目录检查；模型响应及失败后的缺项补跑。下一次速度结论必须依据已发布索引后的等价测速与实际新增成功，而不是仅依据低 RSS、持久命中或任务已启动。
 
 ## 文档索引
 

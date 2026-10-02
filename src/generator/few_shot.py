@@ -455,6 +455,11 @@ class PersonaFewShotRetriever:
         self._group_participant_profiles_by_id: dict[str, tuple[bool, bool, bool, bool, bool]] = {}
         self._terms_by_id: dict[str, Counter[str]] = {}
         self._render_mtime_ns = -1
+        # 逐题打分循环的处境/画像结果只依赖示例文本与实例 flags，按行缓存避免
+        # 每次 retrieve 对全池重复跑正则（池约 10 万行时占单次 retrieve 的大头）。
+        self._row_situation_tag_cache: dict[str, set[str]] = {}
+        self._row_situation_profile_cache: dict[tuple[str, bool], dict[str, str]] = {}
+        self._row_cache_mtime_ns = -1
         self._render_rows_by_id: dict[str, dict[str, Any]] = {}
 
     def _load_render_rows(self) -> dict[str, dict[str, Any]]:
@@ -761,13 +766,25 @@ class PersonaFewShotRetriever:
                         enable_clarification=self.enable_clarification,
                     )
             else:
-                row_situations = _row_situation_tags(row, self.enable_clarification)
-                row_profile = _row_situation_profile(
-                    row,
-                    self.enable_clarification,
+                row_id = str(row["id"])
+                if self._row_cache_mtime_ns != self._mtime_ns:
+                    self._row_situation_tag_cache.clear()
+                    self._row_situation_profile_cache.clear()
+                    self._row_cache_mtime_ns = self._mtime_ns
+                row_situations = self._row_situation_tag_cache.get(row_id)
+                if row_situations is None:
+                    row_situations = _row_situation_tags(row, self.enable_clarification)
+                    self._row_situation_tag_cache[row_id] = row_situations
+                gap_move = (
                     self.enable_information_gap_response_move
-                    and query_profile.get("expected_response_move") == "verify_or_request_detail",
+                    and query_profile.get("expected_response_move") == "verify_or_request_detail"
                 )
+                profile_key = (row_id, gap_move)
+                row_profile = self._row_situation_profile_cache.get(profile_key)
+                if row_profile is None:
+                    row_profile = _row_situation_profile(
+                        row, self.enable_clarification, gap_move)
+                    self._row_situation_profile_cache[profile_key] = row_profile
             situation_overlap = query_situations & row_situations
             profile_compatibility = _profile_compatibility(query_profile, row_profile)
             query_response_move = query_profile.get("expected_response_move")

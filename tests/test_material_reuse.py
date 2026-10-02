@@ -7,10 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.cache import Store
+from src import config
 from src.config import ConfigError
 from src.generator import disk_history, few_shot, history_sources, learned_sources
 from src.generator.history_sources import stamp
 from src.iteration import control, learning_guard, material_reuse, versions
+from src.iteration.training_evidence import SavedCache
 from src.iteration.transport_profile import TransportProfile
 from test_leakage_guards import env as env
 
@@ -93,6 +96,357 @@ def test_material_reuse_without_history_preserves_pool_validation(materials):
         assert materials.module.require_materials('current', [materials.directory]) == first
     assert len(materials.calls) == 1
     assert materials.module.require_materials is original_materials
+
+
+def test_persistent_receipt_reuses_audit_across_contexts(materials):
+    with material_reuse.verified_materials(materials.module):
+        first = materials.module.require_materials('current', [materials.directory])
+    expected = copy.deepcopy(first)
+    first['assets'].clear()
+    with material_reuse.verified_materials(materials.module):
+        second = materials.module.require_materials('current', [materials.directory])
+        assert second == expected
+        second['assets'].clear()
+        assert materials.module.require_materials('current', [materials.directory]) == expected
+    assert len(materials.calls) == 1
+
+
+def test_persistent_receipt_restores_ranker_dependency_evidence(materials, tmp_path, monkeypatch):
+    hidden = ranker(materials, tmp_path, monkeypatch)
+    with material_reuse.verified_materials(materials.module):
+        expected = materials.module.require_materials('current', [materials.directory])
+    learned_sources._verified.clear()
+    with material_reuse.verified_materials(materials.module):
+        assert materials.module.require_materials('current', [materials.directory]) == expected
+        assert next(iter(learned_sources._verified.values())) == ({hidden: stamp(hidden)}, {'verified': True})
+    assert len(materials.calls) == 1
+    assert material_reuse.dependencies(materials.module, 'current', [materials.directory])[0] == [
+        materials.data / 'current', materials.data / 'original']
+
+
+@pytest.fixture
+def runtime_ranker(materials, tmp_path, monkeypatch):
+    from src.config import sha256_file
+
+    name = 'src/scorer.py'
+    roots = [tmp_path / 'executor-one', tmp_path / 'executor-two']
+    for root in roots:
+        code = root / name
+        code.parent.mkdir(parents=True)
+        code.write_text('frozen scorer')
+    data = tmp_path / 'data-evidence.json'
+    data.write_text('{}')
+    model = tmp_path / 'training' / 'model'
+    model.mkdir(parents=True)
+    manifest = model.parent / 'manifest.json'
+    manifest.write_text(json.dumps({'runtime': {name: sha256_file(roots[0] / name)}}))
+    proof = dict(model_directory=str(model), data_ref='original',
+                 serving_runtime={name: sha256_file(roots[0] / name)},
+                 evidence_files={str(roots[0] / name): sha256_file(roots[0] / name),
+                                 str(data): sha256_file(data)})
+    directory = materials.directory / 'ranker'
+    directory.mkdir()
+    (directory / 'provenance.json').write_text(json.dumps(proof))
+    (materials.directory / 'learning.json').write_text(json.dumps({
+        'asset_files': {'ranker/provenance.json': 'fixed'}, 'evidence_files': {}}))
+    key = (str(model), 'original', learned_sources.digest(proof['evidence_files']))
+    result = copy.deepcopy(proof)
+    monkeypatch.setattr(learned_sources, '_verified', {})
+    monkeypatch.setattr(learned_sources, 'ROOT', roots[0])
+    monkeypatch.setattr(learned_sources, 'SERVING_RUNTIME', (name,))
+    full = materials.module.require_materials
+
+    def validate(*args, **kwargs):
+        audit = full(*args, **kwargs)
+        learned_sources._verified[key] = (
+            {path: stamp(path) for path in (roots[0] / name, data, manifest)}, result)
+        return audit
+
+    materials.module.require_materials = validate
+    with material_reuse.verified_materials(materials.module):
+        audit = materials.module.require_materials('current', [materials.directory])
+    learned_sources._verified.clear()
+    monkeypatch.setattr(learned_sources, 'ROOT', roots[1])
+    return SimpleNamespace(roots=roots, name=name, data=data, key=key, proof=proof, audit=audit)
+
+
+def test_persistent_ranker_receipt_relocates_only_executable_evidence(materials, runtime_ranker):
+    with material_reuse.verified_materials(materials.module):
+        assert materials.module.require_materials('current', [materials.directory]) == runtime_ranker.audit
+        stamps, result = learned_sources._verified[runtime_ranker.key]
+        assert str(runtime_ranker.roots[0] / runtime_ranker.name) not in result['evidence_files']
+        assert result['evidence_files'] == {
+            str(runtime_ranker.roots[1] / runtime_ranker.name):
+                runtime_ranker.proof['evidence_files'][str(runtime_ranker.roots[0] / runtime_ranker.name)],
+            str(runtime_ranker.data): runtime_ranker.proof['evidence_files'][str(runtime_ranker.data)]}
+        assert runtime_ranker.data in stamps
+        assert runtime_ranker.roots[1] / runtime_ranker.name in stamps
+        assert learned_sources.source_evidence_view(result, runtime_ranker.proof,
+                                                   [runtime_ranker.name]) == runtime_ranker.proof
+    assert len(materials.calls) == 1
+
+
+@pytest.mark.parametrize('changed', ['current_code', 'original_code', 'data'])
+def test_persistent_ranker_relocation_rejects_changed_dependencies(materials, runtime_ranker, changed):
+    paths = dict(current_code=runtime_ranker.roots[1] / runtime_ranker.name,
+                 original_code=runtime_ranker.roots[0] / runtime_ranker.name, data=runtime_ranker.data)
+    paths[changed].write_text('changed')
+    with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError):
+        materials.module.require_materials('current', [materials.directory])
+    assert len(materials.calls) == 1
+    assert runtime_ranker.key not in learned_sources._verified
+
+
+@pytest.mark.parametrize('change', ['inventory', 'data', 'material'])
+def test_changed_persistent_inventory_requires_validation(materials, change):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [materials.directory])
+    if change == 'inventory':
+        (materials.directory / 'added.json').write_text('{}')
+    elif change == 'data':
+        (materials.data / 'current' / 'manifest.json').write_text('{"changed": true}')
+    else:
+        (materials.directory / 'prompt.md').write_text('changed')
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [materials.directory])
+    assert len(materials.calls) == 2
+
+
+def test_hidden_ranker_change_rejects_persistent_receipt(materials, tmp_path, monkeypatch):
+    hidden = ranker(materials, tmp_path, monkeypatch)
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [materials.directory])
+    hidden.write_text('{"changed": true}')
+    with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError, match='依赖变化'):
+        materials.module.require_materials('current', [materials.directory])
+    assert len(materials.calls) == 1
+
+
+@pytest.mark.parametrize('invalid', ['corrupt', 'symlink'])
+def test_invalid_persistent_receipt_fails_closed(materials, invalid):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [materials.directory])
+    path, _ = material_reuse.receipt_path('current', [materials.directory.absolute()], 'development')
+    if invalid == 'corrupt':
+        path.write_text('{}')
+    else:
+        target = path.with_suffix('.saved')
+        path.rename(target)
+        path.symlink_to(target)
+    with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError, match='材料核验缓存'):
+        materials.module.require_materials('current', [materials.directory])
+
+
+def test_failed_full_validation_does_not_publish_receipt(materials, monkeypatch):
+    def fail(*args, **kwargs):
+        raise ConfigError('invalid provenance')
+    monkeypatch.setattr(materials.module, 'require_materials', fail)
+    with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError, match='invalid provenance'):
+        materials.module.require_materials('current', [materials.directory])
+    path, _ = material_reuse.receipt_path('current', [materials.directory.absolute()], 'development')
+    assert not path.exists()
+
+
+@pytest.fixture
+def learned_judge(materials, tmp_path, monkeypatch):
+    monkeypatch.setattr(versions, 'PRIVATE', tmp_path)
+    study = tmp_path / 'judge_training' / 'study'
+    sweep = tmp_path / 'judge_training' / 'sweep'
+    (study / 'arm').mkdir(parents=True)
+    sweep.mkdir(parents=True)
+    original = tmp_path / 'original_judge'
+    original.mkdir()
+    (original / 'learning.json').write_text('{}')
+    (original / 'weights.json').write_text('{}')
+    judge = tmp_path / 'learned_judge'
+    judge.mkdir()
+    (judge / 'learning.json').write_text(json.dumps({'asset_files': {'weights.json': 'learned'}}))
+    (judge / 'weights.json').write_text('{}')
+    (judge / 'config.json').write_text(json.dumps({'decision_policy': 'gbdt_only'}))
+    (judge / 'source_judge.json').write_text(json.dumps({
+        'origin': 'd0011_material_repair', 'study': 'study', 'arm': 'arm'}))
+    (judge / 'scorer_source.json').write_text(json.dumps({'study': 'sweep'}))
+    (study / 'arm' / 'candidate.json').write_text(json.dumps({'judge_ref': 'original'}))
+    input_path = tmp_path / 'frozen_input.txt'
+    input_path.write_text('source code evidence')
+    inputs = {str(input_path): config.sha256_file(input_path)}
+    (study / 'spec.json').write_text(json.dumps({
+        'kind': 'judge_material_repair', 'data_ref': 'original',
+        'generator_ref': 'mechanical', 'inputs': inputs}))
+    (sweep / 'spec.json').write_text(json.dumps({'inputs': inputs, 'packages': {'numpy': '1'}}))
+    settings = tmp_path / 'settings.yaml'
+    settings.write_text('frozen settings')
+    monkeypatch.setattr(config, 'settings_path', lambda: settings)
+    monkeypatch.setattr(versions, 'generator_dir', lambda ref: materials.directory)
+    monkeypatch.setattr(versions, 'judge_dir', lambda ref: {'dir': original})
+    packages = {name: '1' for name in ('numpy', 'scipy', 'scikit-learn')}
+    monkeypatch.setattr(material_reuse.importlib.metadata, 'version', lambda name: packages[name])
+    store = Store(tmp_path / '.cache')
+    store.remember('training', 'features', {'source': 'original'}, {}, lambda: {'score': 1})
+    full = materials.module.require_materials
+
+    def validate(*args, **kwargs):
+        cache = SavedCache(store.path)
+        try:
+            assert cache.get('training')['value'] == {'score': 1}
+            cache.get('missing')
+        finally:
+            cache.db.close()
+        return full(*args, **kwargs)
+
+    materials.module.require_materials = validate
+    return SimpleNamespace(directory=judge, study=study, sweep=sweep, original=original,
+                           input=input_path, settings=settings, packages=packages, store=store)
+
+
+def test_supported_learned_judge_reuses_complete_dependencies(materials, learned_judge):
+    expected = material_reuse.dependencies(materials.module, 'current', [learned_judge.directory])
+    assert set(expected[0]) == {materials.data / 'current', materials.data / 'original',
+                               learned_judge.study, learned_judge.sweep, learned_judge.original,
+                               materials.directory}
+    assert expected[1] == []
+    assert expected[2] == sorted([learned_judge.input, learned_judge.settings], key=str)
+    assert expected[3] == ['numpy', 'scikit-learn', 'scipy']
+    with material_reuse.verified_materials(materials.module):
+        first = materials.module.require_materials('current', [learned_judge.directory])
+        assert materials.module.require_materials('current', [learned_judge.directory]) == first
+    with material_reuse.verified_materials(materials.module):
+        assert materials.module.require_materials('current', [learned_judge.directory]) == first
+    assert len(materials.calls) == 1
+
+
+@pytest.mark.parametrize('target', ['study', 'sweep', 'original', 'source_generator', 'source_data', 'settings'])
+def test_learned_judge_closure_change_cannot_reuse(materials, learned_judge, target):
+    paths = {'study': learned_judge.study / 'reference.json',
+             'sweep': learned_judge.sweep / 'matrix.json',
+             'original': learned_judge.original / 'weights.json',
+             'source_generator': materials.directory / 'prompt.md',
+             'source_data': materials.data / 'original' / 'manifest.json',
+             'settings': learned_judge.settings}
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+        paths[target].write_text('changed dependency')
+        with pytest.raises(ConfigError, match='变化'):
+            materials.module.require_materials('current', [learned_judge.directory])
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+    assert len(materials.calls) == 2
+
+
+def test_learned_judge_frozen_input_change_fails_closed(materials, learned_judge):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+    learned_judge.input.write_text('changed input')
+    with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError, match='frozen input'):
+        materials.module.require_materials('current', [learned_judge.directory])
+    assert len(materials.calls) == 1
+
+
+@pytest.mark.parametrize('change', ['replace', 'delete', 'missing_appears'])
+@pytest.mark.parametrize('persistent', [False, True])
+def test_training_cache_dependency_changes_fail_closed(materials, learned_judge, change, persistent):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+        if change == 'replace':
+            learned_judge.store.remember('training', 'features', {}, {}, lambda: {'score': 2},
+                                         valid=lambda value: value == {'score': 2})
+        elif change == 'delete':
+            with learned_judge.store.connect() as database:
+                database.execute('DELETE FROM entries WHERE key=?', ('training',))
+        else:
+            learned_judge.store.remember('missing', 'features', {}, {}, lambda: {'score': 2})
+        if not persistent:
+            with pytest.raises(ConfigError, match='训练请求缓存变化'):
+                materials.module.require_materials('current', [learned_judge.directory])
+    if persistent:
+        with material_reuse.verified_materials(materials.module), pytest.raises(ConfigError, match='训练请求缓存变化'):
+            materials.module.require_materials('current', [learned_judge.directory])
+    assert len(materials.calls) == 1
+
+
+def test_unrelated_experiment_cache_writes_do_not_invalidate_materials(materials, learned_judge):
+    with material_reuse.verified_materials(materials.module):
+        expected = materials.module.require_materials('current', [learned_judge.directory])
+        learned_judge.store.remember('unrelated', 'reply', {}, {}, lambda: 'new experiment result')
+        learned_judge.store.remember('training', 'features', {}, {}, lambda: pytest.fail('should hit'))
+        assert materials.module.require_materials('current', [learned_judge.directory]) == expected
+    with material_reuse.verified_materials(materials.module):
+        assert materials.module.require_materials('current', [learned_judge.directory]) == expected
+    assert len(materials.calls) == 1
+
+
+def test_changed_training_environment_cannot_reuse_materials(materials, learned_judge):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+        learned_judge.packages['numpy'] = '2'
+        with pytest.raises(ConfigError, match='依赖版本变化'):
+            materials.module.require_materials('current', [learned_judge.directory])
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+    assert len(materials.calls) == 2
+
+
+@pytest.mark.parametrize('recipe', ['unknown_origin', 'unknown_study', 'unknown_generator', 'unsupported_policy'])
+def test_unknown_learned_judge_stays_on_full_validation(materials, learned_judge, recipe):
+    if recipe == 'unknown_origin':
+        path = learned_judge.directory / 'source_judge.json'
+        value = json.loads(path.read_text())
+        value['origin'] = 'unknown'
+    elif recipe == 'unknown_study':
+        path = learned_judge.study / 'spec.json'
+        value = json.loads(path.read_text())
+        value['kind'] = 'unknown'
+    elif recipe == 'unsupported_policy':
+        path = learned_judge.directory / 'config.json'
+        value = {'decision_policy': 'embedding_only'}
+    else:
+        path = materials.directory / 'learning.json'
+        value = {'asset_files': {'prompt.md': 'unknown'}}
+    path.write_text(json.dumps(value))
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [learned_judge.directory])
+        materials.module.require_materials('current', [learned_judge.directory])
+    assert len(materials.calls) == 2
+
+
+def test_training_cache_capture_is_nested_and_thread_scoped(learned_judge, materials):
+    original = SavedCache.get
+    with material_reuse.cached_training_reads() as (capture, check):
+        with capture() as outer:
+            with capture() as inner:
+                cache = SavedCache(learned_judge.store.path)
+                try:
+                    cache.get('training')
+                finally:
+                    cache.db.close()
+            assert outer == inner
+        check(materials.module, outer)
+
+        def work(key):
+            with capture() as records:
+                cache = SavedCache(learned_judge.store.path)
+                try:
+                    cache.get(key)
+                finally:
+                    cache.db.close()
+            return records
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            records = list(pool.map(work, ['training', 'missing']))
+        assert [{key for path, key in record} for record in records] == [{'training'}, {'missing'}]
+        with material_reuse.cached_training_reads():
+            pass
+    assert SavedCache.get is original
+
+
+def test_cancelled_persistent_reuse_does_not_bypass_stop(materials, monkeypatch):
+    with material_reuse.verified_materials(materials.module):
+        materials.module.require_materials('current', [materials.directory])
+    def cancelled():
+        raise control.StopRequested('cancelled')
+    monkeypatch.setattr(control, 'check', cancelled)
+    with material_reuse.verified_materials(materials.module), pytest.raises(control.StopRequested):
+        materials.module.require_materials('current', [materials.directory])
 
 
 def test_same_key_parallel_workers_validate_once(materials):

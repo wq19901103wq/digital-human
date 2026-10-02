@@ -222,6 +222,19 @@ def check_dashboard(args, report):
     report.run('dashboard_render', lambda: inspect(versions.PRIVATE))
 
 
+def check_retrieval(args, report):
+    from src.iteration.retrieval_profile import inspect
+    if not report.run('frozen_retrieval_profile', lambda: inspect(args.instance, args.exp,
+            cases=args.cases, repeats=args.repeats, materials=args.materials)):
+        return
+    if args.materials:
+        result = report.value['checks'][-1]['detail']['materials']
+        if result['status'] == 'failed':
+            report.failure('material_reuse', RuntimeError(result['error']))
+        else:
+            report.run('material_reuse', lambda: result)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', help='可选 JSON 报告路径（不可覆盖既有文件）')
@@ -271,6 +284,12 @@ def main(argv=None):
     dashboard.add_argument('--share', nargs='+', default=[], help='需核验页面及 XML 下载的 Share 版本')
     dashboard.add_argument('--download', choices=['knowledge.json', 'wiki.xml'], default='knowledge.json',
                            help='Share 下载文件；XML 快照使用 wiki.xml')
+    retrieval = sub.add_parser('retrieval', help='离线对比冻结召回与索引召回；无模型请求、无实验写入')
+    retrieval.add_argument('--instance', required=True)
+    retrieval.add_argument('--exp', required=True)
+    retrieval.add_argument('--cases', type=int, default=3)
+    retrieval.add_argument('--repeats', type=int, default=1)
+    retrieval.add_argument('--materials', action='store_true', help='附加跨上下文材料校验凭据复用耗时')
     args = parser.parse_args(argv)
     if args.mode == 'experiment' and args.gate == 'fixed-entry' and not args.exp:
         parser.error('--gate fixed-entry 需要 --exp 正式开发实验 ID')
@@ -294,7 +313,8 @@ def main(argv=None):
             before = versions.POINTERS_PATH.read_bytes()
             with offline():
                 {'judge': check_judge, 'experiment': check_experiment, 'data': check_data,
-                 'materials': check_materials, 'dashboard': check_dashboard}[args.mode](args, report)
+                 'materials': check_materials, 'dashboard': check_dashboard,
+                 'retrieval': check_retrieval}[args.mode](args, report)
         except Exception as exc:
             report.failure('validation_setup', exc)
         finally:

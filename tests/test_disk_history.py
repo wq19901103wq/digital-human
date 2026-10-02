@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -12,6 +13,8 @@ from test_fewshot_selection import generator
 from src.bootstrap import history
 from src.config import ConfigError, sha256_file
 from src.generator import disk_history, few_shot, history_sources
+from src.generator import history as eligibility
+from src.generator import indexed_retrieval
 from src.iteration import pack_transport
 from src.iteration.storage import write_json
 
@@ -199,3 +202,84 @@ def test_live_adapter_resolves_outside_snapshot():
     live = pack_transport.live_disk_history()
     assert Path(live.__file__).resolve() == Path(disk_history.__file__).resolve()
     assert live.MODE == disk_history.MODE
+
+
+def test_indexed_adapter_matches_known_blocks_and_leaves_other_functions_alone():
+    original = few_shot.PersonaFewShotRetriever.retrieve
+    optimized = indexed_retrieval.indexed_retrieve(original)
+    assert optimized is not original
+    assert optimized.__globals__ is original.__globals__
+    assert indexed_retrieval.indexed_retrieve(few_shot.PersonaFewShotRetriever._load) is few_shot.PersonaFewShotRetriever._load
+
+
+def test_warm_approval_does_not_revalidate_any_pool_rows(tmp_path, monkeypatch):
+    source = historical(tmp_path / 'data')
+    with disk_history.disk_storage(few_shot):
+        retriever(source)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('unchanged certified pool must not be reconstructed')
+    monkeypatch.setattr(history_sources.HistorySources, 'validate', forbidden)
+    with disk_history.disk_storage(few_shot):
+        candidate = retriever(source)
+        assert candidate.is_approved()
+
+
+@pytest.mark.parametrize('ordered', [False, True])
+def test_indexed_boundaries_answers_heldouts_and_duplicate_ids(tmp_path, ordered):
+    source = historical(tmp_path / 'data')
+    connection = sqlite3.connect(':memory:')
+    connection.execute('CREATE TABLE examples(position INTEGER PRIMARY KEY,id TEXT,chat TEXT,'
+                       'end_timestamp REAL,end_index INTEGER,order_verified INTEGER)')
+    connection.execute('CREATE TABLE example_messages(message_id TEXT,position INTEGER,'
+                       'PRIMARY KEY(message_id,position))')
+    reader = disk_history.BoundedReader(source.directory / 'fewshot_pool.jsonl', connection)
+    try:
+        rows = copy.deepcopy(source.examples)
+        duplicate = copy.deepcopy(rows[0])
+        duplicate['source_span']['end_timestamp'] += 100000
+        rows.append(duplicate)
+        for position, row in enumerate(rows):
+            span = row['source_span']
+            connection.execute('INSERT OR REPLACE INTO examples '
+                               '(position,id,chat,end_timestamp,end_index,order_verified) VALUES(?,?,?,?,?,?)',
+                               (position, row['id'], span['chat_id'], span['end_timestamp'],
+                                span['end'], int(span.get('order_verified') is True)))
+            connection.executemany('INSERT OR IGNORE INTO example_messages VALUES(?,?)',
+                ((message, position) for message in row['context_message_ids'] + row['reply_message_ids']))
+        connection.commit()
+        case = copy.deepcopy(source.roles['development'][0])
+        for row in rows:
+            span = row['source_span']
+            case['input_cutoff'] = dict(timestamp=span['end_timestamp'], index=span['end'] - 1,
+                                        order_verified=ordered)
+            case['source_span']['chat_id'] = span['chat_id']
+            for excluded in ([], [span['chat_id']]):
+                case['history_excluded_chat_ids'] = excluded
+                for answers in (case['reply_message_ids'], row['context_message_ids'][:1]):
+                    request = {**case, 'reply_message_ids': answers}
+                    allowed = {str(item['id']) for item in eligibility.filter_rows(rows, request)}
+                    expected = {'explicit'} | {str(item['id']) for item in rows if str(item['id']) not in allowed}
+                    assert reader.excluded_ids(request, {'explicit'}) == expected
+    finally:
+        reader.close()
+
+
+def test_postings_keep_last_duplicate_counter_and_no_pool_scan(tmp_path, monkeypatch):
+    source = historical(tmp_path / 'data')
+    with disk_history.disk_storage(few_shot):
+        candidate = retriever(source)
+        terms = few_shot.Counter({'a': 2, '你好': 1, 'missing': 3})
+        expected = {str(row['id']): sum(min(count, candidate._terms_by_id[str(row['id'])].get(term, 0))
+                    for term, count in terms.items()) for row in candidate._rows}
+        assert {identity: candidate._disk_reader.term_overlaps(terms).get(identity, 0)
+                for identity in expected} == expected
+        def forbidden(*args, **kwargs):
+            raise AssertionError('retrieval must use postings, not scan the pool or decode counters')
+        monkeypatch.setattr(eligibility, 'filter_rows', forbidden)
+        original_getitem = disk_history.FeatureMap.__getitem__
+        def getitem(self, identity):
+            if self.name == '_terms_by_id':
+                forbidden()
+            return original_getitem(self, identity)
+        monkeypatch.setattr(disk_history.FeatureMap, '__getitem__', getitem)
+        candidate.retrieve(**next(queries(source)))

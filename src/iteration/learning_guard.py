@@ -289,8 +289,8 @@ class MaterialSeal:
 class RunSeal:
     """Watch the dependency set captured *before* validation and loading.
 
-    File stamps are an inexpensive in-process mutation check. Content hashes and
-    source reconstruction remain mandatory whenever a run is opened or resumed.
+    File stamps detect changes after complete provenance validation. Resumed
+    executors may reuse its receipt only for identical inventories and dependencies.
     """
     def __init__(self, directories=(), files=()):
         from ..generator.history_sources import stamp
