@@ -290,7 +290,9 @@ python scripts/iterate_branches.py --instance demo retry --kind training --job s
 
 资源策略参考 [额度模板](../examples/resource-policy.template.json)。失败请求仍消耗额度；缓存命中不新增传输调用，但仍检查取消和截止时间。成本单位是保守预留，不是服务商实付账单。取消的实际生效时间受在途外部调用影响；运行中的调度器可以停止自己持有且身份匹配的任务进程组。
 
-Wiki 原批次可用 `scripts/batch_wiki.py run --output instances/demo/background/wiki-batch --skip-incomplete --max-jobs 4 --object-workers 4` 先推进尚未执行或中断的对象，避免已知语义失败反复占满时间片。该选项适用于人物生成和补充批次，不适用于修订批次；保留失败项的错误、尝试次数和覆盖缺口，不将其计为完成，也不改变冻结输入、来源检查或完成产物校验。默认仍会重试未完成项，修复失败原因后可去掉该选项续跑。
+Wiki 原批次可用 `scripts/batch_wiki.py run --output instances/demo/background/wiki-batch --skip-incomplete --max-jobs 4 --object-workers 4` 先推进尚未执行或中断的对象，避免已知语义失败反复占满时间片。人物生成、补充批次和 `revise` 修订批次均支持该选项；保留失败项的错误、尝试次数和覆盖缺口，不将其计为完成，也不改变冻结输入、来源检查或完成产物校验。默认仍会重试未完成项，修复失败原因后可去掉该选项续跑。
+
+冻结实验按时间片续跑时，可在 `src/iteration/pack_transport.py --kind experiment --time-slice-seconds 900` 的原命令上加 `--unattempted-first`：只把未尝试题排在历史失败重试前面，保留原题号、全部待办及失败记录。未尝试题推进完后仍会重试失败题；成功题仍由原执行器跳过，最终失败率、补验和准入条件不变。该选项不能用于没有时间片的执行或其他任务类型，调度选择记录在 `transport_overrides` 中。
 
 ## 维护与发布
 

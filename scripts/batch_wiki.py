@@ -50,6 +50,7 @@ def main():
     revise.add_argument('--attempts', type=int, default=2)
     revise.add_argument('--max-jobs', type=int)
     revise.add_argument('--follow', action='store_true')
+    revise.add_argument('--skip-incomplete', action='store_true', help='保留失败缺口，先推进未执行和中断的对象')
     status = commands.add_parser('status')
     catalog = commands.add_parser('catalog', help='核对已完成产物并生成可浏览目录')
     catalog.add_argument('--batch', action='append', required=True, type=Path)
@@ -88,7 +89,8 @@ def main():
         from src.bootstrap import wiki_revision_batch
         value = wiki_revision_batch.run(output, workers=args.workers, attempts=args.attempts,
                                        object_workers=args.object_workers,
-                                       max_jobs=args.max_jobs, follow=args.follow)
+                                       max_jobs=args.max_jobs, follow=args.follow,
+                                       skip_incomplete=args.skip_incomplete)
         value = {k: v for k, v in value.items() if k != 'jobs'}
     elif args.command == 'status':
         value = wiki_batch.status(output)

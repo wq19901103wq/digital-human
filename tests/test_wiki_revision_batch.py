@@ -313,6 +313,49 @@ def prepared_people(tmp_path, count=3):
     return source, output
 
 
+@pytest.mark.parametrize('engine', ['legacy', 'roles_v1', 'roles_claims_v2'])
+def test_incomplete_scheduling_alias_requires_every_semantic_dependency(engine):
+    frozen = revision_batch.pipeline(engine) | {
+        'wiki_revision_batch.py': revision_batch.OBJECT_POOL_RUNNER_SHA256}
+    assert revision_batch.compatible_pipeline(frozen, engine)
+    for name in frozen:
+        assert not revision_batch.compatible_pipeline(frozen | {name: 'changed'}, engine)
+
+
+def test_skip_incomplete_advances_new_and_interrupted_jobs_without_retrying_failure(tmp_path, monkeypatch):
+    _, output = prepared_people(tmp_path)
+    original = revision_batch.wiki_revision.revise
+
+    def fail_first(*args):
+        if args[2]['subject']['account'] == 'person-0':
+            raise ValueError('unresolved evidence')
+        return original(*args)
+
+    monkeypatch.setattr(revision_batch.wiki_revision, 'revise', fail_first)
+    client = KeepClient()
+    failed = revision_batch.run(output, client=client, attempts=1, max_jobs=1)
+    failure = deepcopy(failed['jobs']['person-0'])
+    assert failure['stage'] == 'incomplete'
+    advanced = revision_batch.run(output, client=client, max_jobs=1, skip_incomplete=True)
+    assert advanced['counts'] == {'incomplete': 1, 'complete': 1}
+    assert advanced['jobs']['person-0'] == failure
+    advanced['jobs']['person-2'] = dict(stage='running', account='person-2', attempts=3)
+    write_json(output / 'progress.json', advanced)
+    resumed = revision_batch.run(output, client=client, skip_incomplete=True)
+    assert resumed['counts'] == {'incomplete': 1, 'complete': 2}
+    assert resumed['jobs']['person-2']['attempts'] == 4
+    assert resumed['jobs']['person-0'] == failure
+    assert resumed['stage'] == 'incomplete' and resumed['skip_incomplete']
+    calls = len(client.prompts)
+    revision_batch.run(output, client=client, skip_incomplete=True)
+    assert len(client.prompts) == calls
+    monkeypatch.setattr(revision_batch.wiki_revision, 'revise', original)
+    retried = revision_batch.run(output, client=client, attempts=1)
+    assert retried['stage'] == 'complete'
+    assert retried['jobs']['person-0']['attempts'] == failure['attempts'] + 1
+    assert not retried['skip_incomplete']
+
+
 def test_parallel_revision_overlaps_distinct_people_limits_admission_and_reuses(tmp_path, monkeypatch):
     _, output = prepared_people(tmp_path)
     original = revision_batch.wiki_revision.revise

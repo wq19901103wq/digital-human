@@ -18,6 +18,7 @@ LEGACY_RUNNER_SHA256 = 'd6db8d19f19e2f57091a39ca58302c28e0d42a6920bf7d73bfba51a4
 SOURCE_CHECK_RUNNER_SHA256 = '03b4d8731658131b7af3e1e33894494bc4c2af09c0c81f907529acc68ecc476a'
 CLAIMS_DISPATCH_RUNNER_SHA256 = '736fde993739e55c34eeec297381842a2a9f9c7788619983d89f4f88f47bcb95'
 SERIAL_RUNNER_SHA256 = '0f465169abc187cd0eeec4e351b9946dd73952e72bbdd1b9eb89d63b3ec3e68f'
+OBJECT_POOL_RUNNER_SHA256 = 'cc35955c83d2f07810e3bd97d6a2095a3d263474cb97f3c10830048f048cfce9'
 
 
 def engine_for(name):
@@ -43,6 +44,8 @@ def pipeline(engine='legacy'):
 def compatible_pipeline(frozen, engine):
     current = pipeline(engine)
     if frozen == current:
+        return True
+    if frozen == (current | {Path(__file__).name: OBJECT_POOL_RUNNER_SHA256}):
         return True
     # Object scheduling changes concurrency only. Require exact identity of
     # every semantic engine, prompt, model input and export dependency.
@@ -110,7 +113,8 @@ def _job_input(manifest, job, binding, *, required=False):
     return path, frozen
 
 
-def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, follow=False, client=None):
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, follow=False,
+        skip_incomplete=False, client=None):
     """Review every newly completed source job, resume exact successful requests."""
     if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
         raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
@@ -148,7 +152,7 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, follo
             fail(exc)
             raise
         state.update(stage='running', pid=os.getpid(), active_job=None, active_jobs=[],
-                     object_workers=object_workers, workers=workers)
+                     object_workers=object_workers, workers=workers, skip_incomplete=skip_incomplete)
         state.pop('error', None)
         save()
         started, visited, cache = 0, set(), {}
@@ -165,6 +169,8 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, follo
                     wiki_delivery._checked(source, source_jobs[job['id']], saved, cache)
                     wiki_delivery._checked(output, job, prior, cache)
                     visited.add(job['id'])
+                    continue
+                if skip_incomplete and prior.get('stage') == 'incomplete':
                     continue
                 if saved.get('stage') != 'complete':
                     continue

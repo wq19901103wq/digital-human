@@ -83,6 +83,39 @@ def test_time_slice_profile_counts_only_persisted_results(monkeypatch):
     assert profile.slices[0]['elapsed_seconds'] >= 0
 
 
+def test_time_slice_unattempted_first_retains_every_pending_case_and_original_index(monkeypatch):
+    from src.iteration import runner
+    monkeypatch.setattr(runner, '_final_records', lambda path: ({'retry': {'status': 'failed'}}, 1))
+    pending = [(3, {'case_id': 'retry'}), (7, {'case_id': 'fresh-a'}), (9, {'case_id': 'fresh-b'})]
+    with pack_transport.case_time_slice(60, unattempted_results=Path('cases.jsonl')):
+        saved = list(runner.completed_map(lambda item: item, pending, 1))
+    assert saved == [pending[1], pending[2], pending[0]]
+
+
+def test_time_slice_unattempted_first_defers_but_does_not_delete_failed_records(monkeypatch):
+    from src.iteration import control, runner
+    clock = [0.0]
+    final = {'retry': {'status': 'failed', 'reason': 'evidence mismatch'}}
+    monkeypatch.setattr(runner, '_final_records', lambda path: (final, 1))
+    monkeypatch.setattr(pack_transport.time, 'monotonic', lambda: clock[0])
+    original = runner.completed_map
+    pending = [(3, {'case_id': 'retry'}), (7, {'case_id': 'fresh'})]
+
+    def work(item):
+        clock[0] += 2.0
+        return item
+
+    saved = []
+    with pytest.raises(control.StopRequested, match='time_slice_complete'):
+        with pack_transport.case_time_slice(1, unattempted_results=Path('cases.jsonl')):
+            saved.extend(runner.completed_map(work, pending, 1))
+    assert saved == [pending[1]]
+    assert final == {'retry': {'status': 'failed', 'reason': 'evidence mismatch'}}
+    assert runner.completed_map is original
+    with pack_transport.case_time_slice(60, unattempted_results=Path('cases.jsonl')):
+        assert list(runner.completed_map(lambda item: item, pending[:1], 1)) == pending[:1]
+
+
 @pytest.mark.parametrize('progress_type', ['RunProgress', 'ParallelCaseProgress'])
 @pytest.mark.parametrize('phase', ['generating', 'judging'])
 @pytest.mark.parametrize('preparation,expected', [(0.5, 2), (100, 2), (900, 2)])

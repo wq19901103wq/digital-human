@@ -219,7 +219,7 @@ def time_slice_value(value):
 
 
 @contextmanager
-def case_time_slice(seconds, *, profile=None):
+def case_time_slice(seconds, *, profile=None, unattempted_results=None):
     """Start the work budget after lazy preparation, then drain all results."""
     if seconds is None:
         yield
@@ -227,8 +227,11 @@ def case_time_slice(seconds, *, profile=None):
     from src.iteration import control, progress, runner
     seconds = time_slice_value(seconds)
     original = runner.completed_map
+    attempted = set(runner._final_records(Path(unattempted_results))[0]) if unattempted_results is not None else None
 
     def completed(function, items, workers=1):
+        if attempted is not None:
+            items = sorted(items, key=lambda item: str(item[1]['case_id']) in attempted)
         started = time.monotonic()
         deadline = started + seconds
         drained = False
@@ -549,7 +552,11 @@ def main():
     parser.add_argument('--workers', type=int, required=True)
     parser.add_argument('--timeout-seconds', type=timeout_value, required=True)
     parser.add_argument('--time-slice-seconds', type=time_slice_value)
+    parser.add_argument('--unattempted-first', action='store_true',
+                        help='Run untouched experiment cases before failed retries within a time slice')
     args = parser.parse_args()
+    if args.unattempted_first and (args.kind != 'experiment' or args.time_slice_seconds is None):
+        parser.error('--unattempted-first requires an experiment time slice')
     if (args.kind == 'features') != (args.feature_output is not None):
         parser.error('features operation requires --feature-output, exclusively')
     if args.time_slice_seconds is not None and args.kind != 'experiment':
@@ -605,6 +612,7 @@ def main():
                'history_memory_capacity': history_memory_capacity(),
                'history_memory_required': needs_history,
                'time_slice_seconds': args.time_slice_seconds,
+               'pending_case_order': 'unattempted_before_retries_v1' if args.unattempted_first else 'original',
                'time_slice_clock': 'first_operation_full_warmup_v2',
                'runtime': read_json(directory / 'runtime.json'),
                'launcher_sha256': sha256_file(Path(__file__)),
@@ -642,7 +650,8 @@ def main():
                 history_feature_cache(few_shot), history_storage, source_read_reuse, retrieval_reuse, \
                 feature_response_reuse, material_validation_reuse, \
                 profile.instrument(history_required=needs_history, disk_history=disk_history), \
-                case_time_slice(args.time_slice_seconds, profile=profile):
+                case_time_slice(args.time_slice_seconds, profile=profile,
+                                unattempted_results=directory / 'cases.jsonl' if args.unattempted_first else None):
             runpy.run_path(sys.argv[0], run_name='__main__')
     except control.StopRequested as exc:
         if exc.reason != 'time_slice_complete':
