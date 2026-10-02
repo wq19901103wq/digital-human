@@ -1,5 +1,6 @@
 import copy
 import json
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from types import SimpleNamespace
@@ -276,8 +277,10 @@ def pool_modules(tmp_path):
             self.files = [path]
             self.stamps = [stamp(path)]
             self.calls = []
+            self.checks = 0
 
         def check(self):
+            self.checks += 1
             if self.stamps != [stamp(path)]:
                 raise ConfigError('source changed')
 
@@ -336,6 +339,59 @@ def test_pool_reuses_exact_rows_but_not_direct_case_or_render_validation(pool_mo
         assert source.calls[-1][0]['reply'] == ['changed']
     assert profile.metrics['history_pool_validation_full']['count'] == 2
     assert profile.metrics['history_pool_validation_reused']['count'] == 2
+
+
+def test_pool_checks_source_stamps_at_boundaries_not_for_each_example(pool_modules, tmp_path):
+    retriever = pool_modules.retrievers.PersonaFewShotRetriever()
+    source = retriever._history_sources
+    retriever.rows.extend({'id': str(number)} for number in range(100))
+    profile = TransportProfile(tmp_path / 'profile.json', {})
+    original = pool_modules.sources.HistorySources.check
+    with material_reuse.verified_history_pools(pool_modules.retrievers, pool_modules.sources, profile=profile):
+        assert retriever.is_approved()
+        assert len(source.calls) == 101
+        assert source.checks == 2
+        source.validate(retriever.rows[0], example=False)
+        source.validate(retriever.rows[0], example=True)
+        assert source.checks == 4
+    assert pool_modules.sources.HistorySources.check is original
+    assert profile.metrics['history_source_stamp_check_reused']['count'] == 101
+
+
+@pytest.mark.parametrize('failure', [None, 'pool', 'reader'])
+def test_pool_keeps_disk_read_window_until_audit_exit(pool_modules, failure):
+    retriever = pool_modules.retrievers.PersonaFewShotRetriever()
+    source = retriever._history_sources
+    events = []
+
+    class Reader:
+        @contextmanager
+        def reading(self):
+            events.append('open')
+            try:
+                yield
+            finally:
+                events.append('close')
+            if failure == 'reader':
+                raise ConfigError('reader changed')
+
+    source._disk_reader = Reader()
+    retriever.hook = lambda: events.append('audit')
+    retriever.failure = failure == 'pool'
+    with material_reuse.verified_history_pools(pool_modules.retrievers, pool_modules.sources):
+        if failure is None:
+            assert retriever.is_approved()
+        else:
+            with pytest.raises(ConfigError):
+                retriever.is_approved()
+        assert events == ['open', 'audit', 'close']
+        source.validate(retriever.rows[0], example=True)
+        assert len(source.calls) == 2
+        if failure == 'reader':
+            retriever.failure = False
+            del source._disk_reader
+            retriever._load()
+            assert len(source.calls) == 3
 
 
 def test_material_scope_reuses_examples_across_full_checks_and_pool(

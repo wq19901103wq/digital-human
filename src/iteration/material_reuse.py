@@ -1,7 +1,7 @@
 """Reuse fully verified materials only within an unchanged executor lifetime."""
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import copy
 from functools import wraps
 import hashlib
@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from threading import Lock, local
 
-MODE = 'sealed_in_process_material_validation_v2'
+MODE = 'sealed_in_process_material_validation_v3'
 CAPACITY = 16
 POOL_CAPACITY = 131072
 
@@ -20,6 +20,7 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
     if capacity <= 0:
         raise ValueError('history pool validation capacity must be positive')
     original_validate = sources.HistorySources.validate
+    original_check = sources.HistorySources.check
     originals = {name: getattr(retrievers.PersonaFewShotRetriever, name) for name in ('_load', 'is_approved')}
     entries = {}
     registry = Lock()
@@ -28,7 +29,10 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
     def source_entry(frame, source):
         entry = frame['sources'].get(source)
         if entry is None:
-            source.check()
+            original_check(source)
+            reader = getattr(source, '_disk_reader', None)
+            if reader is not None:
+                frame['reads'].enter_context(reader.reading())
             binding = (tuple(source.files), tuple(source.stamps))
             with registry:
                 saved = entries.get(source)
@@ -36,6 +40,15 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
             entry = dict(binding=binding, known=known, pending=set())
             frame['sources'][source] = entry
         return entry
+
+    @wraps(original_check)
+    def check(source):
+        frame = getattr(scoped, 'frame', None)
+        if frame is None:
+            return original_check(source)
+        source_entry(frame, source)
+        if profile is not None:
+            profile.record('history_source_stamp_check_reused', 0.0)
 
     @wraps(original_validate)
     def validate(source, row, *, example=False):
@@ -67,9 +80,12 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
             frame = getattr(scoped, 'frame', None)
             outer = frame is None
             if outer:
-                frame = dict(sources={}, valid=True)
+                frame = dict(sources={}, valid=True, reads=ExitStack())
                 scoped.frame = frame
             try:
+                reader = getattr(subject, '_disk_reader', None)
+                if outer and reader is not None:
+                    frame['reads'].enter_context(reader.reading())
                 source = getattr(subject, '_history_sources', None)
                 if source is not None:
                     source_entry(frame, source)
@@ -77,8 +93,9 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
                 if result is False:
                     frame['valid'] = False
                 if outer:
+                    frame['reads'].close()
                     for source, entry in frame['sources'].items():
-                        source.check()
+                        original_check(source)
                         if entry['binding'] != (tuple(source.files), tuple(source.stamps)):
                             frame['valid'] = False
                     if frame['valid']:
@@ -103,16 +120,21 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
                 raise
             finally:
                 if outer:
-                    scoped.frame = None
+                    try:
+                        frame['reads'].close()
+                    finally:
+                        scoped.frame = None
         return call
 
     try:
         sources.HistorySources.validate = validate
+        sources.HistorySources.check = check
         for name, original in originals.items():
             setattr(retrievers.PersonaFewShotRetriever, name, pool(original))
         yield pool
     finally:
         sources.HistorySources.validate = original_validate
+        sources.HistorySources.check = original_check
         for name, original in originals.items():
             setattr(retrievers.PersonaFewShotRetriever, name, original)
 
