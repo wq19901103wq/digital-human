@@ -114,7 +114,7 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
 
 > 核查日期：2026-10-02。本节解释示例选择从召回、特征到排序的实际实现，以及一次实验的计时证据，不是通用搜索架构介绍，也不改变实验条件或晋级标准。
 >
-> **版本边界**：基础召回与学习排序代码已在仓库中；下文标明的磁盘读取、检索缓存、材料复用及 profile 改造，属于本次核查的运行工作区，尚未随本次文档提交入库。计时对应该工作区，不能直接当成公开源码 HEAD 的复现结果。此次仅提交说明，不代表待做优化已完成。
+> **版本边界**：基础召回、学习排序及下文的磁盘读取、检索缓存、材料复用与 profile 改造，均随配套功能提交入库。计时对应 2026-10-02 核查时的运行工作区快照，不保证当前源码 HEAD 能完全复现该次运行。代码发布不代表整体优化收益已验收，待做项也不因此变成已完成。
 
 ### 先说结论：慢在哪里
 
@@ -242,7 +242,7 @@ length  = 1 / (1 + abs(query_length - context_length) / 20)
 
 ### 6. 磁盘方案、内存与锁分别做什么
 
-以下是已在核查工作区使用、但尚未随本次文档提交入库的改造：
+以下是已在核查工作区使用、随配套功能提交入库的改造：
 
 | 层 | 实际存储/访问方式 | 仍然存在的开销 |
 |---|---|---|
@@ -360,7 +360,7 @@ SELECT features FROM examples WHERE id=? ORDER BY position DESC LIMIT 1;
 
 | 状态 | 内容 | 当前边界 |
 |---|---|---|
-| 核查工作区已有 | 正文/特征磁盘化、worker 独立 SQL 连接、最近单条记录复用、完整召回结果缓存、进程内材料证明复用、分阶段 profile | 有实际运行计时；本次文档提交不夹带这些源码，也不证明整体收益已验收 |
+| 已随配套功能提交入库 | 正文/特征磁盘化、worker 独立 SQL 连接、最近单条记录复用、完整召回结果缓存、进程内材料证明复用、分阶段 profile | 有实际运行计时；源码发布不证明整体收益已验收 |
 | 已明确、尚未完整落实 | 全量静态校验前移到 Data 建版；未变绑定跨启动复用，不在 Gen/Judge 再次全扫 | 保留逐题隔离与必要变更检测，不能把“少检查”误写为“取消数据边界” |
 | 可针对根因评估、尚未实现 | 合并/批量读取减少逐条 SQL 与 JSON 解码，复用同题两路的合法候选集合，减少重复目录遍历与模型加载 | 需保持原候选、分数、稳定排序与冻结条件等价，不能悄悄截小候选池或改评分 |
 | 尚缺证据 | 按阶段的资源归因与整体成功吞吐对照 | 不能把局部耗时下降、缓存命中或任务启动状态当成实验交付 |
@@ -383,7 +383,7 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 | [`learning_guard.py`](src/iteration/learning_guard.py) | 学习材料与来源护栏 |
 | [`bootstrap/history.py`](src/bootstrap/history.py) | Data 建版质量审计与 finalize |
 
-运行工作区中尚未随本次文档提交入库的实现位置：`src/generator/disk_history.py`（磁盘存储）、`src/generator/disk_source_reads.py`（独立读取连接）、`src/generator/retrieval_cache.py`（完整召回缓存）、`src/iteration/material_reuse.py`（材料证明复用）、`src/iteration/transport_profile.py`（耗时采集）。不将这些未提交路径伪装成公开源码链接。
+配套实现位置：[`disk_history.py`](src/generator/disk_history.py)（磁盘存储）、[`disk_source_reads.py`](src/generator/disk_source_reads.py)（独立读取连接）、[`retrieval_cache.py`](src/generator/retrieval_cache.py)（完整召回缓存）、[`material_reuse.py`](src/iteration/material_reuse.py)（材料证明复用）、[`transport_profile.py`](src/iteration/transport_profile.py)（耗时采集）。
 
 源码/文档改动的规则、链接与公开边界检查统一走 `scripts/check.py`；实验自身由原运行入口续跑、复用成功缓存并留下证据，不另写一次性校验流程，也不为技术解释重新抽题。
 
