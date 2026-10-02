@@ -54,6 +54,21 @@ def test_reused_outputs_are_linked_without_copying_facts_or_confirming_identity(
     assert source.read_bytes() == before
 
 
+def test_catalog_recognizes_every_active_object_and_keeps_stale_jobs_interrupted(tmp_path, monkeypatch):
+    batch, _ = batch_fixture(tmp_path)
+    manifest = read_json(batch / 'manifest.json')
+    manifest['jobs'] += [dict(manifest['jobs'][0], id=name) for name in ('second', 'stale')]
+    write_json(batch / 'manifest.json', manifest)
+    write_json(batch / 'progress.json', dict(stage='running', jobs={
+        name: dict(stage='running') for name in ('page', 'second', 'stale')}))
+    active = [dict(id=name) for name in ('page', 'second')]
+    monkeypatch.setattr(delivery.wiki_batch, 'status', lambda _: dict(stage='running',
+        running=True, active=active[0], active_jobs=active))
+    value = delivery.inspect([batch])
+    assert {j['id']: j['stage'] for j in value['jobs']} == {
+        'page': 'running', 'second': 'running', 'stale': 'interrupted'}
+
+
 def test_catalog_groups_by_scoped_account_not_files_names_or_friendship():
     base = dict(batch='legacy', id='one', kind='person', self_account='self', account='p1',
         title='同名', binding='account_filename', stage='complete', reuse_eligible=True, records=4)

@@ -40,10 +40,12 @@ def main():
     members.add_argument('--batch-chars', type=int, default=120000)
     run = commands.add_parser('run')
     run.add_argument('--workers', type=int, default=4)
+    run.add_argument('--object-workers', type=int, default=1, help='同时整理的聊天对象数')
     run.add_argument('--attempts', type=int, default=2)
     run.add_argument('--max-jobs', type=int)
     revise = commands.add_parser('revise', help='修订已完成内容；复用有效记录和修订缓存')
     revise.add_argument('--workers', type=int, default=4)
+    revise.add_argument('--object-workers', type=int, default=1, help='同时修订的聊天对象数')
     revise.add_argument('--attempts', type=int, default=2)
     revise.add_argument('--max-jobs', type=int)
     revise.add_argument('--follow', action='store_true')
@@ -84,6 +86,7 @@ def main():
     elif args.command == 'revise':
         from src.bootstrap import wiki_revision_batch
         value = wiki_revision_batch.run(output, workers=args.workers, attempts=args.attempts,
+                                       object_workers=args.object_workers,
                                        max_jobs=args.max_jobs, follow=args.follow)
         value = {k: v for k, v in value.items() if k != 'jobs'}
     elif args.command == 'status':
@@ -94,7 +97,8 @@ def main():
     else:
         manifest = json.loads((output / 'manifest.json').read_text())
         backend = wiki_supplement if manifest['schema'] == 'wiki_supplement_v1' else wiki_batch
-        value = backend.run(output, workers=args.workers, attempts=args.attempts, max_jobs=args.max_jobs)
+        value = backend.run(output, workers=args.workers, object_workers=args.object_workers,
+                            attempts=args.attempts, max_jobs=args.max_jobs)
         value = {k: v for k, v in value.items() if k != 'jobs'}
     print(json.dumps(value, ensure_ascii=False), flush=True)
     return 0 if args.command == 'status' or value.get('stage', 'complete') == 'complete' else 1

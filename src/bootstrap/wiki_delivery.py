@@ -265,12 +265,13 @@ def inspect(batches, *, cache=None):
         batch = Path(path)
         progress = read_json(batch / 'progress.json', default={})
         status = wiki_batch.status(batch)
+        active = status.get('active_jobs', [status['active']] if status['active'] else [])
+        active_ids = {item['id'] for item in active}
         summaries.append(dict(path=path, manifest_sha256=sha256_file(batch / 'manifest.json'), **status))
         for job in manifest['jobs']:
             saved = progress.get('jobs', {}).get(job['id'], {})
             stage = saved.get('stage', 'pending')
-            if stage == 'running' and (not status['running'] or
-                    job['id'] != (status['active'] or {}).get('id')):
+            if stage == 'running' and (not status['running'] or job['id'] not in active_ids):
                 stage = 'interrupted'
             item = {k: job[k] for k in ('id', 'title', 'kind', 'account', 'binding')}
             item['self_account'] = job.get('self_account', manifest.get('self_account', ''))

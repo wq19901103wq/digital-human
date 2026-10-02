@@ -1,6 +1,7 @@
 """Revision batches follow frozen originals and overlay them without double counting."""
 from copy import deepcopy
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -267,6 +268,92 @@ def test_claims_dispatch_compatibility_cannot_change_engine_or_source_bytes(engi
     backend = Path(revision_batch.engine_for(engine).__file__).name
     frozen[backend] = 'changed'
     assert not revision_batch.compatible_pipeline(frozen, engine)
+
+
+@pytest.mark.parametrize('engine', ['legacy', 'roles_v1', 'roles_claims_v2'])
+def test_parallel_runner_alias_preserves_all_semantic_bindings(engine):
+    frozen = revision_batch.pipeline(engine) | {
+        'wiki_revision_batch.py': revision_batch.SERIAL_RUNNER_SHA256}
+    assert revision_batch.compatible_pipeline(frozen, engine)
+    for name in frozen:
+        assert not revision_batch.compatible_pipeline(frozen | {name: 'changed'}, engine)
+
+
+def prepared_people(tmp_path, count=3):
+    from src.bootstrap import wiki_repair, wiki_structured
+    from test_wiki_structured import META, fixture
+    from test_wiki_repair import row, source as write_source
+    _, _, template = fixture(tmp_path)
+    messages = write_source(tmp_path, [
+        message for i in range(count) for message in (
+            row(f'private:self:person-{i}', 'self', 1000, '阿林，明天见。'),
+            row(f'private:self:person-{i}', f'person-{i}', 1001, '小周，你来定时间。'),
+            row(f'private:self:person-{i}', f'person-{i}', 1002, '有人叫我“林老师”，我不喜欢。'))])
+    source, output = tmp_path / 'source', tmp_path / 'parallel-revision'
+    jobs, progress = [], {}
+    for i in range(count):
+        account = f'person-{i}'
+        rows, coverage = wiki_repair.select_history(messages, account, 'self')
+        data = deepcopy(template)
+        data['entities'][0]['account'] = account
+        for record in data['entities'] + data['addresses']:
+            record['lines'] = [line + 3 * i for line in record['lines']]
+        for record in data['addresses']:
+            record['utterance_line'] += 3 * i
+        compiled = wiki_structured.compile_records(dict(META, account=account),
+            [(data, {'F1': 'fact-1'})], rows, coverage)
+        job = dict(id=account, title=account, kind='person', account=account,
+            self_account='self', binding='raw_member_snapshot', output=str(source / 'jobs' / account))
+        jobs.append(job)
+        progress[account] = revision_batch.export(source, job, compiled)
+    write_json(source / 'manifest.json', dict(schema='wiki_batch_v1', jobs=jobs, gaps=[],
+        messages=coverage, self_account='self', config={}, summary={}))
+    write_json(source / 'progress.json', dict(stage='complete', jobs=progress, total=count))
+    revision_batch.prepare(source, output)
+    return source, output
+
+
+def test_parallel_revision_overlaps_distinct_people_limits_admission_and_reuses(tmp_path, monkeypatch):
+    _, output = prepared_people(tmp_path)
+    original = revision_batch.wiki_revision.revise
+    barrier = Barrier(2, timeout=10)
+    row_ids, snapshots = [], []
+    def parallel(*args):
+        row_ids.append(id(args[3]))
+        barrier.wait()
+        snapshots.append(read_json(output / 'progress.json')['active_jobs'])
+        return original(*args)
+    monkeypatch.setattr(revision_batch.wiki_revision, 'revise', parallel)
+    client = KeepClient()
+    result = revision_batch.run(output, client=client, object_workers=2, workers=1, max_jobs=2)
+    assert result['counts'] == {'complete': 2} and result['stage'] == 'incomplete'
+    assert result['active_jobs'] == [] and result['active_job'] is None
+    assert all(set(active) == {'person-0', 'person-1'} for active in snapshots)
+    assert len(set(row_ids)) == 1  # Shared raw source, no full-history copy per worker.
+    monkeypatch.setattr(revision_batch.wiki_revision, 'revise', original)
+    finished = revision_batch.run(output, client=client, object_workers=2, workers=1)
+    assert finished['stage'] == 'complete' and finished['counts'] == {'complete': 3}
+    calls = len(client.prompts)
+    revision_batch.run(output, client=client, object_workers=2)
+    assert len(client.prompts) == calls
+
+
+def test_parallel_revision_isolates_failure_and_rechecks_source_before_export(tmp_path, monkeypatch):
+    source, output = prepared_people(tmp_path, 2)
+    original = revision_batch.wiki_revision.revise
+    barrier = Barrier(2, timeout=10)
+    def change_source(*args):
+        barrier.wait()
+        if args[2]['subject']['account'] == 'person-0':
+            saved = read_json(source / 'progress.json')['jobs']['person-0']
+            Path(saved['knowledge']).write_text('{}')
+        return original(*args)
+    monkeypatch.setattr(revision_batch.wiki_revision, 'revise', change_source)
+    state = revision_batch.run(output, client=KeepClient(), object_workers=2, workers=1)
+    assert state['counts'] == {'complete': 1, 'incomplete': 1}
+    assert 'revision source changed' in state['jobs']['person-0']['error']
+    assert not (output / 'jobs/person-0/content/knowledge.json').exists()
+    assert state['jobs']['person-1']['stage'] == 'complete'
 
 
 @pytest.mark.parametrize('completed', [False, True])

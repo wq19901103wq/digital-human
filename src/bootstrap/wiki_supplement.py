@@ -8,7 +8,7 @@ import time
 
 from ..config import sha256_file
 from ..iteration.storage import file_lock, read_json, write_json
-from . import wiki_batch, wiki_prompt, wiki_repair, wiki_scope, wiki_source_index
+from . import wiki_batch, wiki_job_pool, wiki_prompt, wiki_repair, wiki_scope, wiki_source_index
 from .wiki_library import inventory
 
 
@@ -85,9 +85,9 @@ def prepare(parent, output):
         return manifest['summary']
 
 
-def run(output, *, workers=4, attempts=2, max_jobs=None):
-    if workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
-        raise ValueError('workers, attempts and optional max_jobs must be positive')
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None):
+    if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
+        raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
     output = Path(output)
     with file_lock(output / '.lock', blocking=False):
         manifest = read_json(output / 'manifest.json')
@@ -104,15 +104,13 @@ def run(output, *, workers=4, attempts=2, max_jobs=None):
                 if wiki_batch._stamp(manifest[key]['path']) != stamp:
                     raise ValueError(f'{key} changed during supplement')
         state = read_json(output / 'progress.json', default=dict(jobs={}))
-        state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']))
+        state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']),
+                     object_workers=object_workers, workers=workers)
         def save():
             state['counts'] = dict(Counter(j['stage'] for j in state['jobs'].values()))
             state['updated_at'] = time.time()
             write_json(output / 'progress.json', state)
-        save()
-        index = wiki_source_index.SourceIndex(manifest['index']['path'], raw['path'], raw['sha256'])
-        started = 0
-        try:
+        def pending_jobs():
             for job in manifest['jobs']:
                 unchanged()
                 previous = state['jobs'].get(job['id'], {})
@@ -121,47 +119,47 @@ def run(output, *, workers=4, attempts=2, max_jobs=None):
                         raise ValueError('completed supplement artifact changed')
                     wiki_prompt.export(previous['knowledge'], output / 'prompt' / job['id'])
                     continue
-                if max_jobs is not None and started >= max_jobs:
-                    break
-                started += 1
-                item = state['jobs'][job['id']] = dict(stage='running', attempts=previous.get('attempts', 0))
-                state['active_job'] = job['id']
-                save()
+                yield job
+
+        def execute(job, attempt):
+            unchanged()
+            for locator in job['sources']:
+                if sha256_file(Path(locator['path'])) != locator['sha256']:
+                    raise ValueError('legacy Wiki changed since supplement preparation')
+            rows = None
+            if job['kind'] != 'person':
+                # SQLite connections and raw-file cursors belong to this worker
+                # alone; both are created, consumed and closed in the same thread.
+                index = wiki_source_index.SourceIndex(manifest['index']['path'], raw['path'], raw['sha256'])
                 try:
-                    for locator in job['sources']:
-                        if sha256_file(Path(locator['path'])) != locator['sha256']:
-                            raise ValueError('legacy Wiki changed since supplement preparation')
-                    rows = None if job['kind'] == 'person' else index.rows(
-                        chat_id=job.get('chat_id'), lines=job.get('lines'))
-                    coverage = dict(raw, selection=job.get('selection'), binding=job['binding'],
-                        anchor_count=job.get('anchor_count'), anchors=job.get('anchors', []),
-                        unmatched_old_lines=job.get('unmatched_old_lines', []))
-                    for _ in range(attempts):
-                        item['attempts'] += 1
-                        save()
-                        if job['kind'] == 'person':
-                            result = wiki_repair.repair(Path(job['wiki']['path']), Path(raw['path']),
-                                Path(job['output']), job['account'], job['self_account'], manifest['config'],
-                                workers=workers, max_chars=manifest['max_chars'], structured=True,
-                                include_mentions=True, reconcile_attributes=True)
-                        else:
-                            result = wiki_scope.generate(job, rows, coverage, Path(job['output']),
-                                manifest['config'], workers=workers, max_chars=manifest['max_chars'])
-                        if result['stage'] == 'complete':
-                            break
-                    else:
-                        raise RuntimeError(f"generation incomplete: {result.get('errors', [])}")
-                    unchanged()
-                    knowledge = Path(job['output']) / 'content/knowledge.json'
-                    exported = wiki_prompt.export(knowledge, output / 'prompt' / job['id'])
-                    item.update(stage='complete', knowledge=str(knowledge), sha256=sha256_file(knowledge),
-                                records=exported['records'], packets=exported['packets'])
-                except Exception as exc:
-                    item.update(stage='incomplete', error=f'{type(exc).__name__}: {exc}'[-1600:])
-                save()
-        finally:
-            index.close()
-        state['active_job'] = None
+                    rows = index.rows(chat_id=job.get('chat_id'), lines=job.get('lines'))
+                finally:
+                    index.close()
+            coverage = dict(raw, selection=job.get('selection'), binding=job['binding'],
+                anchor_count=job.get('anchor_count'), anchors=job.get('anchors', []),
+                unmatched_old_lines=job.get('unmatched_old_lines', []))
+            for _ in range(attempts):
+                attempt()
+                if job['kind'] == 'person':
+                    result = wiki_repair.repair(Path(job['wiki']['path']), Path(raw['path']),
+                        Path(job['output']), job['account'], job['self_account'], manifest['config'],
+                        workers=workers, max_chars=manifest['max_chars'], structured=True,
+                        include_mentions=True, reconcile_attributes=True)
+                else:
+                    result = wiki_scope.generate(job, rows, coverage, Path(job['output']),
+                        manifest['config'], workers=workers, max_chars=manifest['max_chars'])
+                if result['stage'] == 'complete':
+                    break
+            else:
+                raise RuntimeError(f"generation incomplete: {result.get('errors', [])}")
+            unchanged()
+            knowledge = Path(job['output']) / 'content/knowledge.json'
+            exported = wiki_prompt.export(knowledge, output / 'prompt' / job['id'])
+            return dict(stage='complete', knowledge=str(knowledge), sha256=sha256_file(knowledge),
+                        records=exported['records'], packets=exported['packets'])
+
+        wiki_job_pool.run_jobs(pending_jobs(), execute, object_workers=object_workers,
+                              state=state, save=save, max_jobs=max_jobs)
         state['stage'] = 'complete' if state['counts'].get('complete', 0) == state['total'] else 'incomplete'
         state['coverage_gaps'] = manifest['summary']['gaps']
         save()

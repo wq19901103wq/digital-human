@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from threading import Barrier, get_ident
 
 import pytest
 
@@ -168,7 +169,8 @@ def test_scope_two_pass_cache_nonperson_root_and_locator_only_exports(tmp_path):
         index.close()
 
 
-def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch):
+@pytest.mark.parametrize('object_workers', [1, 3])
+def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, object_workers):
     library = tmp_path / 'wiki'
     (library / 'groups').mkdir(parents=True)
     (library / 'topics').mkdir()
@@ -187,15 +189,68 @@ def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch):
             return dict(stage='incomplete', errors=['temporary failure'])
         return real_generate(*args, **kwargs, client=ScopeClient())
     monkeypatch.setattr(scope, 'generate', fake)
-    assert supplement.run(output, max_jobs=1)['counts']['complete'] == 1
-    assert supplement.run(output)['stage'] == 'complete'
+    assert supplement.run(output, object_workers=object_workers, max_jobs=1)['counts']['complete'] == 1
+    assert supplement.run(output, object_workers=object_workers)['stage'] == 'complete'
     assert len(calls) == 3
-    supplement.run(output)
+    supplement.run(output, object_workers=object_workers)
     assert len(calls) == 3
     assert wiki_batch.status(output)['counts']['complete'] == 2
     messages.write_text(messages.read_text() + '\n')
     with pytest.raises(ValueError, match='messages changed'):
-        supplement.run(output)
+        supplement.run(output, object_workers=object_workers)
+
+
+def test_parallel_supplement_uses_worker_local_sqlite_connections(tmp_path, monkeypatch):
+    library = tmp_path / 'wiki'
+    (library / 'groups').mkdir(parents=True)
+    for room in ('123@chatroom', '456@chatroom'):
+        (library / f'groups/{room}.md').write_text(f'# 运动群\n- 群聊 ID：{room}\n')
+    messages = source(tmp_path, [dict(row(f'group:self:{room}', 'peer', 1000, '原始消息中的运动安排'),
+        chat_name='运动群') for room in ('123@chatroom', '456@chatroom')])
+    parent, output = tmp_path / 'parent', tmp_path / 'supplement'
+    wiki_batch.prepare(library, messages, parent, 'self', {})
+    assert supplement.prepare(parent, output)['jobs'] == 2
+    coordinator = get_ident()
+    opened, closed, calls = [], [], []
+    overlap = Barrier(2)
+    real_index, real_generate = sources.SourceIndex, scope.generate
+
+    class WorkerIndex(real_index):
+        def __init__(self, *args):
+            self.owner = get_ident()
+            assert self.owner != coordinator
+            opened.append(self)
+            super().__init__(*args)
+
+        def rows(self, **kwargs):
+            assert get_ident() == self.owner
+            return super().rows(**kwargs)
+
+        def close(self):
+            assert get_ident() == self.owner
+            super().close()
+            closed.append(self)
+
+    def generate(*args, **kwargs):
+        calls.append((args[0]['id'], kwargs['workers']))
+        overlap.wait(timeout=10)
+        return real_generate(*args, **kwargs, client=ScopeClient())
+
+    monkeypatch.setattr(sources, 'SourceIndex', WorkerIndex)
+    monkeypatch.setattr(scope, 'generate', generate)
+    state = supplement.run(output, object_workers=2, workers=3)
+    assert state['stage'] == 'complete', state
+    assert len(opened) == len(closed) == 2 and set(opened) == set(closed)
+    assert len({index.owner for index in opened}) == 2
+    assert [workers for _, workers in calls] == [3, 3]
+    assert state['active_jobs'] == [] and state['active_job'] is None
+    supplement.run(output, object_workers=2)
+    assert len(opened) == 2 and len(calls) == 2
+
+
+def test_supplement_refuses_zero_object_workers(tmp_path):
+    with pytest.raises(ValueError, match='object_workers'):
+        supplement.run(tmp_path, object_workers=0)
 
 
 def test_shared_document_keeps_content_subject_and_publisher_roles_in_cards(tmp_path):

@@ -14,7 +14,7 @@ import time
 
 from ..config import sha256_file
 from ..iteration.storage import file_lock, locked, read_json, write_json
-from . import wiki_prompt, wiki_repair
+from . import wiki_job_pool, wiki_prompt, wiki_repair
 from .wiki_library import digest, inventory
 
 
@@ -123,32 +123,34 @@ def status(output):
     manifest = read_json(output / 'manifest.json')
     progress = read_json(output / 'progress.json', default={})
     running = locked(output / '.lock') and progress.get('stage') == 'running'
-    active_id = progress.get('active_job') if running else None
+    active_ids = (progress.get('active_jobs', [progress.get('active_job')]) if running else [])
     counts = dict.fromkeys(('complete', 'running', 'incomplete', 'interrupted', 'pending'), 0)
-    active = None
+    active_jobs = []
     for job in manifest['jobs']:
         item = progress.get('jobs', {}).get(job['id'], {})
         stage = item.get('stage', 'pending')
-        if stage == 'running' and job['id'] != active_id:
+        if stage == 'running' and job['id'] not in active_ids:
             stage = 'interrupted'
         counts[stage] += 1
-        if job['id'] == active_id:
+        if stage == 'running' and job['id'] in active_ids:
             detail = read_json(Path(job['output']) / 'progress.json', default={})
-            active = dict(id=job['id'], title=job['title'], account=job['account'],
+            active_jobs.append(dict(id=job['id'], title=job['title'], account=job['account'],
                 progress={k: detail[k] for k in ('stage', 'completed', 'batches', 'failed',
-                    'sections_completed', 'reread_completed', 'updated_at') if k in detail})
+                    'sections_completed', 'reread_completed', 'updated_at') if k in detail}))
     stage = progress.get('stage', 'prepared')
     if stage == 'running' and not running:
         stage = 'interrupted'
     return dict(stage=stage, running=running, total=len(manifest['jobs']), counts=counts,
-                active=active, updated_at=progress.get('updated_at'),
+                active=active_jobs[0] if active_jobs else None, active_jobs=active_jobs,
+                object_workers=progress.get('object_workers', 1), workers=progress.get('workers'),
+                updated_at=progress.get('updated_at'),
                 coverage_gaps=manifest['summary']['gaps'])
 
 
-def run(output, *, workers=4, attempts=2, max_jobs=None):
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None):
     """Continue missing jobs; successful exact-input work is never requested again."""
-    if workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
-        raise ValueError('workers, attempts and optional max_jobs must be positive')
+    if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
+        raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
     output = Path(output)
     with file_lock(output / '.lock', blocking=False):
         manifest = read_json(output / 'manifest.json')
@@ -159,59 +161,54 @@ def run(output, *, workers=4, attempts=2, max_jobs=None):
         if sha256_file(Path(source['path'])) != source['sha256']:
             raise ValueError('raw source changed after batch preparation')
         state = read_json(output / 'progress.json', default=dict(jobs={}))
-        state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']))
+        state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']),
+                     object_workers=object_workers, workers=workers)
         def save():
             state['counts'] = dict(Counter(v['stage'] for v in state['jobs'].values()))
             state['updated_at'] = time.time()
             write_json(output / 'progress.json', state)
-        save()
-        started = 0
-        for job in manifest['jobs']:
+        def pending_jobs():
+            for job in manifest['jobs']:
+                if _stamp(source['path']) != source_stamp:
+                    raise ValueError('raw source changed during batch')
+                prior = state['jobs'].get(job['id'], {})
+                if prior.get('stage') == 'complete':
+                    if sha256_file(Path(prior['knowledge'])) != prior['sha256']:
+                        raise ValueError('completed batch artifact changed')
+                    wiki_prompt.export(prior['knowledge'], output / 'prompt' / job['id'])
+                    continue
+                yield job
+
+        def execute(job, attempt):
             if _stamp(source['path']) != source_stamp:
                 raise ValueError('raw source changed during batch')
-            prior = state['jobs'].get(job['id'], {})
-            if prior.get('stage') == 'complete':
-                if sha256_file(Path(prior['knowledge'])) != prior['sha256']:
-                    raise ValueError('completed batch artifact changed')
-                wiki_prompt.export(prior['knowledge'], output / 'prompt' / job['id'])
-                continue
-            if max_jobs is not None and started >= max_jobs:
-                break
-            started += 1
-            item = state['jobs'][job['id']] = dict(stage='running', account=job['account'],
-                                                 attempts=prior.get('attempts', 0))
-            state['active_job'] = job['id']
-            save()
-            try:
-                for locator in job['sources']:
-                    if sha256_file(Path(locator['path'])) != locator['sha256']:
-                        raise ValueError('legacy Wiki changed after batch preparation')
-                knowledge = Path(job['output']) / 'content/knowledge.json'
-                if job.get('reuse'):
-                    knowledge = Path(job['reuse']['path'])
-                    if sha256_file(knowledge) != job['reuse']['sha256']:
-                        raise ValueError('reusable Wiki changed')
+            for locator in job['sources']:
+                if sha256_file(Path(locator['path'])) != locator['sha256']:
+                    raise ValueError('legacy Wiki changed after batch preparation')
+            knowledge = Path(job['output']) / 'content/knowledge.json'
+            if job.get('reuse'):
+                knowledge = Path(job['reuse']['path'])
+                if sha256_file(knowledge) != job['reuse']['sha256']:
+                    raise ValueError('reusable Wiki changed')
+            else:
+                for _ in range(attempts):
+                    attempt()
+                    result = wiki_repair.repair(Path(job['wiki']['path']), Path(source['path']),
+                        Path(job['output']), job['account'], job['self_account'], manifest['config'],
+                        workers=workers, max_chars=manifest['max_chars'], structured=True,
+                        include_mentions=True, reconcile_attributes=True)
+                    if result['stage'] == 'complete':
+                        break
                 else:
-                    for _ in range(attempts):
-                        item['attempts'] += 1
-                        save()
-                        result = wiki_repair.repair(Path(job['wiki']['path']), Path(source['path']),
-                            Path(job['output']), job['account'], job['self_account'], manifest['config'],
-                            workers=workers, max_chars=manifest['max_chars'], structured=True,
-                            include_mentions=True, reconcile_attributes=True)
-                        if result['stage'] == 'complete':
-                            break
-                    else:
-                        raise RuntimeError(f"repair incomplete: {result.get('errors', [])}")
-                if _stamp(source['path']) != source_stamp:
-                    raise ValueError('raw source changed during job')
-                exported = wiki_prompt.export(knowledge, output / 'prompt' / job['id'])
-                item.update(stage='complete', knowledge=str(knowledge), sha256=sha256_file(knowledge),
-                            records=exported['records'], packets=exported['packets'])
-            except Exception as exc:
-                item.update(stage='incomplete', error=f'{type(exc).__name__}: {exc}'[-1600:])
-            save()
-        state['active_job'] = None
+                    raise RuntimeError(f"repair incomplete: {result.get('errors', [])}")
+            if _stamp(source['path']) != source_stamp:
+                raise ValueError('raw source changed during job')
+            exported = wiki_prompt.export(knowledge, output / 'prompt' / job['id'])
+            return dict(stage='complete', knowledge=str(knowledge), sha256=sha256_file(knowledge),
+                        records=exported['records'], packets=exported['packets'])
+
+        wiki_job_pool.run_jobs(pending_jobs(), execute, object_workers=object_workers,
+                              state=state, save=save, max_jobs=max_jobs)
         complete = state['counts'].get('complete', 0)
         state['stage'] = 'complete' if complete == state['total'] else 'incomplete'
         state['coverage_gaps'] = manifest['summary']['gaps']

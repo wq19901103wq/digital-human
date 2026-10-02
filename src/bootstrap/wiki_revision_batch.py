@@ -7,7 +7,7 @@ import time
 
 from ..config import sha256_file
 from ..iteration.storage import file_lock, read_json, write_json
-from . import wiki_batch, wiki_delivery, wiki_prompt, wiki_revision, wiki_structured
+from . import wiki_batch, wiki_delivery, wiki_job_pool, wiki_prompt, wiki_revision, wiki_structured
 
 
 def locator(path):
@@ -17,6 +17,7 @@ def locator(path):
 LEGACY_RUNNER_SHA256 = 'd6db8d19f19e2f57091a39ca58302c28e0d42a6920bf7d73bfba51a4ac556641'
 SOURCE_CHECK_RUNNER_SHA256 = '03b4d8731658131b7af3e1e33894494bc4c2af09c0c81f907529acc68ecc476a'
 CLAIMS_DISPATCH_RUNNER_SHA256 = '736fde993739e55c34eeec297381842a2a9f9c7788619983d89f4f88f47bcb95'
+SERIAL_RUNNER_SHA256 = '0f465169abc187cd0eeec4e351b9946dd73952e72bbdd1b9eb89d63b3ec3e68f'
 
 
 def engine_for(name):
@@ -42,6 +43,10 @@ def pipeline(engine='legacy'):
 def compatible_pipeline(frozen, engine):
     current = pipeline(engine)
     if frozen == current:
+        return True
+    # Object scheduling changes concurrency only. Require exact identity of
+    # every semantic engine, prompt, model input and export dependency.
+    if frozen == (current | {Path(__file__).name: SERIAL_RUNNER_SHA256}):
         return True
     # Adding the claims engine leaves both existing engines byte-identical.
     # The new semantic engine has its own module binding and cannot use this alias.
@@ -105,10 +110,10 @@ def _job_input(manifest, job, binding, *, required=False):
     return path, frozen
 
 
-def run(output, *, workers=4, attempts=2, max_jobs=None, follow=False, client=None):
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, follow=False, client=None):
     """Review every newly completed source job, resume exact successful requests."""
-    if workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
-        raise ValueError('workers, attempts and optional max_jobs must be positive')
+    if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
+        raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
     output = Path(output).resolve()
     with file_lock(output / '.lock', blocking=False):
         state = read_json(output / 'progress.json')
@@ -119,7 +124,7 @@ def run(output, *, workers=4, attempts=2, max_jobs=None, follow=False, client=No
         def fail(exc):
             # Preserve successful jobs and caches so restored inputs can resume
             # with zero requests, but never report invalid inputs as complete.
-            state.update(stage='incomplete', active_job=None,
+            state.update(stage='incomplete', active_job=None, active_jobs=[],
                          error=f'{type(exc).__name__}: {exc}'[-1600:])
             save()
         try:
@@ -142,71 +147,72 @@ def run(output, *, workers=4, attempts=2, max_jobs=None, follow=False, client=No
         except (OSError, ValueError, KeyError, TypeError) as exc:
             fail(exc)
             raise
-        state.update(stage='running', pid=os.getpid(), active_job=None)
+        state.update(stage='running', pid=os.getpid(), active_job=None, active_jobs=[],
+                     object_workers=object_workers, workers=workers)
         state.pop('error', None)
         save()
         started, visited, cache = 0, set(), {}
-        while True:
-            previous = read_json(source / 'progress.json', default=dict(jobs={}))
+        def pending(previous):
             for job in manifest['jobs']:
                 prior = state['jobs'].get(job['id'], {})
                 saved = previous['jobs'].get(job['id'], {})
                 if job['id'] in visited:
                     continue
                 if prior.get('stage') == 'complete':
-                    try:
-                        _job_input(manifest, job, prior.get('revision_source'), required=True)
-                        wiki_delivery._require_revision_original(
-                            manifest, job['id'], prior.get('revision_source'))
-                        wiki_delivery._checked(source, source_jobs[job['id']], saved, cache)
-                        wiki_delivery._checked(output, job, prior, cache)
-                    except (OSError, ValueError, KeyError, TypeError) as exc:
-                        fail(exc)
-                        raise
+                    _job_input(manifest, job, prior.get('revision_source'), required=True)
+                    wiki_delivery._require_revision_original(
+                        manifest, job['id'], prior.get('revision_source'))
+                    wiki_delivery._checked(source, source_jobs[job['id']], saved, cache)
+                    wiki_delivery._checked(output, job, prior, cache)
                     visited.add(job['id'])
                     continue
                 if saved.get('stage') != 'complete':
                     continue
-                if max_jobs is not None and started >= max_jobs:
-                    break
-                started += 1
                 visited.add(job['id'])
-                item = state['jobs'][job['id']] = dict(stage='running', account=job['account'],
-                    attempts=prior.get('attempts', 0))
-                state['active_job'] = job['id']
-                save()
+                yield job
+
+        def execute(job, attempt):
+            saved = previous['jobs'][job['id']]
+            binding = dict(path=saved['knowledge'], sha256=saved['sha256'])
+            # Each worker has its own verification memo and per-job cache;
+            # the raw rows are loaded once and shared read-only.
+            checked = {}
+            wiki_delivery._require_revision_original(manifest, job['id'], binding)
+            wiki_delivery._checked(source, source_jobs[job['id']], saved, checked)
+            data = read_json(saved['knowledge'])
+            if any(data['coverage'][k] != manifest['messages'][k] for k in ('path', 'sha256')):
+                raise ValueError('knowledge and revision raw sources differ')
+            job_manifest, frozen = _job_input(manifest, job, binding)
+            write_json(job_manifest, frozen)
+            for retry in range(attempts):
+                attempt()
                 try:
-                    binding = dict(path=saved['knowledge'], sha256=saved['sha256'])
-                    wiki_delivery._require_revision_original(manifest, job['id'], binding)
-                    wiki_delivery._checked(source, source_jobs[job['id']], saved, cache)
-                    data = read_json(saved['knowledge'])
-                    if any(data['coverage'][k] != manifest['messages'][k] for k in ('path', 'sha256')):
-                        raise ValueError('knowledge and revision raw sources differ')
-                    job_manifest, frozen = _job_input(manifest, job, binding)
-                    write_json(job_manifest, frozen)
-                    for retry in range(attempts):
-                        item['attempts'] += 1
-                        save()
-                        try:
-                            revised = backend.revise(client, Path(job['output']), data, rows, workers)
-                            issues = wiki_delivery.content_issues(revised)
-                            if issues:
-                                raise ValueError(f'revised content needs source review: {issues}')
-                            break
-                        except Exception:
-                            if retry == attempts - 1:
-                                raise
-                    if (wiki_batch._stamp(manifest['messages']['path']) != source_stamp
-                            or locator(saved['knowledge']) != binding):
-                        raise ValueError('revision source changed while running')
-                    wiki_delivery._require_revision_original(manifest, job['id'], binding)
-                    item.update(export(output, job, revised), revision_source=binding,
-                                revision_counts=revised['semantic_revision']['counts'])
-                    wiki_delivery._checked(output, job, item, cache)
-                except Exception as exc:
-                    item.update(stage='incomplete', error=f'{type(exc).__name__}: {exc}'[-1600:])
-                state['active_job'] = None
-                save()
+                    revised = backend.revise(client, Path(job['output']), data, rows, workers)
+                    issues = wiki_delivery.content_issues(revised)
+                    if issues:
+                        raise ValueError(f'revised content needs source review: {issues}')
+                    break
+                except Exception:
+                    if retry == attempts - 1:
+                        raise
+            if (wiki_batch._stamp(manifest['messages']['path']) != source_stamp
+                    or locator(saved['knowledge']) != binding):
+                raise ValueError('revision source changed while running')
+            wiki_delivery._require_revision_original(manifest, job['id'], binding)
+            result = dict(export(output, job, revised), revision_source=binding,
+                          revision_counts=revised['semantic_revision']['counts'])
+            wiki_delivery._checked(output, job, result, checked)
+            return result
+
+        while True:
+            previous = read_json(source / 'progress.json', default=dict(jobs={}))
+            try:
+                started += wiki_job_pool.run_jobs(pending(previous), execute,
+                    object_workers=object_workers, state=state, save=save,
+                    max_jobs=None if max_jobs is None else max_jobs - started)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                fail(exc)
+                raise
             if (not follow or (max_jobs is not None and started >= max_jobs)
                     or not wiki_batch.status(source)['running']):
                 break
