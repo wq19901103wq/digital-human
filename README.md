@@ -410,9 +410,386 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 
 源码/文档改动的规则、链接与公开边界检查统一走 `scripts/check.py`；实验自身由原运行入口续跑、复用成功缓存并留下证据，不另写一次性校验流程，也不为技术解释重新抽题。
 
+### 12. 逐步代码对照：输入、执行频率、输出与成本
+
+以下均为 `f9866fd` 的**真实源码摘录**，不是伪代码；每段只摘对应步骤，完整分支见文件链接。源码行号会随后续提交变化，因此同时给出函数名。它们解释当前机制，不声称全部历史实验执行的都是当前 HEAD：transport 可以加载冻结的归档实现，实际运行还须看该任务的 runtime、配置和 profile。第 8 节的历史计时不是本次文档更新的新测量。
+
+#### 12.1 Data 建版：全量质量审计属于这里
+
+入口：[`src/bootstrap/history.py`](src/bootstrap/history.py) 的 `publish`。输入是新 Data 的池与来源材料，输出是 `data_quality.json` 和已 finalize 的版本。新建时必须通过审计，失败不能发布版本：
+
+```python
+        from .data_quality import audit, require_passed
+        quality = audit(directory)
+        write_json(directory / 'data_quality.json', quality)
+        require_passed(quality)
+        versions.finalize_data_version(vid)
+```
+
+**期望的运行边界**是：同一已批准且未改变的 Data，Gen/Judge 复用这份结论，不因生成或评判再次全量审计。**当前实现的差距**是：历史 retriever 初始化仍走 `few_shot.is_approved` 的池摘要、逐行结构/来源批准路径；材料入口也仍有冷启动全量检查。已有进程内复用并未完整实现跨启动复用。因此“Data 建版已经检查过”是取消重复静态审计的理由，不是现状已经没有重复检查的证明。
+
+还要区分**来源池的批准**和**后来学习出的模型材料的批准**：prompt、权重、ranker 可能晚于 Data 产生，Data 的原始质量报告不能单独证明这些新材料没有越过学习截止点。这类证明应在材料建版时建立、绑定并复用，而不是每题重建。
+
+#### 12.2 运行包装：哪些优化实际被装上
+
+入口：[`src/iteration/pack_transport.py`](src/iteration/pack_transport.py) 的 `main`。这几行建立完整召回缓存、独立源读取和材料证明复用的上下文：
+
+```python
+        retrieval_reuse = retrieval_cache.exact_retrieval_calls(shared_history, profile=profile) if retrieval_cache else nullcontext()
+        source_read_reuse = source_reader.source_reads(disk_history, retrievers=few_shot,
+                                                      profile=profile) if source_reader else nullcontext()
+        from src.iteration import learning_guard
+        material_validation_reuse = material_reuse.verified_materials(learning_guard, profile=profile,
+                                                                     disk_rows=disk_history)
+```
+
+后续 `with` 同时进入归档 runtime 路径、历史存储、上述复用包装、profile 与工作时间片，再 `runpy.run_path` 执行任务。**这些包装有明确作用域，不是任意运行一个脚本都会自动启用**。工作时间片到期只停止提交新题，等待在途题保存；入口准备、惰性初始化和排空均会增加进程墙钟。
+
+完整召回缓存实现见 [`retrieval_cache.py`](src/generator/retrieval_cache.py)：它缓存相同 retriever、参数与相关状态下的完整返回结果，不是词表倒排索引。容量上限为 128 项、4 MiB，同键锁避免同一请求重复计算/写入，不同键可以同时计算；命中仍检查来源状态。不同 query、不同题目边界不能仅因文字相似就当成同键复用。
+
+#### 12.3 Gen 进入学习选择：先召回，再特征和排序
+
+入口：[`src/generator/generator.py`](src/generator/generator.py) 的 `_style_block`。输入是当前题，输出是将渲染进回复提示词的完整示例：
+
+```python
+                from .learned_selection import recall
+                recalled = recall(self._retriever, case,
+                    source_overlap_policy=self._cfg.get('retriever', {}).get('source_overlap_policy'))
+                rows = self._learned.select(case, recalled,
+                    count=self._max_shots, budget=self._budget, retriever=self._retriever,
+                    check=self._check_sources)
+```
+
+`_max_shots` 与 `_budget` 是冻结配置中的最终示例数和字符预算，不是前面的扫描上限。学习选择关闭时还有普通召回等分支，不能把此路径当成所有 Gen 的唯一实现。
+
+#### 12.4 两路 query：每题最多召回 24 个候选
+
+入口：[`learned_selection.py`](src/generator/learned_selection.py) 的 `recall`。最近 3 条和最近 1 条上下文各走一次基础召回；`options` 中的 `limit=12` 限制每路**最终返回**条数：
+
+```python
+    for size in (3, 1):
+        query = '\n'.join(str(m.get('text', '')) for m in messages[-size:])
+        for rank, row in enumerate(retriever.retrieve(query=query, **options), 1):
+            require(eligible(row, case), 'Learned selector received an ineligible example')
+            if row['source_span']['end_timestamp'] >= case['input_cutoff']['timestamp']:
+                continue  # Frozen training features require strictly positive history age.
+            key = str(row['id'])
+            if key in candidates:
+                require(candidates[key][1] == row, 'Conflicting recalled example identity')
+                candidates[key] = (min(rank, candidates[key][0]), row)
+            else:
+                candidates[key] = (rank, row)
+```
+
+合并时按示例 ID 去重，保留较好召回名次，再按名次/ID 稳定排序。冻结的学习特征要求示例严格早于题目输入，故这里还有严格时间过滤。可选 `exclude_reply_in_context_v1` 在两路合并后移除回复来源已经出现在目标上下文的示例，**不补召回**。这些都是原选择条件，不能为了快悄悄改成一路或缩小候选数量。
+
+#### 12.5 terms：示例已经预计算，查询才按路计算
+
+入口：[`few_shot.py`](src/generator/few_shot.py) 的 `_terms`：
+
+```python
+def _terms(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", "", text.lower())
+    chars = [char for char in normalized if char.isalnum() or "\u4e00" <= char <= "\u9fff"]
+    singles = chars if len(chars) <= 12 else chars[:12]
+    return singles + ["".join(chars[i:i + 2]) for i in range(max(0, len(chars) - 1))]
+```
+
+`_load` 对历史示例执行下面这一行，保存其词频；**不是每题对每条示例重新 tokenize**：
+
+```python
+            terms_by_id[str(row["id"])] = Counter(_terms(" ".join(row["context"])))
+```
+
+`retrieve` 则对当前 query 构造 `Counter(_terms(query))`，每次真正召回计算一次。两路 query 不同，查询词频也可不同。这一小段不能解释几十秒的完整召回。
+
+磁盘模式把原 `_load` 生成的词频等特征存入 SQLite 的 `features` JSON；匹配绑定的持久索引可跨进程复用。读取已存词频时 `FeatureMap.__getitem__` 做的是：
+
+```python
+        value = self.reader.feature(identity)[self.name]
+        if self.name == '_terms_by_id':
+            return Counter(value)
+```
+
+这里仍会建一个 `Counter` 对象，但**没有重新从文本计算 terms**。问题在于“给每个 ID 保存词频”不等于“建 term → 候选 ID 的倒排索引”：当前仍需逐条找出哪个示例与查询相关。
+
+#### 12.6 按题隔离：当前确实先遍历整个历史池
+
+入口：[`few_shot.py`](src/generator/few_shot.py) 的 `retrieve`：
+
+```python
+            self._history_sources.validate(history_case)
+            allowed = {str(row['id']) for row in filter_rows(self._rows, history_case)}
+            exclude_ids = set(exclude_ids or ()) | {str(row['id']) for row in self._rows
+                                                   if str(row['id']) not in allowed}
+```
+
+[`history.py`](src/generator/history.py) 的 `filter_rows` 对所有行调用 `eligible`，检查当前题的截止点、排除聊天、示例来源是否与目标答案来源交叉等；随后又遍历全池组装排除 ID。输入是池与当前题，输出是本题允许/排除的 ID 集合；两路缓存均未命中时，这部分各做一次。
+
+这与静态质量审计不同：**某条历史对话合法，不代表它对每一道题都在时间之前，也不代表它不会包含这道题的目标回复**。逐题隔离不能直接删除，但没有必要用重复全池扫描实现。复用同题资格集合、利用时间/来源索引属于可评估的等价实现；本次只是说明，没有宣称已改好。
+
+#### 12.7 分桶：情境索引不是关键词检索索引
+
+入口：`PersonaFewShotRetriever._candidate_rows`。输入是群聊/私聊、规则情境和排除 ID；输出是将逐条打分的候选桶：
+
+```python
+            for situation in situations:
+                index = (
+                    self._rows_by_group_latest_situation
+                    if self.prioritize_latest_turn
+                    else self._rows_by_group_situation
+                )
+                for row in index.get((is_group, situation), []):
+                    if not excluded or str(row['id']) not in excluded:
+                        matched[str(row["id"])] = row
+            if matched:
+                return list(matched.values())
+        return [r for r in self._rows_by_group.get(is_group, []) if not excluded or str(r['id']) not in excluded]
+```
+
+有情境命中就合并对应桶；无命中可退回整个群聊/私聊桶。`retrieve` 中还存在精细情境和稀疏池等配置分支，以上是基础桶入口，而不是所有情况下的最终桶。这里没有按 term 取相关 ID，没有数据库相关性 Top-K；`limit=12` 不会在这里将桶截成 12 条。
+
+#### 12.8 磁盘读取：省常驻内存，但细粒度解码仍有成本
+
+入口：[`disk_history.py`](src/generator/disk_history.py) 的 `BoundedReader.row` / `feature`。正文通过源文件的 offset/size 定位：
+
+```python
+    def row(self, offset, size):
+        return self.cached(self.cache, offset,
+                           lambda: json.loads(os.pread(self.stream.fileno(), size, offset)))
+```
+
+特征按 ID 查询并解析整份特征 JSON：
+
+```python
+            records = self.query('SELECT features FROM examples WHERE id=? ORDER BY position DESC LIMIT 1',
+                                 (identity,))
+            if not records:
+                raise KeyError(identity)
+            return json.loads(records[0][0])
+```
+
+SQLite 有 `example_ids(id, position)` 索引，它加速**已知 ID 的特征查找**，不是按查询词寻找候选。原始正文、各类特征可按需读，内存仍留有头部、桶成员关系和行代理；不是所有东西都完全离开内存。扫描大量候选时，系统调用、SQL、JSON 解码和 Python 对象构造仍会积累成本，缓存命中则不一定真正访问磁盘。
+
+[`disk_source_reads.py`](src/generator/disk_source_reads.py) 的 `connection` 为每个 worker/thread 建自己的只读连接，不把一个共享 SQL 连接锁贯穿整次检索：
+
+```python
+            handle = sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True,
+                                     check_same_thread=False, cached_statements=32)
+            try:
+                handle.execute(f'PRAGMA cache_size=-{SQLITE_CACHE_KIB}')
+                handle.execute('PRAGMA mmap_size=0')
+                handle.execute('PRAGMA query_only=ON')
+```
+
+此包装的 `cached` 只保留该 worker 最近一条正文和一条特征，不是自制大容量正文 LRU。另有来源 offset 窗口复用；完整召回结果缓存是另一层，不能混成“词表 LRU”。资源登记/关闭仍有短锁，特征请求同键也有文件锁；只读不等于所有并发状态都没有保护，但这些锁不应被误称为整次检索串行锁。
+
+#### 12.9 粗排：逐候选读取、规则打分，之后才全桶排序
+
+入口：`PersonaFewShotRetriever.retrieve` 的候选循环：
+
+```python
+        for row in candidates:
+            if exclude_ids and str(row["id"]) in exclude_ids:
+                continue
+            sample_text = " ".join(row["context"])
+            sample_terms = self._terms_by_id[str(row["id"])]
+            overlap = sum(min(count, sample_terms.get(term, 0)) for term, count in query_terms.items())
+            length_similarity = 1.0 / (1.0 + abs(len(query) - len(sample_text)) / 20.0)
+            same_chat = bool(current_chat_id and row.get("chat_id") == current_chat_id)
+            same_relationship = bool(relationship and row.get("relationship") == relationship)
+            lexical_score = overlap / max(1, sum(query_terms.values()))
+```
+
+`sample_text` 用于长度等规则，`sample_terms` 用于词频重叠；不是向量相似度。情境、接话动作、参与结构、末条形态和同聊天偏好按冻结 flags 加分/排序，具体公式见第 3 节与该函数。部分规则 profile 会依 flags 重算，但示例 terms 不会因此重新 tokenize。
+
+所有候选完成打分后，`scored.sort` 按配置的动作/同聊天优先级、负相关性分数和 ID 做稳定排序。然后才进入多样性选择循环：笑类最多 2 条、同输入动作/接话动作组合最多 3 条，凑到 `limit` 就停止。**不是每读到一条就维护数据库 Top-K，也不是最多只打 12 个分数**。
+
+设历史池行数为 N、本路实际桶大小为 B，结构成本包括 `O(N)` 的资格扫描、`O(B)` 的候选读取/规则评分、`O(B log B)` 的排序；重叠计算还受查询词数影响。两路都未命中时会重复这些步骤。当前 profile 没有把实际 B、评分和排序分别计时，不能凭上述复杂度宣称哪一步独占了第 8 节的 84.31 秒。
+
+#### 12.10 语义特征：内容寻址缓存，缺失才调用特征模型
+
+入口：[`fewshot_ranker/extraction.py`](src/generator/fewshot_ranker/extraction.py) 的 `prepare`。这里的输入已经是最多 24 条合并候选，不再是全池：
+
+```python
+    for group in groups:
+        target_key = add('context', context_view(group['target']))
+        for entry in group['candidates']:
+            example = entry['example']
+            refs[(group['target_id'], example['id'])] = (target_key,
+                add('context', context_view(example, example=True)), add('reply', reply_view(example)))
+```
+
+目标只取允许的上下文字段，示例取其上下文和回复；不会把目标真人答案放进检索特征输入。`task` 对 kind、prompt、schema 和特征模型 identity 求摘要作为请求 key；`tasks` 字典按 key 合并，因此相同内容/配置可跨题复用。基础特征最多是 `1 + 2K` 个不同请求对象，K=24 时最多 49 个，**不等于每题实际发出 49 次模型请求**。启用冻结的 self-concern 特征时另有最多 `1 + K` 个补充对象。
+
+`extract_one` 的完整缓存优先路径如下；相同请求 key 的文件锁用来避免重复请求和并发写同一缓存文件：
+
+```python
+    with file_lock(directory / 'locks' / (key + '.lock')):
+        saved = cached(directory, key, request)
+        if saved is not None:
+            return saved
+        require(client.cache_identity() == request['client'], 'Feature client differs from frozen request')
+        raw = client.run(request['prompt'], request['schema'])
+        value = dict(key=key, features=schema.validate(request['kind'], json.loads(raw)), raw=raw,
+                     completed_at=time.time())
+        write_json(directory / (key + '.json'), {**value, 'payload_sha256': digest(value)})
+        return value['features']
+```
+
+`cached` 检查请求 key、结果 payload 摘要和特征 schema，命中返回已有特征；这属于单项结果完整性，不是重新审计 Data 全池。在线 `LearnedSelector.select` 当前是顺序遍历请求对象：
+
+```python
+        values = {key: extractor.extract_one(self.cache, key, task, self.client)
+                  for key, task in tasks.items()}
+        scores = score_document(self.model, feature_rows(case, rows, refs, values,
+            transform=self.model.get('feature_transform')))
+```
+
+离线特征提取工具的 workers 参数不会自动让这个在线循环并行。多题 worker 可以重叠执行，但单题多个缺失特征仍可串行等待模型。启用补充特征时 `extractor` 换成 supplemental 路径，仍按此编排读取/提取。基础召回、本地规则特征、语义特征请求和 Judge 不是同一阶段。
+
+#### 12.11 本地特征交叉与 XGBoost 精排
+
+入口：`learned_selection.feature_rows`。每个候选把已读/提取的语义特征与本地统计拼成一行：
+
+```python
+        row = combine(case, example,
+            {**values[tk], **context_local(case)},
+            {**values[ck], **context_local(example, example=True)},
+            {**values[rk], **reply_local(example)})
+        row = crosses.expand(row)
+        row['id_cross.chat_id'] = identity_crosses.pair(row, 'target.chat_id', 'example_context.chat_id')
+```
+
+[`features.py`](src/generator/fewshot_ranker/features.py) 负责上下文/回复本地统计与合并；[`crosses.py`](src/generator/fewshot_ranker/crosses.py) 对指定类别组合及相同上下文字段做交叉，不是把所有字段任意两两组合。冻结 transform 可再加 reply-action/self-concern 交叉，不能在续跑中改变。这一阶段输出的是特征字典，不请求模型。
+
+[`boosting.py`](src/generator/fewshot_ranker/boosting.py) 的 `score_document` 用训练时冻结的词汇表做稀疏编码，加载 Booster，输出每个候选的 margin：
+
+```python
+    vectorizer = DictVectorizer(sparse=True, sort=True)
+    vectorizer.vocabulary_, vectorizer.feature_names_ = value['vocabulary'], value['feature_names']
+    model = xgb.Booster(params={'nthread': 1})
+    model.load_model(bytearray(json.dumps(value['booster']).encode()))
+    return model.predict(xgb.DMatrix(vectorizer.transform(rows), nthread=1), output_margin=True)
+```
+
+这是本地预测，不是重新训练，也不是另一次大模型排序请求。当前代码每次调用重建 vectorizer、加载 Booster，仍有可分开的初始化成本；尚无独立计时支持将它认定为主要瓶颈。`ranker_reconstruction` 的 618.72 秒是下面的**来源证明重建**，不能误读为这段预测耗时。
+
+#### 12.12 最终选择：完整示例预算，不裁剪来凑数
+
+入口：`learned_selection.choose`。先按精排分数降序、ID 打破平局，按上下文/回复内容摘要和来源摘要去重，检查数量上限，然后试渲染加入新示例后的完整块：
+
+```python
+        proposed = [*selected, row]
+        block, ids = retriever.render_selected(proposed, max_chars=budget)
+        if ids != [x['id'] for x in proposed] or len(block) > budget:
+            detail['decision'] = 'budget'
+            continue
+        detail.update(decision='selected', combined_chars=len(block))
+        selected.append(row)
+        content_seen.add(content)
+        source_seen.add(source)
+```
+
+输出最多 `count` 个完整示例；有重复、预算不够或候选不足时可以更少。渲染与摘要是本地工作，不发模型请求。拒绝超预算不意味着重新召回，也不能为提速悄悄截断示例正文。
+
+#### 12.13 回复、Judge、补判与成功结果保存
+
+入口：`PersonaGenerator.build_prompt` / `generate`。组装前验证当前题来源，保证静态材料早于题目截止点；提示词使用 `prompt_case(case)`，避免目标答案进入生成输入。`generate` 选择群聊/私聊回复客户端，并以客户端 identity、完整 messages、强制回复条件和解析代码摘要寻址缓存：
+
+```python
+        result = cache.memo("generation", {"client": identity, "messages": messages,
+                            "forced_reply": forced_reply, "parser": cache.code_digest(__file__)} if identity else None,
+                            lambda: self._generate(messages, client, forced_reply))
+```
+
+缓存缺失才进入实际回复请求；返回后必须检查 JSON、非空字符串数组和条数，无效输出最多按该实现再请求一次。这是模型输出有效性检查，不是全量 Data 审计；无法以“数据建版已校验”为由去掉。
+
+现行通用入口 [`src/iteration/runner.py`](src/iteration/runner.py) 的 `run_gen_experiment` / `_run_gen_experiment` 内部 `evaluate`，对同题的基线和候选分别生成，再交给绑定 Judge：
+
+```python
+            base = progress.generate(baseline_gen, case, 'baseline', proto['force_reply'])
+            cand = progress.generate(cand_gen, case, 'candidate', proto['force_reply'])
+            record.update(
+                baseline_replies=base['replies'], candidate_replies=cand['replies'],
+                baseline_latency_ms=base['latency_ms'], candidate_latency_ms=cand['latency_ms'],
+                identified_baseline=progress.judge(judge, case, base['replies'], 'baseline'),
+                identified_candidate=progress.judge(judge, case, cand['replies'], 'candidate'),
+                flip_verified=None,
+            )
+```
+
+判定不同且协议要求时，runner 按冻结的 `flip_extra_rounds` 补独立生成/判定，不是只多问同一个 Judge 结果。具体 Judge 模式与缓存/独立轮次条件由绑定版本和运行协议决定。transport 归档入口可能有不同编排，不能用这段 HEAD 源码替代历史任务的冻结协议。
+
+同一入口续跑只排除已成功题，失败保留为可重试；完成记录统一经 `record_contract.writer` 保存：
+
+```python
+    final, _ = _final_records(cases_jsonl)
+    done = {cid: r for cid, r in final.items() if r.get('status') == 'ok'}
+    pending = [(i, case) for i, case in enumerate(cases, 1) if str(case['case_id']) not in done]
+    _progress.stage('parallel' if workers > 1 else 'preparing')
+    with record_contract.writer(exp_dir) as append:
+        for record in completed_map(evaluate, pending, workers):
+            seal.check()
+            append(record)
+            _progress.completed(record)
+```
+
+worker 数影响并行题数，不消除单题内顺序步骤。完成后按最终逐题记录汇总并走原协议决策；同对测量重放也经既有入口，不为 profile 或文档重新跑成功题。
+
+#### 12.14 学习材料与 ranker 证明：为什么仍耗时、哪些应当复用
+
+入口：[`learning_guard.py`](src/iteration/learning_guard.py) 的 `require_materials`。当前冷启动先检查静态学习来源，再列出模型材料目录的实际文件集，逐文件核对绑定摘要；以下是其中的文件检查，不是 Data 建版审计：
+
+```python
+        actual = {str(p.relative_to(directory)) for p in directory.rglob('*')
+                  if p.is_file() and str(p.relative_to(directory)) not in
+                  ('learning.json', 'config.json', 'meta.json')}
+        if not bound or set(bound) != actual:
+            raise ConfigError('来源证明未覆盖全部实际学习资产')
+        for name, digest in bound.items():
+            path = directory / name
+            if (Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink()
+                    or not path.is_file() or sha256_file(path) != digest):
+                raise ConfigError('实际学习资产与来源证据不符')
+```
+
+若资产包含 ranker provenance，再调用 [`learned_sources.py`](src/generator/learned_sources.py) 的 `verify`：读取来源声明，`reconstruct` 核对原研究的完成材料、来源证据、模型摘要、信息截止点，并与已绑定证明比较。它不拟合新 ranker、不调用 LLM；冷启动扫描/哈希大量证据仍可很慢。这里有进程内已验证重建缓存，但不是完整的跨重启证明复用。
+
+[`material_reuse.py`](src/iteration/material_reuse.py) 的 `verified_materials` 将首次全量结论存在本次上下文内，后续复用时检查 seal 和 evidence stamps：
+
+```python
+    original = module.require_materials
+    entries = {}
+    registry = Lock()
+```
+
+```python
+    def reuse(saved):
+        seal, stamps, audit = saved
+        with timing('material_validation_reuse_check'):
+            seal.check()
+            check_stamps(module, stamps)
+        return copy.deepcopy(audit)
+```
+
+`entries` 在上下文建立时新建，退出后不提供跨进程持久命中。`MaterialSeal.check` 仍递归列文件并比较状态，文件多时“只检查有没有变化”也不便宜。它与全量哈希/来源重建不是同一操作，但当前 profile 中累计 1881.44 秒，不能称作常数开销。
+
+因此应分别回答三个问题：
+
+| 检查 | 为什么存在 | 适合的生命周期 | 当前未解决的成本 |
+|---|---|---|---|
+| 池结构、来源一致性、全量质量 | 证明这份 Data 本身可用 | Data 建版，未改变时复用 | retriever 冷启动仍可能重复全池批准 |
+| 学习材料、ranker 来源证明 | 证明后生成的 prompt/模型来自允许的学习材料 | 材料建版并绑定；不变时复用 | 冷启动全哈希/来源重建，跨启动复用未完整落实 |
+| 本题时间、聊天用途、答案来源隔离 | 同一材料对不同题的可用性不同 | 每题，宜用索引或等价复用实现 | 当前全池资格扫描与重复来源读取 |
+| 运行中文件/证据变化 | 防止读取期间绑定材料被替换 | 沿用入口证明，做必要变化检测 | seal 的目录遍历仍反复发生 |
+| 模型输出/单项缓存完整性 | 输出可能无效，缓存可能损坏或条件不同 | 新结果或读取单项缓存时 | 不应与全量静态审计混称 |
+
+**不应保留的重复工作是：条件未变却在 Gen/Judge 入口反复全量批准同一 Data、重建同一材料证明。不能删除的是数据边界本身和逐题条件。** 本次仅补齐实现说明与源码对照，没有把这些未完成改造或新测速写成已完成，也没有恢复实验或 Wiki。
+
 ## 文档索引
 
-- [检索与实验性能：完整技术说明](#检索与实验性能完整技术说明) —— 召回、特征、排序、磁盘/锁、校验及逐项 profile
+- [检索与实验性能：完整技术说明](#检索与实验性能完整技术说明) —— 召回、特征、排序、磁盘/锁、校验、逐项 profile 及逐步骤真实代码摘录
 - `docs/SOP.md` —— 流程约束与合法步骤（唯一权威流程）
 - `docs/ARCHITECTURE.md` / `docs/DATA_MODEL.md` —— 架构与数据模型
 - `docs/IMPLEMENTATION.md` —— 文件格式、状态机、校验细节
