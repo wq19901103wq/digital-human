@@ -10,12 +10,13 @@ import sys
 # takes effect. Keep local numeric work bounded; request workers remain parallel.
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.iteration import learned_gen, versions
+from src.iteration import experiment, learned_gen, pack_transport, versions
+from src.iteration.storage import read_json
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'start', 'status'])
+    parser.add_argument('command', choices=['run', 'start', 'status', 'features'])
     parser.add_argument('--instance', required=True)
     parser.add_argument('--output', type=Path, required=True)
     selector = parser.add_mutually_exclusive_group()
@@ -34,6 +35,17 @@ def main():
     args = parser.parse_args()
     versions.switch_instance(args.instance)
     if args.command == 'status':
+        result = learned_gen.status(args.output)
+    elif args.command == 'features':
+        if any((args.model, args.candidate, args.base, args.source_branch, args.name, args.data)):
+            parser.error('features reuses the existing output; no new comparison inputs allowed')
+        state = read_json(args.output / 'state.json')
+        directory = experiment.load_experiment(state['experiment'])
+        code = pack_transport.launch(directory, instance=args.instance, job=directory.name,
+            workers=args.feature_workers if args.feature_workers is not None else args.workers,
+            seconds=args.timeout, kind='features', feature_output=args.output)
+        if code:
+            raise SystemExit(code)
         result = learned_gen.status(args.output)
     else:
         if not all((args.base, args.name, args.data)) or not (args.model or args.candidate):

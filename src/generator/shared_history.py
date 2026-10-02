@@ -13,10 +13,9 @@ def file_stamp(path):
 
 
 class PinnedRetriever:
-    """Serialize original retrieval methods; per-case exclusion stays outside."""
+    """Share a fully initialized frozen index; keep per-call source guards."""
 
     def __init__(self, original, path, inputs):
-        self._lock = RLock()
         files = (path, path.with_name('report.json'))
         self._stamps = {p: file_stamp(p) for p in files}
         for p in files:
@@ -28,7 +27,7 @@ class PinnedRetriever:
         if self._original.history_policy != 'complete_before_input_v1':
             raise ConfigError('共享索引仅用于当前完整历史回放')
         self._check()
-        print('history index loaded once; original retrieval serialized', flush=True)
+        print('history index loaded once; frozen retrieval shared across workers', flush=True)
 
     def _check(self):
         if any(file_stamp(p) != stamp for p, stamp in self._stamps.items()):
@@ -38,23 +37,20 @@ class PinnedRetriever:
         return getattr(self._original, name)
 
     def is_approved(self):
-        with self._lock:
-            self._check()
-            return True
+        self._check()
+        return True
 
     def retrieve(self, **kwargs):
-        with self._lock:
-            self._check()
-            rows = self._original.retrieve(**kwargs)
-            self._check()
-            return rows
+        self._check()
+        rows = self._original.retrieve(**kwargs)
+        self._check()
+        return rows
 
     def render_selected(self, rows, max_chars=2500):
-        with self._lock:
-            self._check()
-            result = self._original.render_selected(rows, max_chars=max_chars)
-            self._check()
-            return result
+        self._check()
+        result = self._original.render_selected(rows, max_chars=max_chars)
+        self._check()
+        return result
 
 
 @contextmanager

@@ -1,6 +1,7 @@
 """Sharing an index must preserve per-thread exclusions and reject source changes."""
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -77,3 +78,51 @@ def test_wrong_frozen_content_or_render_pool_rejected(tmp_path, monkeypatch):
         with pytest.raises(ConfigError, match='冻结内容不符'):
             runtime.generator.PersonaFewShotRetriever(path=pool)
     assert loaded == []
+
+
+@pytest.mark.parametrize('method', ['retrieve', 'render_selected'])
+def test_frozen_retrieval_and_render_calls_overlap(tmp_path, monkeypatch, method):
+    pool, _, inputs, loaded, original = fixture(tmp_path, monkeypatch)
+    barrier = Barrier(4)
+    original_method = getattr(original, method)
+
+    def parallel(instance, *args, **kwargs):
+        barrier.wait(timeout=5)
+        return original_method(instance, *args, **kwargs)
+
+    monkeypatch.setattr(original, method, parallel)
+    with runtime.shared_history_index(inputs):
+        instance = runtime.generator.PersonaFewShotRetriever(path=pool)
+
+        def work(number):
+            if method == 'retrieve':
+                return instance.retrieve(exclude_ids={'b', 'c'})
+            return instance.render_selected([{'id': 'a'}], max_chars=100)
+
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            results = list(workers.map(work, range(4)))
+        assert results == ([[{'id': 'a'}]] * 4 if method == 'retrieve' else
+                           [(str([{'id': 'a'}]), ['a'])] * 4)
+        assert len(loaded) == 1
+
+
+@pytest.mark.parametrize('changed', ['pool', 'report'])
+@pytest.mark.parametrize('method', ['retrieve', 'render_selected'])
+def test_file_changed_during_original_call_is_rejected(tmp_path, monkeypatch, changed, method):
+    pool, report, inputs, _, original = fixture(tmp_path, monkeypatch)
+    original_method = getattr(original, method)
+    target = pool if changed == 'pool' else report
+
+    def changing(instance, *args, **kwargs):
+        result = original_method(instance, *args, **kwargs)
+        target.write_text('changed during call')
+        return result
+
+    monkeypatch.setattr(original, method, changing)
+    with runtime.shared_history_index(inputs):
+        instance = runtime.generator.PersonaFewShotRetriever(path=pool)
+        with pytest.raises(ConfigError, match='文件发生变化'):
+            if method == 'retrieve':
+                instance.retrieve(exclude_ids=set())
+            else:
+                instance.render_selected([{'id': 'a'}], max_chars=100)

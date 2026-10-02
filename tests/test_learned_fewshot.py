@@ -22,6 +22,208 @@ def example(identity, i=1):
     return dict(record(i), id=identity)
 
 
+@pytest.fixture
+def saved_features(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.config import sha256_file
+    from src.generator.fewshot_ranker import concern
+    from src.generator.fewshot_ranker.features import context_view
+    from src.generator.history_sources import digest
+    from src.iteration import pack_transport, runtime
+
+    root = tmp_path / 'instance'
+    data, candidate = root / 'data/d-test', root / 'generators/g-test'
+    directory, output = root / 'experiments/smoke', root / 'analysis/features'
+    source = tmp_path / 'source'
+    code = source / 'src/frozen.py'
+    code.parent.mkdir(parents=True)
+    code.write_text('value = 1\n')
+    data.mkdir(parents=True)
+    for name in ('messages.jsonl', 'purposes.json', 'fewshot_pool.jsonl', 'report.json'):
+        (data / name).write_text('{}')
+    write_json(candidate / 'config.json', {'retriever': {}})
+    write_json(candidate / 'ranker/model.json', {'model': 'frozen'})
+    materials = {str(candidate): {str(path.relative_to(candidate)): sha256_file(path)
+                                 for path in candidate.rglob('*') if path.is_file()}}
+    spec = dict(kind='gen_ab', data_ref='d-test', candidate_ref='g-test', baseline_ref='g-base',
+                learning_snapshot={'materials': materials})
+    write_json(directory / 'spec.json', spec)
+    write_json(directory / 'state.json', {'status': 'pending'})
+    write_json(output / 'manifest.json', dict(data='d-test', base='g-base', name='branch',
+                                             policy=learned_gen.POLICY))
+    write_json(output / 'state.json', dict(experiment='smoke', candidate='g-test', branch='branch',
+                                          status='needs_attention', error='previous failure'))
+    calls, hooks = [], []
+    class Client:
+        def cache_identity(self):
+            return {'model': 'frozen'}
+
+        def run(self, prompt, schema):
+            calls.append(prompt)
+            if hooks:
+                hooks.pop(0)()
+            return json.dumps(dict(self_concern_state='concern',
+                later_incoming_basis='reassurance_or_opinion', self_positions=[0], incoming_positions=[1]))
+
+    selector = SimpleNamespace(client=Client(), cache=root / 'cache',
+                               proof={'feature_identity': {'model': 'frozen'}})
+    cases, tasks = [], {}
+    for index in range(2):
+        case = record(10 + index)
+        case['context'][0].update(is_self=True, text=f'担心{index}')
+        case['context'][1]['text'] = '会好的'
+        cases.append(case)
+        key, request = concern.task(context_view(case), selector.client.cache_identity())
+        tasks[key] = request
+    monkeypatch.setattr(versions, 'PRIVATE', root)
+    monkeypatch.setattr(versions, 'generator_dir', lambda ref: candidate)
+    monkeypatch.setattr(versions, 'data_version_dir', lambda ref: data)
+    monkeypatch.setattr(versions, 'load_generator', lambda ref: {'config': read_json(candidate / 'config.json')})
+    monkeypatch.setattr(learned_gen, 'ROOT', source)
+    monkeypatch.setattr(learned_gen, 'LearnedSelector', lambda *args: selector)
+    monkeypatch.setattr(learned_gen.datasets, 'rows_for', lambda value: cases)
+    monkeypatch.setattr(runtime, 'require_current', lambda path: [code])
+    binding, _, _ = learned_gen.recall_binding(spec, cases, {}, selector, data)
+    checkpoint = output / 'features/recall_tasks.json'
+    saved = dict(binding=binding, completed=len(cases), tasks=tasks)
+    write_json(checkpoint, {**saved, 'payload_sha256': digest(saved)})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('feature completion must not recall, load history, prepare or advance')
+
+    monkeypatch.setattr(pack_transport, 'history_memory_lane', forbidden)
+    monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', forbidden)
+    monkeypatch.setattr(learned_gen, 'prepare', forbidden)
+    monkeypatch.setattr(branches, 'advance', forbidden)
+    return SimpleNamespace(directory=directory, output=output, selector=selector, tasks=tasks,
+        checkpoint=checkpoint, calls=calls, hooks=hooks, data=data, candidate=candidate, code=code,
+        run=lambda: pack_transport.complete_saved_features(directory, output, 1))
+
+
+def test_saved_features_only_fills_missing_cache_without_advancing(saved_features):
+    from src.generator.fewshot_ranker import supplemental
+    value = saved_features
+    key, request = next(iter(value.tasks.items()))
+    supplemental.extract_one(value.selector.cache, key, request, value.selector.client)
+    saved_cache = (value.selector.cache / (key + '.json')).read_bytes()
+    checkpoint = value.checkpoint.read_bytes()
+    experiment_state = (value.directory / 'state.json').read_bytes()
+    value.run()
+    assert len(value.calls) == 2
+    state = read_json(value.output / 'state.json')
+    assert state['status'] == 'features_ready' and 'error' not in state
+    progress = read_json(value.output / 'features/feature_progress.json')
+    assert progress['completed'] == 2 and progress['reused'] == 1
+    value.run()
+    assert len(value.calls) == 2
+    assert read_json(value.output / 'features/feature_progress.json')['reused'] == 2
+    assert (value.selector.cache / (key + '.json')).read_bytes() == saved_cache
+    assert value.checkpoint.read_bytes() == checkpoint
+    assert (value.directory / 'state.json').read_bytes() == experiment_state
+
+
+@pytest.mark.parametrize('changed', ['binding', 'payload', 'incomplete', 'task_key', 'client',
+                                   'material', 'extra_material', 'source', 'code', 'manifest', 'state'])
+def test_saved_features_rejects_changed_inputs_before_extraction(saved_features, monkeypatch, changed):
+    from src.generator.history_sources import digest
+    value = saved_features
+    saved = read_json(value.checkpoint)
+    if changed == 'binding':
+        saved['binding'] = 'changed'
+    elif changed == 'incomplete':
+        saved['completed'] -= 1
+    elif changed == 'task_key':
+        saved['tasks']['changed'] = saved['tasks'].pop(next(iter(saved['tasks'])))
+    elif changed == 'client':
+        key = next(iter(saved['tasks']))
+        request = {**saved['tasks'].pop(key), 'client': {'model': 'other'}}
+        saved['tasks'][digest(request)] = request
+    elif changed in {'material', 'extra_material'}:
+        path = value.candidate / ('ranker/model.json' if changed == 'material' else 'extra.json')
+        write_json(path, {'changed': True})
+    elif changed == 'source':
+        (value.data / 'messages.jsonl').write_text('changed')
+    elif changed == 'code':
+        value.code.write_text('changed')
+    elif changed in {'manifest', 'state'}:
+        path = value.output / (changed + '.json')
+        write_json(path, {**read_json(path), 'base': 'other', 'candidate': 'other'})
+    saved.pop('payload_sha256')
+    write_json(value.checkpoint, {**saved, 'payload_sha256': 'bad' if changed == 'payload' else digest(saved)})
+    monkeypatch.setattr(learned_gen.extraction, 'run',
+                        lambda *args, **kwargs: pytest.fail('must not extract changed inputs'))
+    with pytest.raises(ConfigError):
+        value.run()
+    assert not value.calls
+
+
+@pytest.mark.parametrize('target', ['output', 'directory'])
+@pytest.mark.parametrize('during', [False, True])
+def test_saved_features_honors_both_job_cancellations(saved_features, target, during):
+    from src.iteration import control
+    value = saved_features
+    original_check = control.check
+    path = getattr(value, target)
+    if during:
+        value.hooks.append(lambda: control.cancel(path))
+    else:
+        control.cancel(path)
+    with pytest.raises(control.StopRequested):
+        value.run()
+    assert control.check is original_check
+    assert len(value.calls) == int(during)
+    assert not list(value.selector.cache.glob('*.json'))
+    assert read_json(value.directory / 'state.json')['status'] == 'pending'
+
+
+@pytest.mark.parametrize('target', ['output', 'directory'])
+def test_saved_features_requires_exclusive_output_and_experiment(saved_features, target):
+    from concurrent.futures import ThreadPoolExecutor
+    from src.iteration.storage import LockBusy, file_lock
+    value = saved_features
+    with file_lock(getattr(value, target) / '.run.lock', blocking=False), \
+            ThreadPoolExecutor(max_workers=1) as executor:
+        with pytest.raises(LockBusy):
+            executor.submit(value.run).result(timeout=10)
+    assert not value.calls
+
+
+def test_saved_features_failure_preserves_cache_and_restores_control(saved_features):
+    from src.iteration import control
+    from src.generator.fewshot_ranker import supplemental
+    value = saved_features
+    key, request = next(iter(value.tasks.items()))
+    supplemental.extract_one(value.selector.cache, key, request, value.selector.client)
+    saved_cache = (value.selector.cache / (key + '.json')).read_bytes()
+    original_check = control.check
+
+    def fail():
+        raise RuntimeError('temporary provider failure')
+
+    value.hooks.extend([fail] * 3)
+    with pytest.raises(ConfigError, match='incomplete'):
+        value.run()
+    assert read_json(value.output / 'state.json')['status'] == 'needs_attention'
+    assert control.check is original_check
+    assert (value.selector.cache / (key + '.json')).read_bytes() == saved_cache
+    assert read_json(value.directory / 'state.json')['status'] == 'pending'
+    value.run()
+    assert len(value.calls) == 5
+
+
+@pytest.mark.parametrize('target', ['data', 'candidate', 'code'])
+def test_saved_features_rejects_source_changes_during_request(saved_features, target):
+    value = saved_features
+    path = {'data': value.data / 'messages.jsonl', 'candidate': value.candidate / 'ranker/model.json',
+            'code': value.code}[target]
+    value.hooks.append(lambda: path.write_text('changed'))
+    with pytest.raises(ConfigError, match='incomplete'):
+        value.run()
+    assert len(value.calls) == 1
+    assert not list(value.selector.cache.glob('*.json'))
+    assert read_json(value.directory / 'state.json')['status'] == 'pending'
+
+
 def test_serving_reads_frozen_transport_config(tmp_path, monkeypatch):
     identity = {'model': 'frozen'}
     config = {'provider': 'codex_cli', 'timeout_seconds': 360}
