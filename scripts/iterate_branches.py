@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+os.environ.setdefault('OMP_NUM_THREADS', '1')
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -37,7 +39,10 @@ def main():
     run.add_argument("--workers", type=int, default=4)
     run.add_argument("--max-attempts", type=int, default=3)
     run.add_argument('--timeout-seconds', type=float, help='提高 ChatClient 等待下限，保留冻结请求与断点')
+    run.add_argument('--branch', action='append', help='只推进指定的已有分支；可重复指定')
+    run.add_argument('--time-slice-seconds', type=float, help='每轮到时停止提交新题，落盘全部在途题后轮换')
     run.add_argument("--once", action="store_true", help="只推进/调度一次，已启动的子进程继续运行")
+    run.add_argument('--wait', action='store_true', help='配合 --once 等待本轮子进程落盘并回收，不启动下一轮')
     sub.add_parser("status", help="只读查看各分支及任务状态")
     limit = sub.add_parser('limit', help='持久设置分支自动推进的阶段上限')
     limit.add_argument('--name', required=True)
@@ -79,7 +84,8 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "run":
         scheduler.Scheduler(max_experiments=args.max_experiments, workers=args.workers,
-                            max_attempts=args.max_attempts, timeout_seconds=args.timeout_seconds).run(once=args.once)
+                            max_attempts=args.max_attempts, timeout_seconds=args.timeout_seconds,
+                            branch_names=args.branch, time_slice_seconds=args.time_slice_seconds).run(once=args.once, wait=args.wait)
     elif args.command == 'limit':
         branches.set_stage_limit(args.name, args.stage)
     elif args.command == "status":

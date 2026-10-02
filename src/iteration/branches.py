@@ -633,6 +633,10 @@ def advance(name: str | None = None) -> list[dict]:
             record.update(blocked_phase=record['phase'], phase="blocked", reason=str(exc))
             _save_round(record)
     # 同一轮 tick 的后一个分支可能刚推全；不要再启动前面收集的旧基线任务。
+    return fresh_jobs(jobs)
+
+
+def fresh_jobs(jobs: list[dict]) -> list[dict]:
     current = basis()
     def fresh(job):
         if job["kind"] == "experiment":

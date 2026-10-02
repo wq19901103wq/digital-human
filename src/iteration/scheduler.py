@@ -17,11 +17,14 @@ def _load(path):
 
 
 def _active(job, metadata):
-    return jobs.snapshot(job, metadata)['active']
+    return jobs.snapshot(job, metadata)['active'] or bool(
+        metadata.get('process_start') and
+        task_state.active({**metadata, 'status': 'running'}))
 
 
 class Scheduler:
-    def __init__(self, *, max_experiments=2, workers=4, max_attempts=3, retry_delay=30, timeout_seconds=None):
+    def __init__(self, *, max_experiments=2, workers=4, max_attempts=3, retry_delay=30, timeout_seconds=None,
+                 branch_names=None, time_slice_seconds=None):
         if not 1 <= max_experiments <= 16 or not 1 <= workers <= 16 or max_attempts < 1 or retry_delay < 0:
             raise ConfigError("实验并发数和题目并发数须为 1–16，最大尝试次数至少 1，重试间隔非负")
         self.max_experiments = max_experiments
@@ -31,6 +34,16 @@ class Scheduler:
         self.children = {}
         from .pack_transport import timeout_value
         self.timeout_seconds = timeout_value(timeout_seconds) if timeout_seconds is not None else None
+        self.branch_names = tuple(dict.fromkeys(branch_names)) if branch_names else None
+        for name in self.branch_names or ():
+            branches._name(name)
+            if not (versions.PRIVATE / 'branches' / name / 'state.json').is_file():
+                raise ConfigError(f'Unknown branch: {name}')
+        from .pack_transport import time_slice_value
+        self.time_slice_seconds = (time_slice_value(time_slice_seconds)
+                                   if time_slice_seconds is not None else None)
+        if self.time_slice_seconds is not None and self.timeout_seconds is None:
+            raise ConfigError('time slices require frozen transport --timeout-seconds')
 
     def _reap(self):
         for key, (job, process) in list(self.children.items()):
@@ -43,6 +56,8 @@ class Scheduler:
             state = _load(jobs.directory(job) / 'state.json')
             if state.get('status') == 'needs_attention':
                 metadata.update(status='needs_attention', reason=state.get('reason', state.get('phase')))
+            if result == 75 and state.get('reason') == 'time_slice_complete':
+                metadata.update(status='queued', attempts=max(0, metadata.get('attempts', 1) - 1))
             write_json(path, metadata)
             del self.children[key]
 
@@ -52,15 +67,20 @@ class Scheduler:
 
     def _tick(self) -> list[dict]:
         self._reap()
-        pending = branches.advance() + training.pending()
+        pending = (branches.fresh_jobs([job for name in self.branch_names for job in branches.advance(name)])
+                   if self.branch_names else branches.advance() + training.pending())
         # Explicit retries also cover standalone packs and direct experiments.
-        for path in (versions.PRIVATE / 'scheduling').glob('*.json'):
+        retry_paths = () if self.branch_names else (versions.PRIVATE / 'scheduling').glob('*.json')
+        for path in retry_paths:
             metadata = _load(path)
             if metadata.get('job') and metadata.get('status') in {'queued', 'submitted', 'launch_failed'}:
                 if not jobs.snapshot(metadata['job'], metadata)['finished']:
                     pending.append(metadata['job'])
         pending = list({(job['kind'], job['id']): job for job in pending}.values())
-        active = set()
+        if self.time_slice_seconds is not None:
+            pending.sort(key=lambda job: _load(jobs.metadata_path(job)).get('launched_at', 0))
+        selected = {(job['kind'], job['id']) for job in pending}
+        active = set(self.children)
         # 计算本实例所有在途任务，包括旧入口启动的实验；不会接管它们的晋升。
         for kind, folder in jobs.FOLDERS.items():
             for directory in (versions.PRIVATE / folder).glob("*"):
@@ -70,6 +90,8 @@ class Scheduler:
                 metadata = _load(jobs.metadata_path(job))
                 if _active(job, metadata):
                     active.add((kind, directory.name))
+                    if self.branch_names and (kind, directory.name) not in selected:
+                        continue
                     try:
                         control.check(directory)
                     except control.StopRequested as exc:
@@ -125,6 +147,8 @@ class Scheduler:
                            '--snapshot', str(snapshot), '--instance', versions.PRIVATE.name,
                            '--kind', job['kind'], '--job', job['id'], '--workers', str(self.workers),
                            '--timeout-seconds', str(self.timeout_seconds)]
+                if self.time_slice_seconds is not None and job['kind'] == 'experiment':
+                    command.extend(['--time-slice-seconds', str(self.time_slice_seconds)])
             metadata.update(job=job, attempts=metadata.get("attempts", 0) + 1,
                             launched_at=time.time(), status="submitted")
             write_json(jobs.metadata_path(job), metadata)
@@ -148,14 +172,20 @@ class Scheduler:
             slots -= 1
         return launched
 
-    def run(self, *, once=False, poll_seconds=5):
+    def run(self, *, once=False, wait=False, poll_seconds=5):
         if poll_seconds <= 0:
             raise ConfigError("轮询间隔必须为正数")
+        if wait and not once:
+            raise ConfigError('wait requires once')
         with file_lock(versions.PRIVATE / ".scheduler.lock", blocking=False):
             while True:
                 for job in self.tick():
                     print(f"已调度 {job['kind']}: {job['id']}", flush=True)
                 if once:
+                    while wait and self.children:
+                        self._reap()
+                        if self.children:
+                            time.sleep(poll_seconds)
                     return
                 time.sleep(poll_seconds)
 

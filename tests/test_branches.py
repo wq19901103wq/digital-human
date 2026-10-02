@@ -1,8 +1,10 @@
 """分支端到端状态流和真实进程竞争；模型返回用可控结果，不调用外部服务。"""
 from __future__ import annotations
 
+import builtins
 import json
 import os
+import runpy
 import subprocess
 from pathlib import Path
 import sys
@@ -22,6 +24,26 @@ isolated_legacy_provenance = _legacy_fixture
 
 
 pytestmark = pytest.mark.usefixtures('isolated_legacy_provenance')
+
+
+@pytest.mark.parametrize('configured', [None, '3'])
+def test_scheduler_entrypoint_bounds_openmp_before_imports(monkeypatch, configured):
+    if configured is None:
+        monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
+    else:
+        monkeypatch.setenv('OMP_NUM_THREADS', configured)
+    monkeypatch.setattr(sys, 'path', sys.path.copy())
+    original_import = builtins.__import__
+    observed = []
+
+    def checked_import(name, *args, **kwargs):
+        if name == 'src.iteration':
+            observed.append(os.environ.get('OMP_NUM_THREADS'))
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', checked_import)
+    runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/iterate_branches.py'))
+    assert observed == [configured or '1']
 
 
 @pytest.fixture
@@ -405,6 +427,153 @@ def test_scheduler_ignores_cache_directories(tree):
     assert scheduler.Scheduler().tick() == []
 
 
+def test_scheduler_scoped_rotation_preserves_unselected_and_cancelled_jobs(tree, monkeypatch):
+    from src.iteration import control
+    for name in ('first', 'second', 'outside'):
+        submit_gen(name, {'llm': {'model': name}})
+    outside = branches.advance('outside')[0]
+    scheduler.retry(outside['kind'], outside['id'])
+    before = scheduler.jobs.metadata_path(outside).read_bytes()
+    commands = []
+
+    class Child:
+        pid = 99999999
+        result = None
+
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+
+        def poll(self):
+            return self.result
+
+    monkeypatch.setattr(scheduler.subprocess, 'Popen', Child)
+    monkeypatch.setattr(scheduler.task_state, 'process_start', lambda pid: 'synthetic-start')
+    monkeypatch.setattr(scheduler.training, 'pending', lambda: pytest.fail('unselected training'))
+    clock = [100.0]
+    monkeypatch.setattr(scheduler.time, 'time', lambda: clock[0])
+    sched = scheduler.Scheduler(max_experiments=1, max_attempts=1, retry_delay=0,
+        branch_names=['first', 'second'], timeout_seconds=360, time_slice_seconds=900)
+    first = sched.tick()[0]
+    assert first['id'].startswith('branch-first-')
+    clock[0] += 60
+    assert sched.tick() == []
+    process = sched.children[(first['kind'], first['id'])][1]
+    write_json(scheduler.jobs.directory(first) / 'state.json',
+               {'status': 'needs_attention', 'reason': 'time_slice_complete'})
+    process.result = 75
+    second = sched.tick()[0]
+    assert second['id'].startswith('branch-second-')
+    metadata = json.loads(scheduler.jobs.metadata_path(first).read_text())
+    assert metadata['attempts'] == 0 and metadata['status'] == 'queued'
+    write_json(scheduler.jobs.directory(second) / 'state.json',
+               {'status': 'needs_attention', 'reason': 'time_slice_complete'})
+    sched.children[(second['kind'], second['id'])][1].result = 75
+    control.cancel(scheduler.jobs.directory(second))
+    clock[0] += 60
+    assert sched.tick() == [first]
+    assert control.read(scheduler.jobs.directory(second) / 'control.json')['cancelled']
+    assert scheduler.jobs.metadata_path(outside).read_bytes() == before
+    assert all(command[command.index('--time-slice-seconds') + 1] == '900.0' for command in commands)
+
+
+def test_scheduler_rotation_requires_existing_branches_and_transport(tree):
+    with pytest.raises(ConfigError, match='Unknown branch'):
+        scheduler.Scheduler(branch_names=['missing'])
+    with pytest.raises(ConfigError, match='timeout-seconds'):
+        scheduler.Scheduler(time_slice_seconds=900)
+
+
+def test_scoped_scheduler_discards_jobs_after_later_branch_promotion(tree, monkeypatch):
+    submit_gen('first', {'shots_char_budget': 200})
+    submit_gen('second', {'llm': {'model': 'mA'}})
+    fixed = pass_to_fixed()
+    finish(next(job for job in fixed if 'branch-second-' in job['id']), 'adopt')
+    monkeypatch.setattr(scheduler.subprocess, 'Popen',
+                        lambda *args, **kwargs: pytest.fail('stale baseline launched'))
+    sched = scheduler.Scheduler(branch_names=['first', 'second'])
+    assert sched.tick() == []
+    assert branches.round_of('second/r-0001')['phase'] == 'promoted'
+
+
+@pytest.mark.parametrize('stop_mode', ['interrupt', 'time_slice'])
+def test_case_drain_resume_preserves_successful_requests_and_rounds(tree, monkeypatch, stop_mode):
+    import signal
+    from collections import Counter
+    from threading import Condition, Event
+    from src import cache, llm
+    from src.iteration import control, parallel, pack_transport
+    submit_gen('drain', {'llm': {'model': 'mA'}})
+    finish(branches.advance('drain')[0], 'observe')
+    job = branches.advance('drain')[0]
+    directory = scheduler.jobs.directory(job)
+    calls = Counter()
+    started = Condition()
+    release = Event()
+    clock = [0.0]
+
+    def request(kind, case, model):
+        def produce():
+            with started:
+                context = cache._scope.get()['context']
+                calls[(kind, str(case['case_id']), model, context['round'])] += 1
+                started.notify_all()
+            assert release.wait(10)
+            return {'replies': [model], 'latency_ms': 0} if kind == 'gen' else model == 'm0'
+        return cache.memo('synthetic_request', {'kind': kind, 'model': model}, produce)
+
+    class Generator:
+        def __init__(self, settings, config, clients, **kwargs):
+            self.model = config['llm']['model']
+
+        def generate(self, case, **kwargs):
+            return request('gen', case, self.model)
+
+    class Scorer:
+        def is_ai(self, case, replies):
+            return request('judge', case, replies[0])
+
+    monkeypatch.setattr(runner, 'ReplyGenerator', Generator)
+    monkeypatch.setattr(runner, 'build_judge', lambda *args: Scorer())
+    monkeypatch.setattr(llm, 'build_clients', lambda *args: {})
+    original_wait = parallel.wait
+
+    def draining_wait(*args, **kwargs):
+        with started:
+            assert started.wait_for(lambda: sum(calls.values()) >= 2, timeout=10)
+        if stop_mode == 'time_slice':
+            clock[0] = 2.0
+        release.set()
+        if stop_mode == 'interrupt':
+            signal.raise_signal(signal.SIGINT)
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(parallel, 'wait', draining_wait)
+    if stop_mode == 'interrupt':
+        with pytest.raises(KeyboardInterrupt):
+            runner.run_gen_experiment(directory, workers=2)
+    else:
+        monkeypatch.setattr(pack_transport.time, 'monotonic', lambda: clock[0])
+        with pytest.raises(control.StopRequested, match='time_slice_complete'):
+            with pack_transport.case_time_slice(1):
+                runner.run_gen_experiment(directory, workers=2)
+    assert experiment.state_of(directory)['status'] != 'finished'
+    assert sum(calls.values()) == 24
+    assert set(key[3] for key in calls) == {0, 1, 2}
+    assert not control.read(directory / 'control.json').get('cancelled')
+    assert not experiment.state_of(directory)['progress'].get('active_cases')
+    saved = (directory / 'cases.jsonl').read_bytes()
+    if stop_mode == 'time_slice':
+        assert len(saved.splitlines()) == 4
+    monkeypatch.setattr(parallel, 'wait', original_wait)
+    runner.run_gen_experiment(directory, workers=2)
+    assert (directory / 'cases.jsonl').read_bytes().startswith(saved)
+    assert set(calls.values()) == {1}
+    assert sum(calls.values()) == 48
+    state = experiment.state_of(directory)
+    assert state['status'] == 'finished'
+    assert state['metrics']['pairs'] == 6 and state['metrics']['failures'] == 0
+
+
 @pytest.mark.parametrize('timeout', [None, 180])
 def test_scheduler_launches_two_independent_jobs_and_bounds_retries(tree, monkeypatch, timeout):
     submit_gen("a", {"llm": {"model": "mA"}})
@@ -441,6 +610,30 @@ def test_scheduler_launches_two_independent_jobs_and_bounds_retries(tree, monkey
     clock[0] += 60
     assert sched.tick() == []
     assert all(job["status"] == "retry_exhausted" for job in scheduler.jobs_status())
+
+
+def test_scheduler_once_wait_reaps_owned_children_without_rescheduling(tree, monkeypatch):
+    sched = scheduler.Scheduler()
+    calls = []
+
+    def tick():
+        calls.append('tick')
+        sched.children['owned'] = object()
+        return []
+
+    def reap():
+        calls.append('reap')
+        if calls.count('reap') == 2:
+            sched.children.clear()
+
+    monkeypatch.setattr(sched, 'tick', tick)
+    monkeypatch.setattr(sched, '_reap', reap)
+    monkeypatch.setattr(scheduler.time, 'sleep', lambda seconds: calls.append('sleep'))
+    sched.run(once=True, wait=True)
+    assert calls == ['tick', 'reap', 'sleep', 'reap']
+    assert not sched.children
+    with pytest.raises(ConfigError, match='wait requires once'):
+        sched.run(wait=True)
 
 
 def test_pack_rebuild_preserves_original_sample_and_resumes(tree, monkeypatch):
