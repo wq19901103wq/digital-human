@@ -162,6 +162,10 @@ def check_experiment(args, report):
             raise ConfigError(decision['reason'])
         return {'evidence_passed': True, 'note': '只核验开发证据；实际晋级仍由 promote 重新核验当前指针'}
     report.run(args.gate, evidence)
+    if getattr(args, 'reply_model_report', False):
+        from src.iteration.reply_model_report import summarize
+        report.run('reply_model_comparison', lambda: summarize(directory,
+            verified_metrics=report.value.get('metrics')))
 
 
 def check_data(args, report):
@@ -245,6 +249,8 @@ def main(argv=None):
     exp.add_argument('--instance', required=True)
     exp.add_argument('--exp', help='正式开发实验 ID；省略则检查实例历史结果登记')
     exp.add_argument('--gate', choices=['development', 'fixed-entry'], default='development')
+    exp.add_argument('--reply-model-report', action='store_true',
+                     help='附加群/私回复模型质量和耗时汇总；区分真实调用与缓存历史，不改变晋级门槛')
     data = sub.add_parser('data', help='只读检查数据来源、会话切分及用途隔离；只输出聚合统计')
     data.add_argument('--instance', required=True)
     data.add_argument('--data', nargs='+', required=True)
