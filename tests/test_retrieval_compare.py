@@ -148,6 +148,8 @@ def test_verify_baseline_archive_accepts_real_a5118947_archive():
     """真实 a5118947 归档通过完整字节核验（旧基准可信）。"""
     from _reference_few_shot import archive_root
     archive = archive_root()
+    if not (archive / 'manifest.json').is_file():
+        pytest.skip('本机认证归档不存在（干净 checkout / CI）')
     assert retrieval_compare.verify_baseline_archive(archive) == archive.resolve()
 
 

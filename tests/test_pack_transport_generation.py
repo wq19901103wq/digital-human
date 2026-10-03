@@ -219,6 +219,8 @@ def test_launch_real_legacy_archive_uses_live_transport(tmp_path, monkeypatch):
     """真实 a5118947 归档：判定为旧代（含 few_shot.py），入口用活树 transport。"""
     from _reference_few_shot import archive_root
     archive = archive_root()
+    if not (archive / 'manifest.json').is_file():
+        pytest.skip('本机认证归档不存在（干净 checkout / CI）')
     assert (archive / 'src' / 'generator' / 'few_shot.py').is_file()
     assert pack_transport.snapshot_generation(archive, runtime) == 'few_shot'
     monkeypatch.setattr(runtime, 'verify', lambda path: archive)

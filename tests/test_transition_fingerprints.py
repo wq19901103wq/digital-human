@@ -53,15 +53,24 @@ def _current_snapshot(tmp_path):
     return data_guard.generation_snapshot([case], data, [{'retriever': {'enabled': False}}])
 
 
-def _legacy_snapshot(current, archived_few_shot_sha):
+def _legacy_snapshot_from_archive(current, archive, keys=None):
+    """旧形态快照：全部实现件摘要用归档真实字节计算（不再从活树取）；
+    归档缺失的件用占位摘要（供“缺件拒绝”路径走到 data_guard 的缺失报错）。"""
+    keys = keys or {'generator/generator.py': 'src/generator/generator.py',
+                    'generator/few_shot.py': 'src/generator/few_shot.py',
+                    'generator/history.py': 'src/generator/history.py',
+                    'iteration/datasets.py': 'src/iteration/datasets.py'}
     legacy = copy.deepcopy(current)
     legacy['implementation_sha256'] = {
-        'generator/generator.py': current['implementation_sha256']['generator/generator.py'],
-        'generator/few_shot.py': archived_few_shot_sha,
-        'generator/history.py': current['implementation_sha256']['generator/history.py'],
-        'iteration/datasets.py': current['implementation_sha256']['iteration/datasets.py'],
-    }
+        name: sha256_file(archive / relative) if (archive / relative).is_file() else '0' * 64
+        for name, relative in keys.items()}
     return legacy
+
+
+_LEGACY_ARCHIVE_FILES = {'src/generator/generator.py': 'old generator\n',
+                         'src/generator/few_shot.py': 'old few_shot\n',
+                         'src/generator/history.py': 'old history\n',
+                         'src/iteration/datasets.py': 'old datasets\n'}
 
 
 def _experiment(tmp_path):
@@ -72,29 +81,99 @@ def _experiment(tmp_path):
 
 def test_legacy_snapshot_resumes_against_archived_few_shot(monkeypatch, tmp_path):
     experiment = _experiment(tmp_path)
-    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment,
-                                    {'src/generator/few_shot.py': 'legacy = True\n'})
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, _LEGACY_ARCHIVE_FILES)
     current = _current_snapshot(tmp_path)
-    legacy = _legacy_snapshot(current, sha256_file(archive / 'src/generator/few_shot.py'))
+    legacy = _legacy_snapshot_from_archive(current, archive)
     data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
     # saved（磁盘上的旧断点快照）路径同样按归档字节通过。
     write_json(experiment / 'data_snapshot.json', legacy)
     data_guard.verify(experiment, copy.deepcopy(current), has_checkpoint=True)
 
 
+def test_legacy_snapshot_ignores_evolved_live_tree(monkeypatch, tmp_path):
+    """活树四件实现字节已演进：旧快照身份 = 归档字节（未变）→ 续跑放行。"""
+    experiment = _experiment(tmp_path)
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, _LEGACY_ARCHIVE_FILES)
+    original = data_guard.sha256_file
+    monkeypatch.setattr(data_guard, 'sha256_file',
+                        lambda path: 'e' * 64 if Path(path).suffix == '.py' else original(path))
+    current = _current_snapshot(tmp_path)
+    legacy = _legacy_snapshot_from_archive(current, archive)
+    data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
+
+
+def test_legacy_session_only_snapshot_resumes_against_archive(monkeypatch, tmp_path):
+    """单件 'generator/fewshot/session.py' 旧形态同样按归档字节核验续跑。"""
+    experiment = _experiment(tmp_path)
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment,
+                                    {'src/generator/fewshot/session.py': 'old session\n'})
+    current = _current_snapshot(tmp_path)
+    legacy = _legacy_snapshot_from_archive(
+        current, archive, keys={'generator/fewshot/session.py': 'src/generator/fewshot/session.py'})
+    data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
+
+
+def test_legacy_session_four_piece_snapshot_resumes(monkeypatch, tmp_path):
+    """中间代四件键集（session.py 替换 few_shot.py）：全部实现件按归档字节核验。"""
+    experiment = _experiment(tmp_path)
+    files = {name: content for name, content in _LEGACY_ARCHIVE_FILES.items()
+             if 'few_shot' not in name}
+    files['src/generator/fewshot/session.py'] = 'old session\n'
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, files)
+    current = _current_snapshot(tmp_path)
+    legacy = _legacy_snapshot_from_archive(current, archive, keys={
+        'generator/generator.py': 'src/generator/generator.py',
+        'generator/history.py': 'src/generator/history.py',
+        'iteration/datasets.py': 'src/iteration/datasets.py',
+        'generator/fewshot/session.py': 'src/generator/fewshot/session.py'})
+    data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
+
+
+def test_real_archive_legacy_snapshot_positive(monkeypatch, tmp_path):
+    """真实 a5118947 归档正例：旧形态四件全按归档字节 → 续跑放行。"""
+    from _reference_few_shot import ARCHIVE_SHA256, archive_root
+    archive = archive_root()
+    if not (archive / 'manifest.json').is_file():
+        pytest.skip('本机认证归档不存在（干净 checkout / CI）')
+    monkeypatch.setattr(versions, 'PRIVATE', archive_root().parents[1])
+    experiment = _experiment(tmp_path)
+    write_json(experiment / 'runtime.json', {'schema': 1, 'ref': ARCHIVE_SHA256,
+               'manifest_sha256': sha256_file(archive / 'manifest.json')})
+    current = _current_snapshot(tmp_path)
+    legacy = _legacy_snapshot_from_archive(current, archive)
+    data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
+    write_json(experiment / 'data_snapshot.json', legacy)
+    data_guard.verify(experiment, copy.deepcopy(current), has_checkpoint=True)
+
+
 def test_tampered_archive_few_shot_rejects_legacy_resume(monkeypatch, tmp_path):
     experiment = _experiment(tmp_path)
-    _fake_runtime_archive(monkeypatch, tmp_path, experiment, {'src/generator/few_shot.py': 'legacy = True\n'})
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, _LEGACY_ARCHIVE_FILES)
     current = _current_snapshot(tmp_path)
-    legacy = _legacy_snapshot(current, '0' * 64)
+    legacy = _legacy_snapshot_from_archive(current, archive)
+    legacy['implementation_sha256']['generator/few_shot.py'] = '0' * 64
     with pytest.raises(ConfigError, match='冻结数据指纹不一致'):
+        data_guard.verify(experiment, current, expected=legacy)
+
+
+def test_legacy_snapshot_without_archive_implementation_rejected(monkeypatch, tmp_path):
+    """归档缺少某实现件（如 datasets.py）→ 注明缺失并禁止续跑。"""
+    experiment = _experiment(tmp_path)
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment,
+                                    {'src/generator/few_shot.py': 'old few_shot\n'})
+    current = _current_snapshot(tmp_path)
+    legacy = _legacy_snapshot_from_archive(current, archive)
+    with pytest.raises(ConfigError, match='未包含 src/generator/generator.py'):
         data_guard.verify(experiment, current, expected=legacy)
 
 
 def test_missing_runtime_archive_rejects_legacy_resume(tmp_path):
     experiment = _experiment(tmp_path)
     current = _current_snapshot(tmp_path)
-    legacy = _legacy_snapshot(current, '0' * 64)
+    legacy = copy.deepcopy(current)
+    legacy['implementation_sha256'] = {name: '0' * 64 for name in (
+        'generator/generator.py', 'generator/few_shot.py',
+        'generator/history.py', 'iteration/datasets.py')}
     with pytest.raises(ConfigError, match='归档证据'):
         data_guard.verify(experiment, current, expected=legacy)
 
@@ -102,8 +181,7 @@ def test_missing_runtime_archive_rejects_legacy_resume(tmp_path):
 def test_rank_py_evolution_does_not_block_legacy_resume(monkeypatch, tmp_path):
     """活树 rank.py 字节已演进，但旧快照身份 = 归档字节（未变）→ 续跑放行。"""
     experiment = _experiment(tmp_path)
-    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment,
-                                    {'src/generator/few_shot.py': 'legacy = True\n'})
+    archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, _LEGACY_ARCHIVE_FILES)
     rank_path = Path(ranker_samples.__file__).parent / 'fewshot' / 'rank.py'
     original = data_guard.sha256_file
 
@@ -113,7 +191,7 @@ def test_rank_py_evolution_does_not_block_legacy_resume(monkeypatch, tmp_path):
     monkeypatch.setattr(data_guard, 'sha256_file', evolved)
     current = _current_snapshot(tmp_path)
     assert current['implementation_sha256']['generator/fewshot/rank.py'] == 'e' * 64
-    legacy = _legacy_snapshot(current, sha256_file(archive / 'src/generator/few_shot.py'))
+    legacy = _legacy_snapshot_from_archive(current, archive)
     data_guard.verify(experiment, current, expected=legacy, has_checkpoint=True)
     # 新形态快照不受过渡兼容保护：rank.py 失配照旧拒绝。
     saved_new = copy.deepcopy(current)
@@ -132,13 +210,43 @@ def _inventory(tmp_path):
     return fixture, teacher, generator, output
 
 
-def _to_legacy_manifest(output, legacy_key: str, legacy_sha: str):
+def _repo_src_archived_names(inputs):
+    """旧清单输入键 → runtime 归档相对名；只映射仓库 src/ 下的实现/检查件，
+    数据类输入（池/cases/teacher/generator）不在归档内。"""
+    repo_src = Path(ranker_samples.__file__).resolve().parents[1]
+    names = {}
+    for key in inputs:
+        try:
+            relative = Path(key).resolve().relative_to(repo_src)
+        except ValueError:
+            continue
+        names[key] = 'src/' + relative.as_posix()
+    return names
+
+
+def _legacy_archive(monkeypatch, tmp_path, manifest_inputs, legacy_bytes):
+    """建假 runtime 归档：旧清单的全部 src/ 输入件真实写入旧字节（未指定的用
+    通用旧字节），数据类输入不进归档。返回归档目录。"""
+    files = dict(legacy_bytes)
+    for archived_name in _repo_src_archived_names(manifest_inputs).values():
+        files.setdefault(archived_name, f'old {Path(archived_name).name}\n')
+    return _fake_runtime_archive(monkeypatch, tmp_path, tmp_path, files)
+
+
+def _to_legacy_manifest(output, legacy_key, legacy_sha, archive=None):
     """把新形态 manifest 改写为旧形态清单，并把断点/报告签名一并重盖为旧清单摘要，
-    模拟旧代码创建的运行（manifest/records/report 绑的都是旧清单）。"""
+    模拟旧代码创建的运行（manifest/records/report 绑的都是旧清单）。
+    archive 提供时：其余 src/ 输入摘要一律按归档真实字节回填（旧运行身份=归档字节）；
+    archive=None 时保留活树摘要（仅用于归档缺失的拒绝路径，该路径先报缺 runtime.json）。"""
     manifest = read_json(output / 'manifest.json')
     inputs = {name: sha for name, sha in manifest['inputs'].items()
               if '/src/generator/fewshot/' not in name.replace('\\', '/')}
-    inputs[str(Path(legacy_key).resolve())] = legacy_sha
+    legacy_resolved = str(Path(legacy_key).resolve())
+    inputs[legacy_resolved] = legacy_sha
+    if archive is not None:
+        for key, archived_name in _repo_src_archived_names(inputs).items():
+            if key != legacy_resolved:
+                inputs[key] = sha256_file(archive / archived_name)
     manifest['inputs'] = inputs
     write_json(output / 'manifest.json', manifest)
     for path in sorted((output / 'targets').glob('*.json')):
@@ -160,10 +268,12 @@ def _no_retrieval(*args, **kwargs):
 
 def test_legacy_monolith_inventory_resumes_against_archive(monkeypatch, tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
-    archive = _fake_runtime_archive(monkeypatch, tmp_path, tmp_path,
-                                    {'src/generator/few_shot.py': 'legacy few_shot\n'})
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'src/generator/few_shot.py'
-    _to_legacy_manifest(output, str(legacy_key), sha256_file(archive / 'src/generator/few_shot.py'))
+    manifest = read_json(output / 'manifest.json')
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
+                              {'src/generator/few_shot.py': 'legacy few_shot\n'})
+    _to_legacy_manifest(output, str(legacy_key),
+                        sha256_file(archive / 'src/generator/few_shot.py'), archive)
     monkeypatch.setattr(RecallSession, 'retrieve', _no_retrieval)
     report = ranker_samples.prepare(fixture.directory, teacher, generator, output,
                                     progress=lambda _: None)
@@ -172,10 +282,12 @@ def test_legacy_monolith_inventory_resumes_against_archive(monkeypatch, tmp_path
 
 def test_legacy_session_only_inventory_resumes_against_archive(monkeypatch, tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
-    archive = _fake_runtime_archive(monkeypatch, tmp_path, tmp_path,
-                                    {'src/generator/fewshot/session.py': 'legacy session\n'})
-    session_key = Path(ranker_samples.__file__).parent / 'fewshot' / 'session.py'
-    _to_legacy_manifest(output, str(session_key), sha256_file(archive / 'src/generator/fewshot/session.py'))
+    manifest = read_json(output / 'manifest.json')
+    legacy_key = Path(ranker_samples.__file__).parent / 'fewshot' / 'session.py'
+    archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
+                              {'src/generator/fewshot/session.py': 'legacy session\n'})
+    _to_legacy_manifest(output, str(legacy_key),
+                        sha256_file(archive / 'src/generator/fewshot/session.py'), archive)
     monkeypatch.setattr(RecallSession, 'retrieve', _no_retrieval)
     report = ranker_samples.prepare(fixture.directory, teacher, generator, output,
                                     progress=lambda _: None)
@@ -184,9 +296,11 @@ def test_legacy_session_only_inventory_resumes_against_archive(monkeypatch, tmp_
 
 def test_tampered_legacy_inventory_rejected(monkeypatch, tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
-    _fake_runtime_archive(monkeypatch, tmp_path, tmp_path, {'src/generator/few_shot.py': 'legacy\n'})
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'src/generator/few_shot.py'
-    _to_legacy_manifest(output, str(legacy_key), '0' * 64)
+    manifest = read_json(output / 'manifest.json')
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
+                              {'src/generator/few_shot.py': 'legacy\n'})
+    _to_legacy_manifest(output, str(legacy_key), '0' * 64, archive)
     with pytest.raises(ConfigError, match='旧实现清单与运行归档字节不符'):
         ranker_samples.prepare(fixture.directory, teacher, generator, output,
                                progress=lambda _: None)
@@ -194,7 +308,7 @@ def test_tampered_legacy_inventory_rejected(monkeypatch, tmp_path):
 
 def test_legacy_inventory_without_runtime_archive_rejected(tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'src/generator/few_shot.py'
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
     _to_legacy_manifest(output, str(legacy_key), '0' * 64)
     with pytest.raises(ConfigError, match='runtime.json'):
         ranker_samples.prepare(fixture.directory, teacher, generator, output,

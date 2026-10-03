@@ -52,8 +52,10 @@ def _legacy_implementation_inputs(inputs: dict) -> dict:
     return {}
 
 
-def _verify_legacy_manifest(output: Path, frozen: dict, legacy_inputs: dict) -> None:
-    """旧形态清单核验：实现件按 runtime 归档字节，其余输入仍按活树现值。"""
+def _verify_legacy_manifest(output: Path, frozen: dict) -> None:
+    """旧形态清单核验：仓库 src/ 下的全部输入件按 runtime 归档字节（实现件与
+    本轮已改的检查件都算旧运行输入，活树现值不再是身份）；数据类输入（池、
+    cases、teacher/generator 数据）仍按活树现值。"""
     runtime_json = next((parent / 'runtime.json'
                          for parent in (output, *output.parents) if (parent / 'runtime.json').is_file()), None)
     if runtime_json is None:
@@ -66,18 +68,24 @@ def _verify_legacy_manifest(output: Path, frozen: dict, legacy_inputs: dict) -> 
     except (OSError, KeyError, json.JSONDecodeError, ConfigError) as exc:
         raise ConfigError('旧形态候选清单的运行归档无效或已变化，无法按归档字节确认旧实现，'
                           '拒绝续跑') from exc
+    repo_src = Path(__file__).resolve().parents[1]
     inputs = frozen['inputs']
-    for key, relative in legacy_inputs.items():
-        candidates = (relative, relative.replace('src/', 'src/digital_human/', 1))
-        archived = next((files[name] for name in candidates if name in files), None)
-        if archived is None:
-            raise ConfigError(f'旧形态候选清单缺少归档证据：runtime 归档未包含 {relative}，'
-                              '无法确认旧实现，拒绝续跑')
-        require(archived == inputs[key], '旧实现清单与运行归档字节不符，拒绝续跑')
     for key, expected in inputs.items():
-        if key in legacy_inputs:
-            continue  # 已删除的旧实现件只能按归档字节核验
         path = Path(key)
+        try:
+            relative = path.resolve().relative_to(repo_src)
+        except ValueError:
+            relative = None  # 数据类输入：不在仓库 src/ 下，按活树现值核验
+        if relative is not None:
+            archived_name = 'src/' + relative.as_posix()
+            candidates = (archived_name, archived_name.replace('src/', 'src/digital_human/', 1))
+            archived = next((files[name] for name in candidates if name in files), None)
+            if archived is None:
+                raise ConfigError(f'旧形态候选清单缺少归档证据：runtime 归档未包含 {archived_name}，'
+                                  '无法确认旧输入，拒绝续跑')
+            require(archived == expected,
+                    f'旧实现清单与运行归档字节不符: {path.name}')
+            continue
         require(path.is_file() and sha256_file(path) == expected,
                 f'旧候选输入变化: {path.name}')
 
@@ -91,7 +99,7 @@ def _resolve_manifest(output: Path, manifest: dict) -> dict:
     frozen = read_json(existing)
     legacy_inputs = _legacy_implementation_inputs(frozen.get('inputs', {}))
     if legacy_inputs:
-        _verify_legacy_manifest(output, frozen, legacy_inputs)
+        _verify_legacy_manifest(output, frozen)
         return frozen
     return manifest
 

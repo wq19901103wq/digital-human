@@ -309,6 +309,7 @@
     "src/judge/wiki_lookup.py",
     "src/llm.py",
     "src/tracing.py",
+    "tests/_reference_cache/few_shot.py",
     "tests/_reference_few_shot.py",
     "tests/_reference_few_shot_source.py",
     "tests/examples/chat_export.sample.jsonl",

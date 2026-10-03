@@ -722,3 +722,26 @@ def test_hydrated_pool_retrieve_matches_memory_pool(tmp_path):
     finally:
         hydrated.close()
         memory_session.close()
+
+
+def test_reference_fallback_materializes_real_file(tmp_path, monkeypatch):
+    """模拟无归档（干净 checkout / CI）：退路把 pin 住的源码物化到真实文件，
+    模块 __file__ 指向它，inspect.getsource 与磁盘适配器 sha256_file(__file__)
+    都可用（占位路径在这两处都会炸）。"""
+    import sys
+    from pathlib import Path
+
+    import _reference_few_shot as reference
+    from src.config import sha256_file
+
+    root = tmp_path  # 该根下没有 instances/ 归档树 → 强制走兜底
+    assert not reference.archived_few_shot_path(root).is_file()
+    target = reference.cached_few_shot_path(root)
+    monkeypatch.delitem(sys.modules, 'src.generator.few_shot', raising=False)
+    module = reference.load_reference_few_shot(root)
+    try:
+        assert Path(module.__file__).resolve() == target.resolve()
+        assert sha256_file(Path(module.__file__)) == reference.ARCHIVED_FEW_SHOT_SHA256
+        assert 'class PersonaFewShotRetriever' in inspect.getsource(module)
+    finally:
+        sys.modules['src.generator.few_shot'] = reference.few_shot

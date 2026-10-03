@@ -22,21 +22,38 @@ RETRIEVAL_IMPLEMENTATION = tuple('generator/fewshot/' + name for name in
 
 # 过渡兼容：清单扩展前的旧形态实现键集（few_shot.py 单件时代）。旧断点/旧包
 # 按归档字节核验（runtime 归档才是旧运行的身份），不得要求重跑已完成题目；
-# 只认这一种旧形态，不做模糊匹配。
+# 旧形态只认 LEGACY_IMPLEMENTATION_KEYS 的三种键集，不做模糊匹配。
 LEGACY_IMPLEMENTATION = ('generator/generator.py', 'generator/few_shot.py',
                          'generator/history.py', 'iteration/datasets.py')
+
+# 清单逐代扩展过程中出现过的旧形态：fewshot/session.py 替换 few_shot.py（四件
+# 键集），以及只绑 session.py 单件的形态。实现件全部按归档字节核验。
+LEGACY_IMPLEMENTATION_SESSION = ('generator/generator.py', 'generator/history.py',
+                                 'iteration/datasets.py', 'generator/fewshot/session.py')
+LEGACY_IMPLEMENTATION_KEYS = {frozenset(LEGACY_IMPLEMENTATION),
+                              frozenset(LEGACY_IMPLEMENTATION_SESSION),
+                              frozenset(('generator/fewshot/session.py',))}
+
+# 旧形态实现键 → runtime 归档相对名（含历史 src/digital_human/ 前缀的回退匹配）。
+_LEGACY_ARCHIVE_NAMES = {
+    'generator/generator.py': 'src/generator/generator.py',
+    'generator/few_shot.py': 'src/generator/few_shot.py',
+    'generator/history.py': 'src/generator/history.py',
+    'generator/fewshot/session.py': 'src/generator/fewshot/session.py',
+    'iteration/datasets.py': 'src/iteration/datasets.py',
+}
 
 
 def _is_legacy_shape(snapshot: dict) -> bool:
     implementation = snapshot.get('implementation_sha256')
-    return isinstance(implementation, dict) and \
-        set(implementation) == set(LEGACY_IMPLEMENTATION)
+    return isinstance(implementation, dict) and frozenset(implementation) in \
+        LEGACY_IMPLEMENTATION_KEYS
 
 
-def _legacy_implementation(directory: Path) -> dict:
-    """旧形态 current 的 implementation_sha256：公共三件用活树现值；已删除的
-    generator/few_shot.py 用 directory/runtime.json 归档字节哈希。归档缺失或
-    归档中没有该文件时按失配处理（实现演进不阻断续跑，归档字节才是旧运行的身份）。"""
+def _legacy_implementation(directory: Path, keys) -> dict:
+    """旧形态快照的 implementation_sha256：全部实现件一律按 runtime 归档字节
+    核验（活树实现已演进/已删除，现值不再是旧运行的身份）；归档缺失或归档中
+    没有该文件时按失配处理（禁止续跑）。"""
     from . import runtime
     try:
         archive = runtime.verify(directory / 'runtime.json', check_environment=False)
@@ -44,15 +61,19 @@ def _legacy_implementation(directory: Path) -> dict:
     except (OSError, KeyError, json.JSONDecodeError, ConfigError) as exc:
         raise ConfigError('旧形态数据指纹缺少可核验的运行归档证据（runtime.json 缺失、'
                           '无效或已变化），无法按归档字节确认旧实现，禁止续跑') from exc
-    archived = next((files[name] for name in files
-                     if name == 'src/generator/few_shot.py' or
-                     name == 'src/digital_human/generator/few_shot.py'), None)
-    if archived is None:
-        raise ConfigError('旧形态数据指纹缺少归档证据：runtime 归档未包含 '
-                          'src/generator/few_shot.py，无法确认旧实现，禁止续跑')
-    source = Path(__file__).parents[1]
-    return {name: (archived if name == 'generator/few_shot.py' else sha256_file(source / name))
-            for name in LEGACY_IMPLEMENTATION}
+    result = {}
+    for name in keys:
+        relative = _LEGACY_ARCHIVE_NAMES.get(name)
+        if relative is None:
+            raise ConfigError(f'旧形态数据指纹含未知实现键 {name}，无法按归档字节确认，禁止续跑')
+        archived = next((files[candidate] for candidate in
+                         (relative, relative.replace('src/', 'src/digital_human/', 1))
+                         if candidate in files), None)
+        if archived is None:
+            raise ConfigError('旧形态数据指纹缺少归档证据：runtime 归档未包含 '
+                              f'{relative}，无法确认旧实现，禁止续跑')
+        result[name] = archived
+    return result
 
 
 def generation_snapshot(cases: list[dict], data_dir: Path, configs: list[dict]) -> dict:
@@ -93,9 +114,10 @@ def verify(directory: Path, current: dict, *, expected: dict | None = None,
     for original in (expected, saved):
         if original is None:
             continue
-        # 过渡兼容：旧形态快照与“旧形态 current”（公共三件取现值，few_shot.py 取归档字节）比较；
-        # 新形态照旧与 current 比较。has_checkpoint 语义不变。
-        candidate = {**current, 'implementation_sha256': _legacy_implementation(directory)} \
+        # 过渡兼容：旧形态快照与“旧形态 current”（全部实现件取归档字节）比较；
+        # 数据类输入（池/cases/purposes）仍按活树现值。新形态照旧与 current 比较。
+        candidate = {**current, 'implementation_sha256':
+                     _legacy_implementation(directory, original['implementation_sha256'])} \
             if _is_legacy_shape(original) else current
         if original != candidate:
             changed = sorted(key for key in original.keys() | candidate.keys()

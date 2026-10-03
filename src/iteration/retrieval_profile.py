@@ -94,11 +94,18 @@ def compare(retriever, original, recall, cases, *, repeats):
                 model_calls=0, experiment_results_written=False)
 
 
-def frozen(args):
+def _load_transport():
+    """独立加载 pack_transport（profiler 子进程入口在冻结快照内运行，
+    必须与活树 src.iteration.pack_transport 模块对象隔离）。"""
     transport_path = Path(__file__).with_name('pack_transport.py')
     spec = importlib.util.spec_from_file_location('_retrieval_profile_transport', transport_path)
     transport = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(transport)
+    return transport
+
+
+def frozen(args):
+    transport = _load_transport()
     sys.path.insert(0, str(args.snapshot))
     from src.iteration import runtime, versions
     versions.switch_instance(args.instance)
@@ -113,7 +120,7 @@ def frozen(args):
     # 运行器内 fewshot_profile_instrument 承担（transport receipt）。
     if transport.snapshot_generation(snapshot, runtime) == 'fewshot':
         return _frozen_modern(args, snapshot, directory)
-    return _frozen_legacy(args, snapshot, directory)
+    return _frozen_legacy(args, snapshot, directory, transport)
 
 
 def _frozen_modern(args, snapshot, directory):
@@ -145,7 +152,7 @@ def _frozen_modern(args, snapshot, directory):
     return result
 
 
-def _frozen_legacy(args, snapshot, directory):
+def _frozen_legacy(args, snapshot, directory, transport):
     from src.generator import few_shot, learned_selection
     from src.iteration import datasets, gbdt_evidence, learning_guard, runtime, versions
     from src.iteration.storage import read_json

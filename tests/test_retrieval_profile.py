@@ -235,3 +235,110 @@ def test_material_diagnostic_success_checks_two_contexts():
                                                  profile=profile, disk=None)
     assert result['status'] == 'passed'
     assert len(result['calls_seconds']) == len(calls) == 2
+
+
+def test_frozen_legacy_full_call_does_not_raise_name_error(tmp_path, monkeypatch):
+    """旧代 frozen() 完整调用（边界 mock）：transport 显式传参进 _frozen_legacy，
+    不抛 NameError，且分代/守卫/指针核对全部走完。"""
+    import sys
+    import types as types_module
+    import importlib.util
+    from contextlib import nullcontext
+    from src.iteration import runtime, versions
+    from src.iteration import datasets
+    from src.iteration.storage import write_json
+
+    # 假旧代快照：manifest 只含 few_shot.py → 分代判定为旧代。
+    snapshot = tmp_path / 'snapshot'
+    snapshot.mkdir()
+    (snapshot / 'manifest.json').write_text(
+        json.dumps({'files': {'src/generator/few_shot.py': 'ab' * 32}}), encoding='utf-8')
+
+    instance = tmp_path / 'instance'
+    directory = instance / 'experiments' / 'frozen'
+    directory.mkdir(parents=True)
+    write_json(directory / 'runtime.json', {'ref': snapshot.name})
+    write_json(directory / 'spec.json', {'data_ref': 'd-1', 'dataset': 'dev'})
+    cases_file = tmp_path / 'cases.jsonl'
+    cases_file.write_text(json.dumps({'case_id': 'c-1', 'context': [], 'human_reply': ['回复']},
+                                     ensure_ascii=False) + '\n', encoding='utf-8')
+
+    pointer = tmp_path / 'pointers.json'
+    pointer.write_text('{}')
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: None)
+    monkeypatch.setattr(versions, 'PRIVATE', instance)
+    monkeypatch.setattr(versions, 'POINTERS_PATH', pointer)
+    monkeypatch.setattr(versions, 'data_version_dir', lambda ref: tmp_path / 'data')
+    monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
+    monkeypatch.setattr(runtime, 'require_current', lambda path: None)
+    monkeypatch.setattr(datasets, 'case_path', lambda data, name: cases_file)
+
+    # 假 transport：记录接收方，分代判定为旧代，归档/磁盘上下文全部直通。
+    loaded = []
+    transport = SimpleNamespace(
+        snapshot_generation=lambda snap, rt: 'few_shot',
+        archived_runtime_paths=lambda rt: nullcontext(),
+        archived_gbdt_paths=lambda ge, rt: nullcontext(),
+        history_feature_cache=lambda fs: nullcontext(),
+        live_material_reuse=lambda: None,
+    )
+    monkeypatch.setattr(retrieval_profile, '_load_transport',
+                        lambda: loaded.append(True) or transport)
+
+    # 假磁盘适配器模块：__file__ 旁的真实 indexed_retrieval.py（与归档同布局）。
+    disk_dir = tmp_path / 'disk_history_pkg'
+    disk_dir.mkdir()
+    (disk_dir / 'disk_history.py').write_text(
+        "MODE = 'fake'\n"
+        "def disk_storage(module):\n"
+        "    from contextlib import nullcontext\n"
+        "    return nullcontext()\n", encoding='utf-8')
+    (disk_dir / 'indexed_retrieval.py').write_text(
+        'def indexed_retrieve(original):\n'
+        '    def indexed(subject, **options):\n'
+        '        return []\n'
+        '    return indexed\n', encoding='utf-8')
+    spec = importlib.util.spec_from_file_location('disk_history_fake', disk_dir / 'disk_history.py')
+    disk_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(disk_module)
+    transport.live_disk_history = lambda: disk_module
+
+    class FakeProfile:
+        def __init__(self, path, options):
+            pass
+
+        def snapshot(self):
+            return {'metrics': {}}
+
+    transport.live_transport_profile = lambda: SimpleNamespace(TransportProfile=FakeProfile)
+
+    # 假旧 few_shot 模块：检索恒空、审批通过（经 sys.modules 注入，from import 生效）。
+    few_shot_module = types_module.ModuleType('src.generator.few_shot')
+
+    class FakeRetriever:
+        def __init__(self, pool):
+            self.pool = pool
+
+        def is_approved(self):
+            return True
+
+        def retrieve(self, **options):
+            return []
+
+        def render_selected(self, rows, max_chars=2500):
+            return '', []
+
+    few_shot_module.PersonaFewShotRetriever = FakeRetriever
+    monkeypatch.setitem(sys.modules, 'src.generator.few_shot', few_shot_module)
+
+    args = SimpleNamespace(snapshot=snapshot, instance='demo', experiment='frozen',
+                           cases=1, repeats=1, materials=False)
+    sys_path_before = list(sys.path)
+    try:
+        result = retrieval_profile.frozen(args)
+    finally:
+        sys.path[:] = sys_path_before
+    assert loaded == [True]
+    assert result['equivalent'] is True
+    assert result['runtime_ref'] == snapshot.name
+    assert result['storage'] == 'fake'

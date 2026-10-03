@@ -5,9 +5,11 @@
 
 - 首选来源：instances/qianwang/runtimes/a5118947…（9月29 日冻结 runtime 归档，
   旧代进程经 sys.path 快照优先解析到它）。归档存在时按其路径加载并强校验字节。
-- 兜底来源：tests/_reference_few_shot_source.py（入库夹具，归档 few_shot.py 的
-  源码固化副本，sha256 同一 pin）。归档缺失（干净 checkout / CI）时退回夹具，
-  保证本文件 import 不依赖本机私有实例目录。
+- 兜底来源：tests/_reference_cache/few_shot.py（入库物化副本，归档 few_shot.py
+  的源码固化文件，sha256 同一 pin；缺失时由 tests/_reference_few_shot_source.py
+  的 SOURCE 现场重建）。归档缺失（干净 checkout / CI）时退回该真实文件，
+  保证本文件 import 不依赖本机私有实例目录，且模块 __file__ 指向真实路径
+  （inspect.getsource 与磁盘适配器 checksum(module.__file__) 可用）。
 - 归档 src/generator/few_shot.py 的 sha256 与归档 manifest 钉死值一致
   （ARCHIVED_FEW_SHOT_SHA256，两种来源都强校验，篡改即拒绝）。
 - 模块名自定义注册（archived_reference_few_shot），不与 src.generator.fewshot
@@ -20,7 +22,6 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import sys
-import types
 
 ARCHIVE_SHA256 = 'a5118947eb888be5d46901f2e5334ce14fc16a932e8a503e5cc595a30d0ac1e4'
 ARCHIVED_FEW_SHOT_SHA256 = ('fef16b699e3be2c9ce56aa1c3de8a05a2d0b852a32457abda8edb452'
@@ -34,6 +35,12 @@ def archive_root(root: Path | None = None) -> Path:
 
 def archived_few_shot_path(root: Path | None = None) -> Path:
     return archive_root(root) / 'src' / 'generator' / 'few_shot.py'
+
+
+def cached_few_shot_path(root: Path | None = None) -> Path:
+    """兜底物化副本：真实文件，模块 __file__ 指向它（getsource/checksum 可用）。"""
+    base = Path(root) if root is not None else Path(__file__).resolve().parent
+    return base / '_reference_cache' / 'few_shot.py'
 
 
 def _bundled_source() -> str:
@@ -72,11 +79,18 @@ def load_reference_few_shot(root: Path | None = None):
     actual = hashlib.sha256(source.encode('utf-8')).hexdigest()
     if actual != ARCHIVED_FEW_SHOT_SHA256:
         raise AssertionError(f'入库参照 few_shot.py 字节与 pin 不符：{actual}')
-    module = types.ModuleType(name)
-    module.__package__ = 'src.generator'
-    module.__file__ = '<bundled tests/_reference_few_shot_source.py>'
+    path = cached_few_shot_path(root)
+    if not path.is_file():
+        # 物化到真实文件：模块 __file__ 必须是磁盘路径，inspect.getsource 与
+        # 磁盘适配器 checksum(module.__file__) 依赖它；占位字符串会炸。
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding='utf-8')
+    if hashlib.sha256(path.read_bytes()).hexdigest() != ARCHIVED_FEW_SHOT_SHA256:
+        raise AssertionError(f'物化参照 few_shot.py 字节与 pin 不符：{path}')
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    exec(compile(source, module.__file__, 'exec'), module.__dict__)
+    spec.loader.exec_module(module)
     return module
 
 
