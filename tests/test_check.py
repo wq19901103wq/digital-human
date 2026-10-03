@@ -287,6 +287,27 @@ def test_changed_data_allows_familiar_history_but_rejects_leaks(tmp_path, monkey
                 materials.require_current('new-data', tmp_path, load)
 
 
+def test_retrieval_subcommand_fails_on_inequivalence(monkeypatch, capsys, tmp_path):
+    """I8：三方对比 equivalent=False 时，retrieval 子命令整体失败并记录差异。"""
+    from src.iteration import retrieval_compare
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: tmp_path)
+    write_json(tmp_path / 'pointers.json', {})
+
+    def inequivalent(*args, **kwargs):
+        return dict(schema=1, kind='retrieval_three_way_compare_v1', equivalent=False,
+                    mismatches=[dict(case_id='case-0', route='recent3',
+                                     subject='current_indexed', fields=['ids'])],
+                    model_calls=0, experiment_results_written=False)
+
+    monkeypatch.setattr(retrieval_compare, 'compare', inequivalent)
+    assert check.main(['retrieval', '--instance', 'demo', '--exp', 'frozen']) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'failed'
+    failure = next(c for c in report['checks'] if c['name'] == 'retrieval_equivalence')
+    assert failure['status'] == 'failed' and 'case-0' in failure['error']
+    assert not any(c['name'] == 'frozen_retrieval_profile' for c in report['checks'])
+
+
 @pytest.mark.parametrize('missing', [False, True])
 def test_material_reconstruction_uses_formal_adapter_without_requests(priv, monkeypatch, capsys, missing):
     from contextlib import contextmanager

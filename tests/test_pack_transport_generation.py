@@ -189,8 +189,9 @@ def test_fewshot_profile_instrument_times_and_restores():
 
 def test_launch_modern_snapshot_runs_its_own_transport(tmp_path, monkeypatch):
     snapshot = write_manifest(tmp_path / 'snap', MODERN_MANIFEST)
-    (snapshot / 'scripts').mkdir()
-    (snapshot / 'scripts/pack_transport.py').write_text('# frozen transport\n')
+    # 真实路径结构：冻结入口位于归档 src/iteration/pack_transport.py（同 a5118947 布局）。
+    (snapshot / 'src' / 'iteration').mkdir(parents=True)
+    (snapshot / 'src/iteration/pack_transport.py').write_text('# frozen transport\n')
     monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
     calls = []
     monkeypatch.setattr(pack_transport.subprocess, 'call',
@@ -199,7 +200,7 @@ def test_launch_modern_snapshot_runs_its_own_transport(tmp_path, monkeypatch):
                                  workers=2, seconds=180) == 0
     argv, kwargs = calls[0]
     assert argv[argv.index('--snapshot') + 1] == str(snapshot)
-    assert Path(argv[3]).resolve() == (snapshot / 'scripts/pack_transport.py').resolve()
+    assert Path(argv[3]).resolve() == (snapshot / 'src/iteration/pack_transport.py').resolve()
     assert kwargs['cwd'] == snapshot
     assert kwargs['env']['DH_SETTINGS_FILE'] == str(snapshot / 'settings.snapshot.yaml')
 
@@ -209,9 +210,47 @@ def test_launch_modern_snapshot_rejects_missing_snapshot_transport(tmp_path, mon
     monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
     monkeypatch.setattr(pack_transport.subprocess, 'call',
                         lambda *args, **kwargs: pytest.fail('must not launch'))
-    with pytest.raises(ConfigError, match='missing scripts/pack_transport.py'):
+    with pytest.raises(ConfigError, match='missing src/iteration/pack_transport.py'):
         pack_transport.launch(tmp_path / 'job', instance='example-agent', job='synthetic',
                               workers=2, seconds=180)
+
+
+def test_launch_real_legacy_archive_uses_live_transport(tmp_path, monkeypatch):
+    """真实 a5118947 归档：判定为旧代（含 few_shot.py），入口用活树 transport。"""
+    from _reference_few_shot import archive_root
+    archive = archive_root()
+    assert (archive / 'src' / 'generator' / 'few_shot.py').is_file()
+    assert pack_transport.snapshot_generation(archive, runtime) == 'few_shot'
+    monkeypatch.setattr(runtime, 'verify', lambda path: archive)
+    calls = []
+    monkeypatch.setattr(pack_transport.subprocess, 'call',
+                        lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+    assert pack_transport.launch(tmp_path / 'job', instance='example-agent', job='synthetic',
+                                 workers=2, seconds=180) == 0
+    argv, kwargs = calls[0]
+    assert Path(argv[3]).resolve() == Path(pack_transport.__file__).resolve()
+    assert kwargs['cwd'] == archive
+
+
+def test_launch_modern_micro_snapshot_resolves_archived_transport(tmp_path, monkeypatch):
+    """手工构造含 fewshot 包 + src/iteration/pack_transport.py 的 manifest 结构，
+    验证新代入口解析到归档自身路径（真实目录布局）。"""
+    manifest = {'files': {'src/generator/fewshot/__init__.py': 'cd' * 32,
+                          'src/iteration/pack_transport.py': 'ef' * 32}}
+    snapshot = write_manifest(tmp_path / 'snap', manifest)
+    (snapshot / 'src' / 'generator' / 'fewshot').mkdir(parents=True)
+    (snapshot / 'src' / 'iteration').mkdir(parents=True)
+    (snapshot / 'src' / 'generator' / 'fewshot' / '__init__.py').write_text('')
+    (snapshot / 'src' / 'iteration' / 'pack_transport.py').write_text('# frozen transport\n')
+    monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
+    calls = []
+    monkeypatch.setattr(pack_transport.subprocess, 'call',
+                        lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+    assert pack_transport.launch(tmp_path / 'job', instance='example-agent', job='synthetic',
+                                 workers=2, seconds=180) == 0
+    argv, kwargs = calls[0]
+    assert Path(argv[3]).resolve() == (snapshot / 'src' / 'iteration' / 'pack_transport.py').resolve()
+    assert kwargs['cwd'] == snapshot
 
 
 def test_launch_rejects_ambiguous_manifest(tmp_path, monkeypatch):

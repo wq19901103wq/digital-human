@@ -1,16 +1,17 @@
 """fewshot.rank 纯函数层搬迁 parity：与旧 few_shot 模块零行为变化。
 
-旧模块 src.generator.few_shot 保持逐字节不动（继续服务适配器层与旧快照），
-新包 src.generator.fewshot.rank 是同一批纯函数的逐字副本。本文件锁住两者
-在任何输入下结果完全相等。
+活树 src/generator/few_shot.py 已删除（模块化重构收尾）；旧行为参照改由
+认证归档 a5118947… 的副本提供（tests/_reference_few_shot.py 按路径加载，
+字节 pin 强校验）。新包 src.generator.fewshot.rank 是同一批纯函数的逐字
+副本。本文件锁住两者在任何输入下结果完全相等。
 """
 import inspect
 from collections import Counter
 
 import pytest
 
+from _reference_few_shot import few_shot
 from leakage_support import historical
-from src.generator import few_shot
 from src.generator.fewshot import rank
 
 MOVED_NAMES = ['_SKILL_SITUATIONS', '_PROFILE_SITUATIONS', '_chat_id', '_terms', '_is_sparse_turn',
@@ -168,7 +169,7 @@ def test_retriever_materialized_values_match_rank(tmp_path):
 import json
 from pathlib import Path
 
-from src.generator import disk_history, few_shot
+from src.generator import disk_history
 from src.generator.fewshot import (InMemoryRecallEngine, RecallSession,
                                    SqliteIndexedRecallEngine, open_session)
 
@@ -485,3 +486,172 @@ def test_session_exposes_controlled_identity_attributes_for_adapter_cache_key(tm
         assert public['enable_information_gap_response_move'] is True
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# 修复批次 2（2026-10-03 codex 复审）：
+# I4 重复 ID 的惰性画像绑定语义 / I9 索引水合路径 / I10 PreparedPool 深只读。
+# ---------------------------------------------------------------------------
+
+from src.generator.fewshot import prepare
+
+
+def _duplicate_id_rows():
+    """同 ID 两行、情境标签与画像均不同（显式 tags/profile），见 I4。"""
+    return [
+        _example('dup-i4', ['普通陈述一句'], ['嗯'], reply_shape='single',
+                 situation_tags=['praise'],
+                 situation_profile={'expected_response_move': 'deflect_or_playfully_accept'}),
+        # 桶只命中第二行：唯一带 question 标签的同 ID 行。
+        _example('dup-i4', ['另一个普通陈述'], ['好吧'], reply_shape='laugh',
+                 situation_tags=['question'],
+                 situation_profile={'expected_response_move': 'direct_answer'}),
+        _example('other-i4', ['周末一起出来玩吗？'], ['来啊']),
+    ]
+
+
+def test_duplicate_id_lazy_cache_matches_archive_second_row_bucket(tmp_path):
+    """I4：情境桶只选中第二条同 ID 行时，惰性缓存（按“第一次进入循环的行”
+    计算并驻留、跨查询）与归档旧类逐一相等；连续 retrieve 驻留生效后仍相等。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _duplicate_id_rows())
+    old = _old_retriever(pool_path)
+    new = _new_session(pool_path)
+    # 两个 question 查询 + 两个带信息缺口的 question 查询（覆盖 gap_move
+    # 两版画像键 (id, False)/(id, True) 的首次计算与二次驻留）。
+    requests = [
+        dict(query='这是为什么啊', chat_name='某友', is_group=False, limit=4),
+        dict(query='到底怎么弄呢？', chat_name='某友', is_group=False, limit=4),
+        dict(query='听同学说他水平不太行，为什么啊', chat_name='某友', is_group=False, limit=4),
+        dict(query='听朋友说他技术不太行，到底为什么', chat_name='某友', is_group=False, limit=4),
+    ]
+    for request in requests:
+        expected = old.retrieve(**request)
+        actual = new.retrieve(**request)
+        assert actual == expected
+        dup_rows = [row for row in actual if row['id'] == 'dup-i4']
+        assert len(dup_rows) == 1 and dup_rows[0]['reply'] == ['好吧']  # 桶只命中第二行
+    # 驻留确实生效：标签键 id、画像键 (id, gap_move) 均已缓存。
+    assert 'dup-i4' in new._row_situation_tag_cache
+    assert ('dup-i4', False) in new._row_situation_profile_cache
+    assert ('dup-i4', True) in new._row_situation_profile_cache
+
+
+def test_prepared_pool_is_deep_read_only(tmp_path):
+    """I10：池属性赋值/行修改/映射写入一律抛错或被拒。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())
+    session = _new_session(pool_path)
+    pool = session.pool
+    assert isinstance(pool.rows, tuple)
+    with pytest.raises(TypeError, match='深只读'):
+        pool.history_policy = 'complete_before_input_v1'
+    with pytest.raises(TypeError, match='深只读'):
+        pool.enable_clarification = True
+    with pytest.raises(TypeError, match='深只读'):
+        pool._frozen = False
+    row = pool.rows[0]
+    with pytest.raises(TypeError):
+        row['id'] = 'changed'
+    with pytest.raises(TypeError):
+        row['injected'] = True
+    with pytest.raises(AttributeError):
+        row.update({'id': 'changed'})
+    with pytest.raises(TypeError):
+        pool._terms_by_id['x'] = Counter()
+    with pytest.raises(TypeError):
+        pool._rows_by_group[False] = []
+    with pytest.raises(TypeError):
+        pool.flags['enable_clarification'] = False
+    with pytest.raises(AttributeError):
+        row.injected = True
+
+
+def test_returned_row_nested_mutation_does_not_leak_between_retrieves(tmp_path):
+    """I10：两次 retrieve 之间经返回行修改嵌套 list/dict 不影响第二次结果。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())
+    session = _new_session(pool_path)
+    request = dict(query='在吗', chat_name='某友', is_group=False, limit=4)
+    expected = session.retrieve(**request)
+    assert expected
+    tampered = session.retrieve(**request)
+    tampered[0]['context'].append('污染嵌套列表')
+    tampered[0]['reply'].clear()
+    if 'semantic_profile' in tampered[0]:
+        tampered[0]['semantic_profile']['incoming_act'] = 'tampered'
+    again = session.retrieve(**request)
+    assert again == expected
+    # 新会话（缓存冷启动）与驻留缓存会话一致：惰性缓存不引入漂移。
+    fresh = _new_session(pool_path)
+    assert fresh.retrieve(**request) == expected
+
+
+def test_open_session_second_open_hydrates_from_index_without_memory_load(tmp_path, monkeypatch):
+    """I9：二次 open_session 走水合路径——不执行内存 _load（单遍 sqlite 恢复），
+    水合状态与内存装载逐字节一致。"""
+    fixture = _history_fixture(tmp_path)
+    pool_path = fixture.directory / 'fewshot_pool.jsonl'
+    first = open_session(pool_path, index_policy='build')
+    assert isinstance(first._engine, SqliteIndexedRecallEngine)
+    first.close()
+    calls = []
+    original_load = prepare.PreparedPool._load
+
+    def spy(self):
+        calls.append(self.path)
+        return original_load(self)
+
+    monkeypatch.setattr(prepare.PreparedPool, '_load', spy)
+    second = open_session(pool_path, index_policy='use_if_present')
+    try:
+        assert isinstance(second._engine, SqliteIndexedRecallEngine)
+        assert calls == []  # 水合路径：内存装载未被调用
+        memory = prepare.PreparedPool.load(pool_path)
+        assert [dict(row) for row in second.pool.rows] == [dict(row) for row in memory.rows]
+        for name in disk_history.FEATURES:
+            assert dict(getattr(second.pool, name)) == dict(getattr(memory, name))
+        for name in disk_history.BUCKETS:
+            assert ({key: [dict(row) for row in members]
+                     for key, members in getattr(second.pool, name).items()}
+                    == {key: [dict(row) for row in members]
+                        for key, members in getattr(memory, name).items()})
+        # 水合池逐题输出与内存池一致。
+        memory_session = RecallSession(memory, InMemoryRecallEngine())
+        for case in fixture.cases[:2]:
+            for size in (3, 1):
+                kwargs = _history_kwargs(case, size)
+                assert second.retrieve(**kwargs) == memory_session.retrieve(**kwargs)
+    finally:
+        second.close()
+
+
+def test_hydrated_pool_retrieve_matches_memory_pool(tmp_path):
+    """I9：水合会话与内存会话逐题输出（含 trace/render）一致。"""
+    fixture = _history_fixture(tmp_path)
+    pool_path = fixture.directory / 'fewshot_pool.jsonl'
+    open_session(pool_path, index_policy='build').close()
+    hydrated = open_session(pool_path, index_policy='use_if_present')
+    memory_session = open_session(pool_path, index_policy='use_if_present')
+    # use_if_present 且索引已存在 → 水合；临时移除索引强制内存装载对照。
+    assert isinstance(hydrated._engine, SqliteIndexedRecallEngine)
+    cache = tmp_path / '.cache' / 'disk-history'
+    saved = tmp_path / 'index-saved'
+    saved.mkdir()
+    for path in cache.iterdir():
+        path.rename(saved / path.name)
+    try:
+        memory_session = open_session(pool_path, index_policy='use_if_present')
+        assert isinstance(memory_session._engine, InMemoryRecallEngine)
+    finally:
+        for path in saved.iterdir():
+            path.rename(cache / path.name)
+    try:
+        for case in fixture.cases:
+            for size in (3, 1):
+                kwargs = _history_kwargs(case, size)
+                assert hydrated.retrieve(**kwargs) == memory_session.retrieve(**kwargs)
+                assert hydrated.retrieve(**{**kwargs, 'include_retrieval_features': True}) == \
+                    memory_session.retrieve(**{**kwargs, 'include_retrieval_features': True})
+                rows = hydrated.retrieve(**kwargs)
+                assert hydrated.render_selected(rows) == memory_session.render_selected(rows)
+    finally:
+        hydrated.close()
+        memory_session.close()

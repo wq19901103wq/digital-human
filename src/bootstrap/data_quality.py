@@ -29,7 +29,7 @@ def acceptance_binding(directory):
     files += [datasets.case_path(directory, role) for role in purpose['roles']]
     root = Path(__file__).parents[1]
     code = [root / n for n in ('bootstrap/data_quality.py', 'bootstrap/import_coverage.py',
-        'bootstrap/ingest.py', 'bootstrap/conversations.py', 'generator/history_sources.py',
+        'bootstrap/ingest.py', 'bootstrap/conversations.py', 'history/sources.py',
         'generator/history.py', 'iteration/datasets.py', 'config.py')]
     code.append(root.parent / 'scripts' / 'check.py')
     before = [stamp(p) for p in files + code]

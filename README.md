@@ -513,20 +513,20 @@ def _terms(text: str) -> list[str]:
 
 这里仍会建一个 `Counter` 对象，但**没有重新从文本计算 terms**。问题在于“给每个 ID 保存词频”不等于“建 term → 候选 ID 的倒排索引”：当前仍需逐条找出哪个示例与查询相关。
 
-#### 12.6 按题隔离：当前确实先遍历整个历史池
+#### 12.6 按题隔离：资格排除由召回引擎提供，旧归档仍是内存全池扫描
 
-入口：[`fewshot/session.py`](src/generator/fewshot/session.py) 的 `retrieve`（资格排除现由召回引擎提供：内存引擎 `history.filter_rows` 语义，索引引擎 `disk_history.BoundedReader.excluded_ids`）：
+入口：[`fewshot/session.py`](src/generator/fewshot/session.py) 的 `retrieve`。当前树是双引擎实现，资格排除按引擎分流：
 
 ```python
-            self._history_sources.validate(history_case)
-            allowed = {str(row['id']) for row in filter_rows(self._rows, history_case)}
-            exclude_ids = set(exclude_ids or ()) | {str(row['id']) for row in self._rows
-                                                   if str(row['id']) not in allowed}
+            pool.history_sources.validate(history_case)
+            # 内存引擎：history.filter_rows 资格并集（等价旧全池扫描语义）
+            # 索引引擎：disk_history.BoundedReader.excluded_ids 的 SQL 排除
+            q.exclude_ids = self._engine.excluded_ids(pool, q)
 ```
 
-[`history.py`](src/generator/history.py) 的 `filter_rows` 对所有行调用 `eligible`，检查当前题的截止点、排除聊天、示例来源是否与目标答案来源交叉等；随后又遍历全池组装排除 ID。输入是池与当前题，输出是本题允许/排除的 ID 集合；两路缓存均未命中时，这部分各做一次。
+[`history.py`](src/generator/history.py) 的 `filter_rows` 对所有行调用 `eligible`，检查当前题的截止点、排除聊天、示例来源是否与目标答案来源交叉等；输入是池与当前题，输出是本题允许/排除的 ID 集合。索引引擎把同一语义委托给绑定发布的磁盘索引（`BoundedReader.excluded_ids`），逐题不再遍历全池组装排除 ID。旧代归档快照（认证 runtime 自带 9月29 版 `few_shot.py`）仍走原实现：内存中对 `self._rows` 做 `filter_rows` 全池扫描并组装排除集，行为被归档字节钉死、不在本次修改范围。
 
-这与静态质量审计不同：**某条历史对话合法，不代表它对每一道题都在时间之前，也不代表它不会包含这道题的目标回复**。逐题隔离不能直接删除，但没有必要用重复全池扫描实现。复用同题资格集合、利用时间/来源索引属于可评估的等价实现；本次只是说明，没有宣称已改好。
+这与静态质量审计不同：**某条历史对话合法，不代表它对每一道题都在时间之前，也不代表它不会包含这道题的目标回复**。逐题隔离不能直接删除；新引擎只是把同一资格语义换成可复用的索引实现，比较语义（第 7 节三方对比）负责证明新旧等价。
 
 #### 12.7 分桶：情境索引不是关键词检索索引
 

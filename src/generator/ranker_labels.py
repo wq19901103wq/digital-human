@@ -207,7 +207,8 @@ class LabelBatch:
         require((original['data'], original['teacher'], original['generator']) ==
                 (self.data.name, self.teacher.name, self.generator.name), '目录版本与冻结候选不符')
         files = [self.inventory / n for n in ('manifest.json', 'inventory.json', 'teacher_sources.json')]
-        runtime = [* (ROOT / 'src/generator').glob('*.py'), * (ROOT / 'src/judge').glob('*.py'),
+        runtime = [* (ROOT / 'src/generator').glob('*.py'), * (ROOT / 'src/generator/fewshot').glob('*.py'),
+            * (ROOT / 'src/judge').glob('*.py'),
             *[ROOT / 'src' / p for p in ('config.py', 'cache.py', 'tracing.py', 'llm.py',
                 'iteration/learning_guard.py', 'iteration/storage.py', 'iteration/parallel.py',
                 'iteration/control.py', 'iteration/quota.py')]]

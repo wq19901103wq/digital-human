@@ -41,19 +41,26 @@ def make_cases(path: Path, count: int = 2) -> list:
     return cases
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def make_fake_archive(root: Path) -> Path:
-    """假归档：manifest 摘要 == 目录名、含旧代 few_shot.py、不含 fewshot 包。"""
-    files = {'src/generator/few_shot.py': 'ab' * 32, 'scripts/run.py': 'cd' * 32}
-    manifest = json.dumps({'files': files}, sort_keys=True)
-    archive = root / digest(json.loads(manifest))
-    (archive / 'src' / 'generator').mkdir(parents=True)
-    (archive / 'scripts').mkdir()
-    (archive / 'src' / '__init__.py').write_text('')
-    (archive / 'src' / 'generator' / '__init__.py').write_text('')
-    (archive / 'src' / 'generator' / 'few_shot.py').write_text('legacy = True\n')
-    (archive / 'scripts' / 'run.py').write_text('legacy = True\n')
-    (archive / 'manifest.json').write_text(manifest)
-    (archive / 'settings.snapshot.yaml').write_text('evaluation: {}\n')
+    """假归档：manifest 摘要 == 目录名、含旧代 few_shot.py、真实文件字节哈希。"""
+    staging = root / '.staging-archive'
+    (staging / 'src' / 'generator').mkdir(parents=True)
+    (staging / 'scripts').mkdir()
+    (staging / 'src' / '__init__.py').write_text('')
+    (staging / 'src' / 'generator' / '__init__.py').write_text('')
+    (staging / 'src' / 'generator' / 'few_shot.py').write_text('legacy = True\n')
+    (staging / 'scripts' / 'run.py').write_text('legacy = True\n')
+    (staging / 'settings.snapshot.yaml').write_text('evaluation: {}\n')
+    value = {'files': {'src/generator/few_shot.py': _sha256(staging / 'src/generator/few_shot.py'),
+                       'scripts/run.py': _sha256(staging / 'scripts/run.py')},
+             'settings_sha256': _sha256(staging / 'settings.snapshot.yaml')}
+    archive = root / digest(value)
+    staging.rename(archive)
+    (archive / 'manifest.json').write_text(json.dumps(value, sort_keys=True), encoding='utf-8')
     return archive
 
 
@@ -129,6 +136,21 @@ def test_verify_baseline_archive_accepts_legacy_and_rejects_others(tmp_path):
         retrieval_compare.verify_baseline_archive(tampered)
 
 
+def test_verify_baseline_archive_rejects_tampered_source_bytes(tmp_path):
+    """I7：篡改归档内一个 py 字节 → 完整字节核验拒绝，即使 manifest 摘要仍相符。"""
+    archive = make_fake_archive(tmp_path)
+    archive.joinpath('src', 'generator', 'few_shot.py').write_text('legacy = False\n')
+    with pytest.raises(ValueError, match='full byte verification'):
+        retrieval_compare.verify_baseline_archive(archive)
+
+
+def test_verify_baseline_archive_accepts_real_a5118947_archive():
+    """真实 a5118947 归档通过完整字节核验（旧基准可信）。"""
+    from _reference_few_shot import archive_root
+    archive = archive_root()
+    assert retrieval_compare.verify_baseline_archive(archive) == archive.resolve()
+
+
 ARCHIVED_FEW_SHOT = '''\
 from pathlib import Path
 
@@ -165,9 +187,9 @@ def test_worker_baseline_loads_archived_few_shot_in_isolated_process(tmp_path):
     assert payload[0]['routes']['recent3']['render']['text'] == 'rendered-by-archived'
 
 
-@pytest.mark.parametrize('engine', ['memory', 'indexed'])
+@pytest.mark.parametrize('engine', ['memory'])
 def test_worker_current_runs_end_to_end(tmp_path, engine):
-    """真子进程：当前树 fewshot 包（内存/索引两引擎）在合成池上完整 drive。"""
+    """真子进程：当前树 fewshot 包（内存引擎）在合成池上完整 drive。"""
     pool = make_pool(tmp_path / 'data')
     make_cases(tmp_path / 'cases.jsonl', count=2)
     root = Path(__file__).resolve().parents[1]
@@ -179,6 +201,43 @@ def test_worker_current_runs_end_to_end(tmp_path, engine):
     payload = json.loads(result.stdout)
     assert [item['case_id'] for item in payload] == ['case-0', 'case-1']
     assert all(item['routes']['recent3']['ids'] for item in payload)
+
+
+def test_worker_current_indexed_fails_loudly_on_plain_pool(tmp_path):
+    """I6：普通池（无历史策略）use_if_present 会回退内存引擎，被试必须明确失败。"""
+    pool = make_pool(tmp_path / 'data')
+    make_cases(tmp_path / 'cases.jsonl', count=1)
+    command = retrieval_compare.worker_command('current', pool=pool,
+                                               cases_file=tmp_path / 'cases.jsonl', count=1,
+                                               engine='indexed')
+    result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+    assert result.returncode != 0
+    assert 'SqliteIndexedRecallEngine' in result.stderr
+
+
+def test_worker_current_indexed_runs_on_frozen_history_pool(tmp_path):
+    """I6 正例：历史池先 build 索引，use_if_present 必须挂 SqliteIndexed 引擎并完整 drive。"""
+    from leakage_support import historical
+    fixture = historical(tmp_path / 'data')
+    pool = fixture.directory / 'fewshot_pool.jsonl'
+    built = open_session(pool, index_policy='build')
+    assert type(built._engine).__name__ == 'SqliteIndexedRecallEngine'
+    built.close()
+    cases = fixture.cases[:2]
+    cases_file = tmp_path / 'cases.jsonl'
+    cases_file.write_text('\n'.join(json.dumps(case, ensure_ascii=False) for case in cases) + '\n',
+                          encoding='utf-8')
+    command = retrieval_compare.worker_command('current', pool=pool, cases_file=cases_file,
+                                               count=len(cases), engine='indexed')
+    result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert [item['case_id'] for item in payload] == [case['case_id'] for case in cases]
+    assert all(set(item['routes']) == {'recent3', 'recent1'} for item in payload)
 
 
 def test_compare_launches_three_isolated_workers_and_writes_full_output(tmp_path, monkeypatch):

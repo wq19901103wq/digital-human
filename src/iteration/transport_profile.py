@@ -158,8 +158,7 @@ class TransportProfile:
     @contextmanager
     def instrument(self, *, history_required=True, disk_history=None):
         from src import llm, tracing
-        from src.generator import few_shot, history, shared_history
-        from src.history import sources as history_sources
+        from src.generator import few_shot, history, history_sources, shared_history
         from src.iteration import control, datasets, learning_guard
         originals = []
 

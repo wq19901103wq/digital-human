@@ -25,7 +25,8 @@ from typing import Any
 from . import rank
 from .prepare import PreparedPool
 from .query import QueryContext
-from .recall_engines import InMemoryRecallEngine, open_index_engine
+from .recall_engines import (InMemoryRecallEngine, build_index_engine,
+                             prepare_engine)
 
 
 class RecallSession:
@@ -34,6 +35,12 @@ class RecallSession:
     def __init__(self, pool: PreparedPool, engine=None):
         self._pool = pool
         self._engine = engine if engine is not None else InMemoryRecallEngine()
+        # I4：处境标签/画像惰性缓存（与旧类 retrieve 打分循环内缓存逐字节同
+        # 语义）：标签键 id、画像键 (id, gap_move)，按“同 ID 行第一次进入循环”
+        # 的那行计算并驻留，跨查询有效（普通池只在 open_session 边界准备，
+        # 无需旧实现的 mtime 失效分支）。
+        self._row_situation_tag_cache: dict[str, set[str]] = {}
+        self._row_situation_profile_cache: dict[tuple[str, bool], dict[str, str]] = {}
         # 受控 identity 属性（适配器层 retrieval_cache 键扫描兼容，见模块文档）。
         # 属性在构造时从 PreparedPool 快照；与旧 PersonaFewShotRetriever 一样
         # 逐题路径不重读这些值。
@@ -186,9 +193,13 @@ class RecallSession:
             candidates = safe_candidates
             q.candidate_pool_sparse_portable = True
         indexed_features = self._engine.term_features(pool, q.query_terms)
-        selected = rank.score_and_select(pool, q, candidates, indexed_features)
-        # 设计 §4 返回边界：递归解冻深拷贝，嵌套可变、与池内部零共享。
-        return copy.deepcopy(selected)
+        selected = rank.score_and_select(
+            pool, q, candidates, indexed_features,
+            (self._row_situation_tag_cache, self._row_situation_profile_cache),
+        )
+        # 设计 §4 返回边界：先解冻为独立 dict 再递归深拷贝，嵌套可变、与池
+        # 内部零共享（I10 冻结后行是 MappingProxyType，不可直接 deepcopy）。
+        return copy.deepcopy([dict(row) for row in selected])
 
     def _candidate_rows(self, is_group: bool, situations: set[str], excluded=None) -> list[dict[str, Any]]:
         pool = self._pool
@@ -273,16 +284,28 @@ class RecallSession:
 def open_session(path: Path, *, render_path: Path | None = None,
                  flags: dict[str, bool] | None = None,
                  index_policy: str = 'build') -> RecallSession:
-    """唯一组装入口：PreparedPool.load() → 按索引矩阵挂引擎 → RecallSession。
+    """唯一组装入口（I9 准备顺序）：_bind_history → 探测索引绑定。
 
-    索引矩阵（设计 §4）：仅历史策略池且无替换展示库时考虑磁盘索引；
-    干净缺失 + use_if_present → 内存引擎（不落盘）；发布不完整/损坏/来源
-    核验失败 → database() 抛错拒绝（无 try 回退）；其余按 policy 构建或打开。
+    - 历史策略池且无替换展示库：先探测索引绑定（代码摘要/flags/内容哈希
+      匹配即有效）→ 有效则 prepare_engine 单遍水合物化状态并挂
+      SqliteIndexedRecallEngine（来源验证由绑定内容哈希保证，恢复后仍调
+      pool 的 check() stamp 轻量检查）；
+    - 索引无效/缺失 → 内存 _load 装载（逐行来源核验 + 特征物化），policy=build
+      时再构建索引挂索引引擎，use_if_present 则挂内存引擎（不落盘）；
+    - 发布不完整/损坏/来源核验失败仍由 database()/load 抛错拒绝，不回退。
+    index_policy 语义不变（build/use_if_present）。
     """
-    pool = PreparedPool.load(path, render_path=render_path, flags=flags)
+    pool = PreparedPool(path, render_path=render_path, flags=flags)
+    pool._bind_history()
     engine = None
-    if pool.history_policy and pool.render_path is None:
-        engine = open_index_engine(pool, index_policy)
+    indexable = bool(pool.history_policy) and pool.render_path is None
+    if indexable:
+        engine = prepare_engine(pool, index_policy)
+    if engine is None:
+        pool._load()
+        pool._freeze()
+        if indexable and index_policy == 'build':
+            engine = build_index_engine(pool)
     if engine is None:
         engine = InMemoryRecallEngine()
     return RecallSession(pool, engine)

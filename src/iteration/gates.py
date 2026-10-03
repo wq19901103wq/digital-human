@@ -112,7 +112,9 @@ def materials(spec: dict) -> dict:
                          for d in dirs},
             'judge_templates': {str(p.resolve()): sha256_file(p) for p in judge_templates(spec)},
             'implementation': {name: sha256_file(source / name) for name in (
-                'judge/judge.py', 'judge/corrected.py', 'generator/generator.py', 'generator/few_shot.py',
+                'judge/judge.py', 'judge/corrected.py', 'generator/generator.py',
+                'generator/fewshot/session.py', 'generator/fewshot/prepare.py',
+                'generator/fewshot/rank.py', 'generator/fewshot/recall_engines.py',
                 'generator/history.py', 'llm.py', 'iteration/runner.py',
                 'judge/gbdt.py', 'judge/fusion.py', 'judge/lr_retrain.py', 'iteration/draw_replay.py',
                 'judge/embedding.py', 'judge/embedding_runtime.py',

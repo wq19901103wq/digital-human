@@ -5,8 +5,11 @@
 - SqliteIndexedRecallEngine：直接委托 disk_history.BoundedReader 的
   excluded_ids / term_overlaps / context_length（不复制 SQL），
   与现有 AST 补丁路径（indexed_retrieval.py）的替换语义一致。
-- open_index_engine：按设计 §4 索引矩阵打开/构建磁盘索引；disk_history.py
-  只读使用（database() 的发布/校验/损坏拒绝语义原样沿用，不做 try 回退）。
+- prepare_engine / build_index_engine：按设计 §4 索引矩阵分三态（I9）：
+  绑定有效 → 单遍水合 PreparedPool 并挂索引引擎；干净缺失 → None（由
+  open_session 按 index_policy 决定内存装载或构建）；发布不完整/损坏/来源
+  核验失败 → database() 抛错拒绝（fail-closed，无 try 回退）。
+  disk_history.py 只读使用。
 """
 from __future__ import annotations
 
@@ -148,31 +151,71 @@ def _line_locations(pool):
             offset += len(line)
 
 
-def open_index_engine(pool, policy: str) -> SqliteIndexedRecallEngine | None:
-    """打开（或按 policy 构建）磁盘索引引擎；干净缺失 + use_if_present 返回 None。
+def index_binding(pool) -> dict:
+    """索引绑定（与旧 open_index_engine 逐字段一致：代码摘要/flags/来源哈希）。"""
+    from .. import disk_history
 
-    矩阵（设计 §4）：发布不完整/校验和不符/SQLite 损坏/来源核验失败一律由
-    disk_history.database() 抛错拒绝，这里不做任何 try 回退。
+    package_dir = Path(__file__).resolve().parent
+    source_code = hashlib.sha256(
+        ''.join(disk_history.checksum(path) for path in sorted(package_dir.glob('*.py'))).encode()
+    ).hexdigest()
+    return dict(kind='examples', hashes=dict(pool.history_sources.hashes), flags=dict(pool.flags),
+                source_code=source_code)
+
+
+def index_target(source: Path, binding: dict) -> tuple[Path, Path]:
+    """索引 sqlite/manifest 路径（身份公式与 disk_history.database 相同）。"""
+    from .. import disk_history
+
+    root = Path(source).parent.parent / '.cache' / 'disk-history'
+    identity = hashlib.sha256(disk_history.encoded(dict(
+        mode=disk_history.MODE, adapter=disk_history.checksum(disk_history.__file__),
+        binding=binding)).encode()).hexdigest()
+    target = root / (identity + '.sqlite3')
+    return target, target.with_suffix('.json')
+
+
+def prepare_engine(pool, policy: str) -> SqliteIndexedRecallEngine | None:
+    """探测索引绑定并（有效时）单遍水合 PreparedPool（I9）。
+
+    - 索引存在（sqlite/manifest 任一）→ 交 database() 校验并打开：发布不完整/
+      校验和不符/SQLite 损坏一律抛错拒绝，fail-closed 不回退；打开后从 sqlite
+      单遍恢复物化状态（来源验证由绑定内容哈希保证，恢复后仍调 pool 的
+      check() 做 stamp 轻量检查）。
+    - 干净缺失 → 返回 None，由 open_session 按 index_policy 决定内存装载
+      （use_if_present）或内存装载后构建（build）。
     """
     if policy not in ('build', 'use_if_present'):
         raise ValueError(f'未知索引策略: {policy!r}')
     from .. import disk_history
 
     source = Path(pool.path)
-    package_dir = Path(__file__).resolve().parent
-    source_code = hashlib.sha256(
-        ''.join(disk_history.checksum(path) for path in sorted(package_dir.glob('*.py'))).encode()
-    ).hexdigest()
-    binding = dict(kind='examples', hashes=dict(pool.history_sources.hashes), flags=dict(pool.flags),
-                   source_code=source_code)
-    root = source.parent.parent / '.cache' / 'disk-history'
-    identity = hashlib.sha256(disk_history.encoded(dict(
-        mode=disk_history.MODE, adapter=disk_history.checksum(disk_history.__file__),
-        binding=binding)).encode()).hexdigest()
-    target = root / (identity + '.sqlite3')
-    manifest = target.with_suffix('.json')
-    if policy == 'use_if_present' and not target.exists() and not manifest.exists():
+    binding = index_binding(pool)
+    target, manifest = index_target(source, binding)
+    if not target.exists() and not manifest.exists():
         return None
+
+    def build(connection):
+        # 探测与打开之间索引被并发删除时才可能到达；构建需要内存物化状态，
+        # 此处池未装载，禁止产出半成品索引。
+        raise ValueError('disk history index disappeared between probe and open')
+
+    connection = disk_history.database(source, binding, build)
+    reader = disk_history.BoundedReader(source, connection)
+    pool.hydrate_from_index(reader)
+    return SqliteIndexedRecallEngine(reader)
+
+
+def build_index_engine(pool) -> SqliteIndexedRecallEngine:
+    """内存装载完成后构建（或复用）磁盘索引并挂索引引擎（policy=build 路径）。
+
+    构建期来源核验失败由 database() 的 build 抛错，发布不完整/损坏拒绝语义
+    与矩阵一致，不做任何 try 回退。
+    """
+    from .. import disk_history
+
+    source = Path(pool.path)
+    binding = index_binding(pool)
 
     def build(connection):
         pool.check()

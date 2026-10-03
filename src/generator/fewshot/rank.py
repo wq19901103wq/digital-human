@@ -405,15 +405,20 @@ def _row_situation_tags(
 # 2) sample_text/sample_terms/overlap/length_similarity 四行：indexed_features
 #    非 None 时取 (overlap, context_length)，length_similarity 用 context_length
 #    计算（与补丁一致）；为 None 时走旧四行（Counter 路径）；
-# 3) 处境/画像从 pool 的物化缓存按 (id, gap_move) 取（旧 763-786 行逻辑的
-#    准备期固化），prioritize_latest_turn 分支的 _latest_*_by_id 直取语义不变。
+# 3) 处境/画像（I4）：非 prioritize_latest_turn 分支不在准备期物化，改由
+#    ``row_caches``（RecallSession 持有的惰性 dict：标签键 id、画像键
+#    (id, gap_move)）在循环内按传入 row 计算、首次驻留、跨查询——与旧类
+#    retrieve 打分循环内 ``_row_situation_tag_cache/_row_situation_profile_cache``
+#    语义逐字节一致（同 ID 行第一次进入循环的那行生效）；row_caches 为 None
+#    时逐行直算（等价旧归档参照的纯函数路径）；
+#    prioritize_latest_turn 分支的 _latest_*_by_id 直取语义不变。
 # below_threshold 回退、排序键、多样性、trace 全部字段（含
 # production_semantic_gate_fallback_used 的两处赋值差异）、dict(row) 拷贝
 # 均逐字保留。
 # ---------------------------------------------------------------------------
 
 
-def score_and_select(pool, q, candidates, indexed_features=None) -> list[dict]:
+def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None) -> list[dict]:
     query_terms = q.query_terms
     query = q.query
     exclude_ids = q.exclude_ids
@@ -450,12 +455,24 @@ def score_and_select(pool, q, candidates, indexed_features=None) -> list[dict]:
                 )
         else:
             row_id = str(row["id"])
-            row_situations = pool._row_situation_tag_by_id[row_id]
             gap_move = (
                 pool.enable_information_gap_response_move
                 and query_profile.get("expected_response_move") == "verify_or_request_detail"
             )
-            row_profile = pool._row_situation_profile_by_id[(row_id, gap_move)]
+            if row_caches is None:
+                row_situations = _row_situation_tags(row, pool.enable_clarification)
+                row_profile = _row_situation_profile(row, pool.enable_clarification, gap_move)
+            else:
+                tag_cache, profile_cache = row_caches
+                row_situations = tag_cache.get(row_id)
+                if row_situations is None:
+                    row_situations = _row_situation_tags(row, pool.enable_clarification)
+                    tag_cache[row_id] = row_situations
+                profile_key = (row_id, gap_move)
+                row_profile = profile_cache.get(profile_key)
+                if row_profile is None:
+                    row_profile = _row_situation_profile(row, pool.enable_clarification, gap_move)
+                    profile_cache[profile_key] = row_profile
         situation_overlap = query_situations & row_situations
         profile_compatibility = _profile_compatibility(query_profile, row_profile)
         query_response_move = query_profile.get("expected_response_move")

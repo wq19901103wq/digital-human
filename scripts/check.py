@@ -232,6 +232,13 @@ def check_retrieval(args, report):
             args.instance, args.exp, cases=args.cases,
             baseline_runtime=args.baseline_runtime, output=args.compare_output)):
         return
+    # 对比完成但不等价 = 校验失败：必须让入口整体失败，不能让下游 profile 盖过。
+    compare_result = report.value['checks'][-1]['detail']
+    if compare_result.get('equivalent') is not True:
+        mismatches = compare_result.get('mismatches') or []
+        report.failure('retrieval_equivalence', RuntimeError(
+            f'三方检索对比不等价：{len(mismatches)} 处差异，首条={mismatches[:1]}'))
+        return
     if not report.run('frozen_retrieval_profile', lambda: inspect(args.instance, args.exp,
             cases=args.cases, repeats=args.repeats, materials=args.materials)):
         return

@@ -475,10 +475,12 @@ def launch(directory, *, instance, job, workers, seconds, kind='pack', feature_o
     transport = Path(__file__).resolve()
     if snapshot_generation(snapshot, runtime) == 'fewshot':
         # Modern snapshots are self-contained: their own transport assembles the
-        # archived new packages, so the live tree is never imported.
-        transport = snapshot / 'scripts' / 'pack_transport.py'
+        # archived new packages, so the live tree is never imported. The frozen
+        # entry ships at its recorded source path (same layout as a5118947-style
+        # archives keep src/iteration/pack_transport.py).
+        transport = snapshot / 'src' / 'iteration' / 'pack_transport.py'
         if not transport.is_file():
-            raise runtime.ConfigError('modern snapshot is missing scripts/pack_transport.py')
+            raise runtime.ConfigError('modern snapshot is missing src/iteration/pack_transport.py')
     command = [sys.executable, '-B', '-u', str(transport),
                '--snapshot', str(snapshot), '--instance', instance, '--job', job,
                '--workers', str(workers), '--timeout-seconds', str(seconds), '--kind', kind]
@@ -493,10 +495,21 @@ def launch(directory, *, instance, job, workers, seconds, kind='pack', feature_o
         'DH_SETTINGS_FILE': str(snapshot / 'settings.snapshot.yaml')})
 
 
-def complete_saved_features(directory, output, workers):
-    """Extract only a complete frozen recall checkpoint, without history loading."""
+def complete_saved_features(directory, output, workers, *, generation=None):
+    """Extract only a complete frozen recall checkpoint, without history loading.
+
+    generation: 'few_shot' 旧代快照走归档自带 src/generator/history_sources.py；
+    'fewshot' 新代快照走 src/history/sources.py；None 默认新包（活树 shim 与
+    新包同源，保持旧调用方在当前树进程中的行为）。两代路径由 _run_legacy /
+    _run_modern 显式注入。
+    """
     from src.config import sha256_file
-    from src.history.sources import digest, require
+    if generation in (None, 'fewshot'):
+        from src.history.sources import digest, require
+    elif generation == 'few_shot':
+        from src.generator.history_sources import digest, require
+    else:
+        raise ValueError(f'unknown snapshot generation: {generation}')
     from src.iteration import control, experiment, learned_gen, learning_guard, runtime, versions
     from src.iteration.parallel import worker_limit
     from src.iteration.storage import file_lock, read_json, write_json
@@ -700,7 +713,7 @@ def _run_legacy(args, snapshot, directory):
                'created_at': time.time(), 'pid': os.getpid()}
     write_once_json(directory / 'transport_overrides' / (uuid.uuid4().hex + '.json'), receipt)
     if args.kind == 'features':
-        complete_saved_features(directory, args.feature_output, args.workers)
+        complete_saved_features(directory, args.feature_output, args.workers, generation='few_shot')
         return
     if args.kind == 'promotion':
         print('Frozen promotion: reusing saved results; all original adoption gates retained', flush=True)
@@ -776,7 +789,7 @@ def _run_modern(args, snapshot, directory):
                'created_at': time.time(), 'pid': os.getpid()}
     write_once_json(directory / 'transport_overrides' / (uuid.uuid4().hex + '.json'), receipt)
     if args.kind == 'features':
-        complete_saved_features(directory, args.feature_output, args.workers)
+        complete_saved_features(directory, args.feature_output, args.workers, generation='fewshot')
         return
     if args.kind == 'promotion':
         print('Frozen promotion: reusing saved results; all original adoption gates retained', flush=True)

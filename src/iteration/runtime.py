@@ -67,6 +67,28 @@ def freeze(directory, *, root=ROOT):
     return verify(path)
 
 
+def verify_archive(root, *, check_environment=True):
+    """Verify an authenticated snapshot directory itself: manifest digest == directory
+    name, plus every listed file byte and the frozen settings. Callers that execute
+    archived code (e.g. the retrieval compare baseline) use this to reject tampered
+    archives before any import; environment pinning stays opt-in.
+    """
+    root = Path(root)
+    value = json.loads((root / 'manifest.json').read_text())
+    if digest(value) != root.name:
+        raise ConfigError('runtime content identifier changed')
+    if check_environment and environment() != value['environment']:
+        raise ConfigError('runtime interpreter or dependency versions changed; use the pinned environment')
+    if value.get('settings_sha256') is not None and \
+            sha256_file(root / 'settings.snapshot.yaml') != value['settings_sha256']:
+        raise ConfigError('frozen instance settings changed')
+    for name, expected in value['files'].items():
+        p = root / name
+        if Path(name).is_absolute() or '..' in Path(name).parts or p.is_symlink() or sha256_file(p) != expected:
+            raise ConfigError('runtime source changed')
+    return root
+
+
 def verify(path, *, check_environment=True):
     """Verify frozen bytes; execution additionally requires the pinned environment.
 
@@ -77,21 +99,9 @@ def verify(path, *, check_environment=True):
     if len(ref) != 64 or any(c not in '0123456789abcdef' for c in ref):
         raise ConfigError('invalid runtime identifier')
     root = versions.PRIVATE / 'runtimes' / ref
-    manifest = root / 'manifest.json'
-    if sha256_file(manifest) != record['manifest_sha256']:
+    if sha256_file(root / 'manifest.json') != record['manifest_sha256']:
         raise ConfigError('runtime manifest changed')
-    value = json.loads(manifest.read_text())
-    if digest(value) != ref:
-        raise ConfigError('runtime content identifier changed')
-    if check_environment and environment() != value['environment']:
-        raise ConfigError('runtime interpreter or dependency versions changed; use the pinned environment')
-    if sha256_file(root / 'settings.snapshot.yaml') != value['settings_sha256']:
-        raise ConfigError('frozen instance settings changed')
-    for name, expected in value['files'].items():
-        p = root / name
-        if Path(name).is_absolute() or '..' in Path(name).parts or p.is_symlink() or sha256_file(p) != expected:
-            raise ConfigError('runtime source changed')
-    return root
+    return verify_archive(root, check_environment=check_environment)
 
 
 def verify_historical_implementation(directory, implementation):

@@ -9,6 +9,20 @@
 fail-closed 语义原样保留。与旧实现的差异（设计 §4 生命周期措辞）：
 普通池只在 open_session/PreparedPool.load 边界准备一次，池文件在会话期
 间的变化不在逐题路径重新加载（历史池的来源 stamp 变化仍由 check() 立即拒绝）。
+
+I4：处境标签/画像不在准备期按 ID 物化——重复 ID 时旧类是打分循环内惰性
+缓存（同 ID 行第一次进入循环的那行参与计算并驻留、跨查询），标签键 id、
+画像键 (id, gap_move)；该缓存现住在 RecallSession 上（见 session.py）。
+
+I10：load 完成后 PreparedPool 深只读——行 tuple 化并逐行包 MappingProxyType，
+桶/特征/画像/flags 等映射包 MappingProxyType；任何属性赋值抛 TypeError。
+嵌套 list（如 row['context']）保持可变（顶层结构冻结、深层不做防御拷贝），
+文档注明：召回返回时已做递归解冻深拷贝，调用方拿到的仍是独立 list/dict。
+
+I9：历史池存在有效磁盘索引时，open_session 先探测索引绑定（代码摘要/
+flags/内容哈希），有效则本模块 hydrate_from_index 从 sqlite 单遍恢复物化
+状态（行/桶/特征一次按 position 顺序载入；来源验证由绑定内容哈希保证，
+恢复后仍调 check() 做 stamp 轻量检查）；无效/缺失才走内存 _load。
 """
 from __future__ import annotations
 
@@ -17,6 +31,7 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from ...history.sources import load as load_history_sources
@@ -48,14 +63,16 @@ def _is_trusted_human_example(row: dict[str, Any]) -> bool:
 
 
 class PreparedPool:
-    """一次性准备的全部状态持有者；load 之后逐题路径只读。
+    """一次性准备的全部状态持有者；load 之后逐题路径只读（I10 深只读）。
 
-    内部用普通 dict/list 持有（不做深拷贝防御）；属性以下划线开头，
-    包外请只读访问（rows/history_policy/flags 等只读属性见下）。
+    load/hydrate 完成后结构冻结：属性赋值抛 TypeError，行与映射均为
+    MappingProxyType/tuple。构建期（_load/hydrate 内部）在冻结前完成全部
+    可变操作。
     """
 
     def __init__(self, path: Path, *, render_path: Path | None = None,
                  flags: dict[str, bool] | None = None):
+        self._frozen = False
         self.path = Path(path)
         self.render_path = Path(render_path) if render_path is not None else None
         merged = dict(_DEFAULT_FLAGS)
@@ -82,13 +99,38 @@ class PreparedPool:
         self._latest_turn_forms_by_id: dict[str, str] = {}
         self._group_participant_profiles_by_id: dict[str, tuple[bool, bool, bool, bool, bool]] = {}
         self._terms_by_id: dict[str, Counter] = {}
-        # 旧逐题 ``(row_id, gap_move)`` 缓存语义固化到准备期：
-        # 处境标签只依赖行与实例旗标，按行缓存（首个同 ID 行生效，与旧缓存一致）；
-        # 处境画像依赖 gap_move，两版都在 load 时算好。
-        self._row_situation_tag_by_id: dict[str, set[str]] = {}
-        self._row_situation_profile_by_id: dict[tuple[str, bool], dict[str, str]] = {}
         self._render_mtime_ns = -1
         self._render_rows_by_id: dict[str, dict[str, Any]] = {}
+
+    # -- I10 深只读 --------------------------------------------------------
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, '_frozen', False):
+            raise TypeError('PreparedPool 已冻结（深只读）：禁止属性赋值')
+        object.__setattr__(self, name, value)
+
+    def _freeze(self) -> None:
+        """构建完成后冻结全部内部结构（行 tuple + MappingProxyType）。
+
+        桶成员与 _rows 持有同一批行代理（id(row) 映射保证身份一致，
+        _build_examples 的 ``member is row`` 判定不受影响）。
+        """
+        proxies = {id(row): MappingProxyType(row) for row in self._rows}
+        object.__setattr__(self, '_rows', tuple(proxies[id(row)] for row in self._rows))
+        for name in ('_rows_by_group', '_rows_by_group_situation',
+                     '_rows_by_group_precise_situation', '_rows_by_group_latest_situation'):
+            mapping = getattr(self, name)
+            object.__setattr__(self, name, MappingProxyType({
+                key: [proxies[id(member)] for member in members]
+                for key, members in mapping.items()
+            }))
+        for name in ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
+                     '_group_participant_profiles_by_id', '_terms_by_id'):
+            object.__setattr__(self, name, MappingProxyType(getattr(self, name)))
+        object.__setattr__(self, '_render_rows_by_id', MappingProxyType({
+            key: MappingProxyType(row) for key, row in self._render_rows_by_id.items()
+        }))
+        object.__setattr__(self, 'flags', MappingProxyType(self.flags))
+        object.__setattr__(self, '_frozen', True)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -98,6 +140,7 @@ class PreparedPool:
         pool = cls(path, render_path=render_path, flags=flags)
         pool._bind_history()
         pool._load()
+        pool._freeze()
         return pool
 
     # -- 只读访问 --------------------------------------------------------
@@ -205,20 +248,12 @@ class PreparedPool:
         group_participant_profiles_by_id: dict[str, tuple[bool, bool, bool, bool, bool]] = {}
         render_rows = self._load_render_rows()
         terms_by_id: dict[str, Counter] = {}
-        row_situation_tag_by_id: dict[str, set[str]] = {}
-        row_situation_profile_by_id: dict[tuple[str, bool], dict[str, str]] = {}
         for row in rows:
             group = row.get("relationship") == "group"
             rows_by_group[group].append(row)
             identity = str(row["id"])
+            # I4：处境标签/画像不在准备期物化（重复 ID 语义见模块文档）。
             row_tags = rank._row_situation_tags(row, self.enable_clarification)
-            # 逐题缓存首个同 ID 行生效：与旧按题缓存（题内首次计算结果驻留）一致。
-            if identity not in row_situation_tag_by_id:
-                row_situation_tag_by_id[identity] = row_tags
-            for gap_move in (False, True):
-                if (identity, gap_move) not in row_situation_profile_by_id:
-                    row_situation_profile_by_id[(identity, gap_move)] = rank._row_situation_profile(
-                        row, self.enable_clarification, gap_move)
             # 桶成员资格按行自身标签（与旧 _load 逐行计算一致，重复 ID 各按各行）。
             for situation in row_tags:
                 rows_by_group_situation.setdefault((group, situation), []).append(row)
@@ -258,6 +293,59 @@ class PreparedPool:
         self._latest_turn_forms_by_id = latest_turn_forms_by_id
         self._group_participant_profiles_by_id = group_participant_profiles_by_id
         self._terms_by_id = terms_by_id
-        self._row_situation_tag_by_id = row_situation_tag_by_id
-        self._row_situation_profile_by_id = row_situation_profile_by_id
         return rows
+
+    # -- I9：从有效磁盘索引单遍水合物化状态（等价适配器 load_examples 恢复段）----
+    def hydrate_from_index(self, reader) -> None:
+        """索引绑定已由 database() 校验（代码摘要/flags/来源内容哈希），此处
+        单遍恢复行/桶/特征（按 position 顺序；行内容经 reader pread 按需解码）。
+
+        语义与适配器 disk_history.load_examples 的恢复后半段一致，重复 ID
+        保持末行覆盖（latest_* / terms 均 ORDER BY position 后写）。恢复后
+        调 check() 做来源 stamp 轻量检查，随后冻结（I10）。
+        """
+        from .. import disk_history
+
+        if self.history_sources is None:
+            raise ValueError('仅历史策略池可从磁盘索引恢复')
+        connection = reader.connection
+        rows: list[dict[str, Any]] = []
+        rows_by_group: dict[bool, list[dict[str, Any]]] = {False: [], True: []}
+        restored_buckets: dict[str, dict[tuple[bool, str], list[dict[str, Any]]]] = {
+            name: {} for name in disk_history.BUCKETS}
+        for offset, size, stored_buckets in connection.execute(
+                'SELECT offset,size,buckets FROM examples ORDER BY position'):
+            row = reader.row(offset, size)
+            rows.append(row)
+            group = row.get('relationship') == 'group'
+            rows_by_group[group].append(row)
+            for name, keys in zip(disk_history.BUCKETS, json.loads(stored_buckets)):
+                for key in keys:
+                    restored_buckets[name].setdefault((group, key), []).append(row)
+        latest_situations_by_id: dict[str, set[str]] = {}
+        latest_profiles_by_id: dict[str, dict[str, str]] = {}
+        latest_turn_forms_by_id: dict[str, str] = {}
+        group_participant_profiles_by_id: dict[str, tuple[bool, bool, bool, bool, bool]] = {}
+        for (identity, situations, profile, turn_form, participants) in connection.execute(
+                'SELECT id, latest_situations, latest_profile, latest_turn_form, '
+                'group_participant_profile FROM examples ORDER BY position'):
+            latest_situations_by_id[identity] = set(json.loads(situations))
+            latest_profiles_by_id[identity] = json.loads(profile)
+            latest_turn_forms_by_id[identity] = turn_form
+            group_participant_profiles_by_id[identity] = tuple(json.loads(participants))
+        terms_by_id: dict[str, Counter] = {}
+        for identity, term, count in connection.execute('SELECT id, term, count FROM terms'):
+            terms_by_id.setdefault(identity, Counter())[term] = count
+        self._mtime_ns = self.path.stat().st_mtime_ns
+        self._rows = rows
+        self._rows_by_group = rows_by_group
+        self._rows_by_group_situation = restored_buckets[disk_history.BUCKETS[0]]
+        self._rows_by_group_precise_situation = restored_buckets[disk_history.BUCKETS[1]]
+        self._rows_by_group_latest_situation = restored_buckets[disk_history.BUCKETS[2]]
+        self._latest_situations_by_id = latest_situations_by_id
+        self._latest_profiles_by_id = latest_profiles_by_id
+        self._latest_turn_forms_by_id = latest_turn_forms_by_id
+        self._group_participant_profiles_by_id = group_participant_profiles_by_id
+        self._terms_by_id = terms_by_id
+        self.check()
+        self._freeze()

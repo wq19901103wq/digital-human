@@ -7,8 +7,8 @@ import pytest
 
 from src import llm
 from src.config import ConfigError
-from src.generator import few_shot
 from src.iteration import pack_transport, runtime, versions
+from _reference_few_shot import few_shot
 from test_fewshot_selection import generator
 from test_leakage_guards import env as env
 

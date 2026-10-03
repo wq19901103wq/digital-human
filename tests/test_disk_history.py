@@ -12,7 +12,8 @@ from test_leakage_guards import env as env
 from test_fewshot_selection import generator
 from src.bootstrap import history
 from src.config import ConfigError, sha256_file
-from src.generator import disk_history, few_shot
+from src.generator import disk_history
+from _reference_few_shot import few_shot
 from src.history import sources as history_sources
 from src.generator import history as eligibility
 from src.generator import indexed_retrieval

@@ -133,6 +133,15 @@ def _worker_current(args) -> list:
     from src.generator.fewshot.recall_engines import InMemoryRecallEngine
     if args.engine == 'indexed':
         retriever = fewshot_session.open_session(Path(args.pool), index_policy='use_if_present')
+        # use_if_present 可能因索引缺失/不完整静默回退内存引擎；被试必须明确
+        # 失败并记录实际引擎与索引身份，不能让内存结果被标注为 SqliteIndexed。
+        engine_type = type(retriever._engine).__name__
+        if engine_type != 'SqliteIndexedRecallEngine':
+            reader = getattr(retriever._engine, '_reader', None)
+            index_source = getattr(reader, 'source', None)
+            raise RuntimeError(f'indexed subject must run SqliteIndexedRecallEngine, '
+                               f'got {engine_type} (pool={args.pool}, index_source={index_source}); '
+                               'build or repair the frozen history index first')
     else:
         pool = prepare.PreparedPool.load(Path(args.pool))
         retriever = fewshot_session.RecallSession(pool, InMemoryRecallEngine())
@@ -164,7 +173,8 @@ def _worker_main(argv=None) -> list:
 # ---------------------------------------------------------------------------
 
 def verify_baseline_archive(archive: Path) -> Path:
-    """认证归档：manifest 摘要 == 目录名、旧代清单（含 few_shot、不含 fewshot 包）。"""
+    """认证归档：manifest 摘要 == 目录名、旧代清单（含 few_shot、不含 fewshot 包）、
+    且 manifest 钉死的全部文件字节逐一相符（篡改归档代码必须拒绝，I7）。"""
     from . import runtime
     from .pack_transport import snapshot_generation
     archive = Path(archive).resolve()
@@ -178,6 +188,10 @@ def verify_baseline_archive(archive: Path) -> Path:
         raise ValueError('baseline runtime archive is not a legacy (few_shot) generation archive')
     if not (archive / 'src' / 'generator' / 'few_shot.py').is_file():
         raise ValueError('baseline runtime archive is missing src/generator/few_shot.py')
+    try:
+        runtime.verify_archive(archive, check_environment=False)
+    except runtime.ConfigError as exc:
+        raise ValueError(f'baseline runtime archive failed full byte verification: {exc}') from exc
     return archive
 
 
