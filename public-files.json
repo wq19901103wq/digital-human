@@ -384,6 +384,7 @@
     "tests/test_message_ingestion.py",
     "tests/test_ownership_report.py",
     "tests/test_pack_transport.py",
+    "tests/test_pack_transport_generation.py",
     "tests/test_pairwise_models.py",
     "tests/test_pairwise_policy_comparison.py",
     "tests/test_pairwise_tuning.py",

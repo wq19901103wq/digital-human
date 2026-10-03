@@ -443,6 +443,8 @@ def test_main_records_and_scopes_disk_storage(env, tmp_path, monkeypatch, kind, 
     monkeypatch.setattr(pack_transport, 'live_disk_history', lambda: disk_history)
     monkeypatch.setattr(pack_transport, 'live_material_reuse', lambda: material_reuse)
     monkeypatch.setattr(jobs, 'directory', lambda job: directory)
+    # Dispatch reads the verified snapshot manifest: this fake snapshot is legacy.
+    write_json(tmp_path / 'manifest.json', {'files': {'src/generator/few_shot.py': 'ab' * 32}})
     monkeypatch.setattr(runtime, 'verify', lambda path: tmp_path)
     checked = []
     monkeypatch.setattr(runtime, 'require_current', lambda path: checked.append(path))
@@ -817,6 +819,8 @@ def test_frozen_launch_keeps_checkpoint_and_rejects_tampering(env, tmp_path, mon
     source = tmp_path / 'source'
     (source / 'src').mkdir(parents=True)
     (source / 'src/module.py').write_text('value = 1\n')
+    (source / 'src/generator').mkdir()
+    (source / 'src/generator/few_shot.py').write_text('legacy = True\n')
     directory = env.root / folder / 'synthetic'
     snapshot = runtime.freeze(directory, root=source)
     checkpoint = directory / 'building.json'

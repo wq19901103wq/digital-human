@@ -405,13 +405,81 @@ def archived_gbdt_paths(module, runtime):
         module.verify = original_verify
 
 
+def snapshot_generation(snapshot, runtime):
+    """Classify an authenticated snapshot by its manifest file list (design §2.3a).
+
+    The verified manifest decides the generation before any import that could
+    reach a retrieval module: legacy archives carry ``src/generator/few_shot.py``;
+    modern archives carry the self-contained ``src/generator/fewshot/`` package.
+    Anything else is rejected (fail-closed).
+    """
+    try:
+        manifest = json.loads((Path(snapshot) / 'manifest.json').read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise runtime.ConfigError(f'cannot classify snapshot generation: {exc}') from exc
+    files = manifest.get('files')
+    if not isinstance(files, dict):
+        raise runtime.ConfigError('cannot classify snapshot generation: manifest has no files map')
+    legacy = any(name in files for name in ('src/generator/few_shot.py',
+                                            'src/digital_human/generator/few_shot.py'))
+    modern = any(name == 'src/generator/fewshot' or name.startswith('src/generator/fewshot/')
+                 for name in files)
+    if legacy and modern:
+        raise runtime.ConfigError('cannot classify snapshot generation: manifest contains both '
+                                  'src/generator/few_shot.py and src/generator/fewshot/')
+    if not legacy and not modern:
+        raise runtime.ConfigError('cannot classify snapshot generation: manifest contains neither '
+                                  'src/generator/few_shot.py nor src/generator/fewshot/')
+    return 'few_shot' if legacy else 'fewshot'
+
+
+@contextmanager
+def fewshot_profile_instrument(profile, fewshot):
+    """Hang transport timing spans on the new fewshot package entry points.
+
+    Legacy snapshots keep using transport_profile.instrument, which patches the
+    old PersonaFewShotRetriever; modern archives do not contain that class.
+    """
+    originals = []
+
+    def replace(owner, name, wrapper):
+        original = getattr(owner, name)
+        originals.append((owner, name, original))
+        setattr(owner, name, wrapper(original))
+
+    def measured(name):
+        def wrap(original):
+            @wraps(original)
+            def call(*args, **kwargs):
+                with profile.span(name):
+                    return original(*args, **kwargs)
+            return call
+        return wrap
+
+    try:
+        replace(fewshot.RecallSession, 'is_approved', measured('history_pool_approval'))
+        replace(fewshot.RecallSession, 'retrieve', measured('retrieval_compute'))
+        replace(fewshot.RecallSession, 'render_selected', measured('retrieval_render'))
+        yield
+    finally:
+        for owner, name, original in originals:
+            setattr(owner, name, original)
+
+
 def launch(directory, *, instance, job, workers, seconds, kind='pack', feature_output=None):
     from . import runtime, versions
     seconds = timeout_value(seconds)
     snapshot = runtime.verify(Path(directory) / 'runtime.json')
     # Fresh interpreter imports only the verified original executor. No snapshot
     # file, model version, request body or checkpoint is rewritten.
-    command = [sys.executable, '-B', '-u', str(Path(__file__).resolve()),
+    transport = Path(__file__).resolve()
+    if snapshot_generation(snapshot, runtime) == 'fewshot':
+        # Modern snapshots are self-contained: their own transport assembles the
+        # archived new packages, so the live tree is never imported.
+        transport = snapshot / 'scripts' / 'pack_transport.py'
+        if not transport.is_file():
+            raise runtime.ConfigError('modern snapshot is missing scripts/pack_transport.py')
+    command = [sys.executable, '-B', '-u', str(transport),
                '--snapshot', str(snapshot), '--instance', instance, '--job', job,
                '--workers', str(workers), '--timeout-seconds', str(seconds), '--kind', kind]
     if feature_output is not None:
@@ -563,18 +631,31 @@ def main():
         parser.error('time slices require an experiment worker')
     snapshot = Path(args.snapshot).resolve()
     sys.path.insert(0, str(snapshot))
-    from src.config import valid_name, sha256_file
-    from src.iteration import gbdt_evidence, runtime, versions
-    from src.iteration.storage import read_json, write_once_json
-    from src.llm import ChatClient
-    from src.generator import few_shot
+    from src.config import valid_name
+    from src.iteration import runtime, versions
     versions.switch_instance(valid_name(args.instance))
     from src.iteration import jobs
     directory = jobs.directory({'kind': 'experiment' if args.kind in {'promotion', 'features'} else args.kind,
                                 'id': valid_name(args.job)})
-    if runtime.verify(directory / 'runtime.json').resolve() != snapshot:
+    verified = runtime.verify(directory / 'runtime.json')
+    if verified.resolve() != snapshot:
         raise RuntimeError('timeout worker must use the recorded frozen runtime')
     runtime.require_current(directory)
+    # Authenticated dispatch (design §2.3a): decide the snapshot generation from
+    # the verified manifest before any import that could reach few_shot.
+    if snapshot_generation(verified, runtime) == 'fewshot':
+        _run_modern(args, snapshot, directory)
+        return
+    _run_legacy(args, snapshot, directory)
+
+
+def _run_legacy(args, snapshot, directory):
+    """Legacy snapshot generation: the original assembly, kept verbatim (§2.3a)."""
+    from src.config import sha256_file
+    from src.generator import few_shot
+    from src.iteration import gbdt_evidence, runtime
+    from src.iteration.storage import read_json, write_once_json
+    from src.llm import ChatClient
     needs_history = args.kind != 'features' and needs_history_memory(directory, args.kind)
     disk_history = live_disk_history() if needs_history else None
     history_storage = disk_history.disk_storage(few_shot) if needs_history else nullcontext()
@@ -650,6 +731,74 @@ def main():
                 history_feature_cache(few_shot), history_storage, source_read_reuse, retrieval_reuse, \
                 feature_response_reuse, material_validation_reuse, \
                 profile.instrument(history_required=needs_history, disk_history=disk_history), \
+                case_time_slice(args.time_slice_seconds, profile=profile,
+                                unattempted_results=directory / 'cases.jsonl' if args.unattempted_first else None):
+            runpy.run_path(sys.argv[0], run_name='__main__')
+    except control.StopRequested as exc:
+        if exc.reason != 'time_slice_complete':
+            raise
+        print('Time slice complete; all in-flight cases persisted; safe to resume', flush=True)
+        raise SystemExit(75)
+
+
+def _run_modern(args, snapshot, directory):
+    """Modern snapshot generation: the archive is self-contained (fewshot package
+    and materials package ship inside it), so no live adapter layer is loaded.
+    Only the hooks the new code needs are assembled, mirroring the legacy
+    with-stack semantics (profile admission, history lane, timeout floor,
+    archived evidence paths, case time slice). All imports resolve against the
+    archived snapshot via sys.path and stay inside this branch."""
+    from src.config import sha256_file
+    from src.generator import fewshot
+    from src.iteration import control, gbdt_evidence, runtime, transport_profile
+    from src.iteration.materials import validation
+    from src.iteration.storage import read_json, write_once_json
+    from src.llm import ChatClient
+    needs_history = args.kind != 'features' and needs_history_memory(directory, args.kind)
+    feature_validation = (snapshot / 'src/generator/fewshot_ranker/supplemental.py').is_file()
+    receipt = {'schema': 1, 'kind': 'transport_timeout_floor',
+               'operation': args.kind,
+               'timeout_seconds': args.timeout_seconds, 'workers': args.workers,
+               'snapshot_generation': 'fewshot_package_v1',
+               'fewshot_package_sha256': sha256_file(Path(fewshot.__file__)),
+               'material_validation': validation.MODE,
+               'material_validation_sha256': sha256_file(Path(validation.__file__)),
+               'history_feature_cache': 'exact_text_and_flags_copy_v1',
+               'history_feature_cache_target': 'fewshot.rank',
+               'history_memory_lane': 'bounded_archive_slots_legacy_lock_v2',
+               'history_memory_capacity': history_memory_capacity(),
+               'history_memory_required': needs_history,
+               'time_slice_seconds': args.time_slice_seconds,
+               'pending_case_order': 'unattempted_before_retries_v1' if args.unattempted_first else 'original',
+               'time_slice_clock': 'first_operation_full_warmup_v2',
+               'runtime': read_json(directory / 'runtime.json'),
+               'launcher_sha256': sha256_file(Path(__file__)),
+               'created_at': time.time(), 'pid': os.getpid()}
+    write_once_json(directory / 'transport_overrides' / (uuid.uuid4().hex + '.json'), receipt)
+    if args.kind == 'features':
+        complete_saved_features(directory, args.feature_output, args.workers)
+        return
+    if args.kind == 'promotion':
+        print('Frozen promotion: reusing saved results; all original adoption gates retained', flush=True)
+        with history_memory_lane(directory, required=needs_history), archived_runtime_paths(runtime), \
+                archived_gbdt_paths(gbdt_evidence, runtime):
+            promote_saved(directory)
+        return
+    print(f'Frozen {args.kind} resume: request timeout floor={args.timeout_seconds:g}s; '
+          'original requests and saved rows retained', flush=True)
+    sys.argv = [str(snapshot / 'scripts/iterate_branches.py'), '--instance', args.instance,
+                'worker', '--kind', args.kind, '--job', args.job, '--workers', str(args.workers)]
+    try:
+        profile = transport_profile.TransportProfile(directory / 'transport_profiles' / (uuid.uuid4().hex + '.json'),
+            dict(job=args.job, kind=args.kind, workers=args.workers,
+                 timeout_seconds=args.timeout_seconds, time_slice_seconds=args.time_slice_seconds))
+        material_validation_reuse = validation.verified_materials(profile=profile)
+        feature_response_reuse = feature_response_cache_validation() if feature_validation else nullcontext()
+        with profile, profile.admission(history_memory_lane(directory, required=needs_history), 'history_lane_wait'), \
+                timeout_floor(ChatClient, args.timeout_seconds), \
+                archived_runtime_paths(runtime), archived_gbdt_paths(gbdt_evidence, runtime), \
+                history_feature_cache(fewshot.rank), feature_response_reuse, material_validation_reuse, \
+                fewshot_profile_instrument(profile, fewshot), \
                 case_time_slice(args.time_slice_seconds, profile=profile,
                                 unattempted_results=directory / 'cases.jsonl' if args.unattempted_first else None):
             runpy.run_path(sys.argv[0], run_name='__main__')
