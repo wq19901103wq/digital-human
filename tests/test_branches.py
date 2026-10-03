@@ -201,7 +201,7 @@ def test_two_branches_roll_out_then_rebase_and_revalidate(tree):
 
 @pytest.mark.parametrize('kind', ['gen', 'judge'])
 def test_fixed_polling_does_not_repeat_source_or_entry_audit(tree, monkeypatch, kind):
-    from src.iteration import learning_guard
+    from src.iteration.materials import validation as learning_guard
     submit = submit_gen if kind == 'gen' else submit_judge
     submit('polling', {'llm': {'model': 'candidate'}})
     jobs = pass_to_fixed()
@@ -766,10 +766,11 @@ def test_two_processes_cannot_promote_over_each_other(tree):
 import sys, time
 from pathlib import Path
 from src.config import ConfigError
-from src.iteration import promote, versions, learning_guard
+from src.iteration import promote, versions
+from src.iteration.materials import validation
 # Same isolated legacy fixture as the parent test: this child tests the
 # cross-process promotion lock, not source reconstruction.
-learning_guard.verify = lambda *a, **kw: None
+validation.verify = lambda *a, **kw: None
 root = Path(sys.argv[1])
 versions.PRIVATE = root
 versions.DATA_ROOT = root / 'data'

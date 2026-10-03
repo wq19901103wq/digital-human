@@ -18,7 +18,8 @@ from src.config import ConfigError, load_settings, sha256_file
 from src.generator.generator import ReplyGenerator
 from src.history.sources import load
 from src.judge import judge as judge_module, lr_retrain
-from src.iteration import experiment, learning_guard as guard, promote, runner, versions
+from src.iteration import experiment, promote, runner, versions
+from src.iteration.materials import validation as guard
 from src.iteration.storage import write_json
 
 

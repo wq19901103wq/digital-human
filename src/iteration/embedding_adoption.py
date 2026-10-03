@@ -84,13 +84,14 @@ def verify(directory, record, original, source, source_spec, arm):
 
 def create(study_name, change):
     """Freeze a version of the existing primary; normal evaluation gates remain mandatory."""
-    from .learning_guard import RunSeal, require_materials
+    from .materials import validation
+    from .materials.seals import RunSeal
     study = versions.PRIVATE / 'judge_training' / valid_name(study_name)
     spec = read(study / 'spec.json')
     source, arm = Path(spec['source']).parent, spec['arm']
     original = versions.judge_dir(read(source / arm / 'candidate.json')['judge_ref'])['dir']
     seal = RunSeal([study, source, original])
-    require_materials(spec['data_ref'], [original])
+    validation.require_materials(spec['data_ref'], [original])
     model, proofs, key = selected_model(study, source, arm)
     config, assets = _assemble(original, study, model, proofs, key)
     seal.check()

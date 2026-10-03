@@ -13,7 +13,9 @@ from ..config import ConfigError, ROOT, load_settings, settings_path, sha256_fil
 from ..history.sources import load
 from ..judge import lr_retrain as lr, corrected_v1 as rt
 from ..judge.corrected import CodexJudgeClient, MODE, RUNTIME_PATH, blind_case
-from . import branches, control, datasets, experiment, learning_guard, runtime, task_state, versions
+from . import branches, control, datasets, experiment, runtime, task_state, versions
+from .materials import GENERATOR_RECIPES, GENERIC_JUDGE_TEMPLATE, GENERIC_PROFILE
+from .materials import validation
 from . import training_evidence as audit, training_operations as operations
 from .storage import file_lock, write_json, read_json as read, write_once_json as save_once
 
@@ -34,9 +36,9 @@ def hashes(paths):
 
 def mechanical_generator(data_ref, config, recipe='mechanical'):
     """Create a source-free generator snapshot; retrieval still uses verified history."""
-    if recipe not in learning_guard.GENERATOR_RECIPES:
+    if recipe not in GENERATOR_RECIPES:
         raise ConfigError('unknown reviewed generator recipe')
-    assets = learning_guard.GENERATOR_RECIPES[recipe]
+    assets = GENERATOR_RECIPES[recipe]
     sources = {name: (ROOT / 'prompts' / recipe / name if name == 'persona.md'
                       else TEMPLATES / name) for name in assets}
     if any(not p.is_file() or sha256_file(p) != assets[name] for name, p in sources.items()):
@@ -58,7 +60,7 @@ def mechanical_generator(data_ref, config, recipe='mechanical'):
 
 def mechanical_judge(config):
     from ..judge.judge import DEFAULT_TEMPLATE_PATH
-    learning_guard.require_default_judge_template(DEFAULT_TEMPLATE_PATH)
+    validation.require_default_judge_template(DEFAULT_TEMPLATE_PATH)
     directory = versions.PRIVATE / 'material_recipes' / cache.digest({'judge': config})
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / 'prompt.md'
@@ -66,7 +68,7 @@ def mechanical_judge(config):
         raise ConfigError('generic judge instructions changed')
     path.write_bytes(DEFAULT_TEMPLATE_PATH.read_bytes())
     record = {'schema': 2, 'verified': True, 'information_end': 0,
-              'asset_files': {'prompt.md': learning_guard.GENERIC_JUDGE_TEMPLATE}, 'evidence_files': hashes([path])}
+              'asset_files': {'prompt.md': GENERIC_JUDGE_TEMPLATE}, 'evidence_files': hashes([path])}
     return versions.create_judge_version({'mode': 'pairwise_llm', 'llm': config,
         'prompt_sha256': sha256_file(path)}, {'origin': 'generic_instructions'},
         assets={'prompt.md': path.read_bytes(), 'learning.json': blob(record)})
@@ -150,7 +152,7 @@ def prepare(directory):
     # Representative preflight cases are followed by the remaining frozen order.
     first = [next(c for c in train if c['chat_type'] == kind) for kind in sorted({c['chat_type'] for c in train})]
     train = first + [c for c in train if c['case_id'] not in {r['case_id'] for r in first}]
-    learning_guard.require_materials(data_ref, [versions.generator_dir(plan['generator_ref'])])
+    validation.require_materials(data_ref, [versions.generator_dir(plan['generator_ref'])])
     reference_ids = plan.get('reference_case_ids', [])
     known = {c['case_id']: c for c in history.role('gen_learning') + train}
     if len(reference_ids) != len(set(reference_ids)) or not set(reference_ids) <= known.keys():
@@ -169,7 +171,7 @@ def prepare(directory):
     save_once(directory / 'reference.json', reference)
     profile_path = directory / 'profile.json'
     profile_path.write_bytes((TEMPLATES / 'profile.json').read_bytes())
-    if sha256_file(profile_path) != learning_guard.GENERIC_PROFILE:
+    if sha256_file(profile_path) != GENERIC_PROFILE:
         raise ConfigError('unreviewed generic profile')
     save_once(directory / 'model_template.json', model_template(train, plan['recipe']))
     (directory / 'prompt.md').write_text(clean_prompt(reference, read(profile_path)))
@@ -276,7 +278,7 @@ def train_arm(directory, spec, arm, rows, workers):
         ref = versions.create_judge_version(cfg, {'origin': 'history_lr_v1', 'study': directory.name}, assets=assets)
         save_once(target / 'candidate.json', {'judge_ref': ref, 'artifact_sha256': sha256_file(artifact)})
     ref = read(target / 'candidate.json')['judge_ref']
-    learning_guard.require_materials(spec['data_ref'], [versions.judge_dir(ref)['dir']])
+    validation.require_materials(spec['data_ref'], [versions.judge_dir(ref)['dir']])
     task_state.update(target, 'finished', status='finished', candidate_ref=ref)
     return ref
 
@@ -316,10 +318,10 @@ def run(name, workers=2):
             pack_ref = 'pack-calibration-' + name
             save_once(versions.PRIVATE / 'judge_eval' / pack_ref / 'pack.json', {
                 'data_ref': spec['data_ref'], 'c0_gen_version': spec['generator_ref'], 'rows': pack_rows,
-                'generation_proof': learning_guard.pack_proof(dev_spec, pack_rows)})
+                'generation_proof': validation.pack_proof(dev_spec, pack_rows)})
             task_state.update(directory, 'independent_audit')
             for ref in refs.values():
-                learning_guard.require_materials(spec['data_ref'], [versions.judge_dir(ref)['dir']])
+                validation.require_materials(spec['data_ref'], [versions.judge_dir(ref)['dir']])
             evidence = audit.Evidence()
             try:
                 pool = {r['id']: r for r in audit.lines(versions.data_version_dir(spec['data_ref']) / 'fewshot_pool.jsonl')}

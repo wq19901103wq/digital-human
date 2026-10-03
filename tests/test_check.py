@@ -6,7 +6,8 @@ import pytest
 
 from scripts import check, evaluate_judge
 from src.config import ConfigError
-from src.iteration import experiment, learning_guard, runner, versions
+from src.iteration import experiment, runner, versions
+from src.iteration.materials import validation as learning_guard
 from src.iteration.storage import write_json
 from src.judge.corrected import CodexJudgeClient
 from src.llm import ChatClient

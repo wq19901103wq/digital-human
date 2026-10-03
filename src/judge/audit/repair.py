@@ -18,7 +18,7 @@ from .dataset import Evidence
 from .matching import source_text_matches
 from ...config import sha256_file
 from ...iteration import datasets, versions
-from ...iteration.learning_guard import require_materials
+from ...iteration.materials import validation
 from ...judge import corrected_v1 as rt
 from ...judge.corrected import blind_case
 
@@ -97,7 +97,7 @@ def sources(directory, spec, evidence):
                 'known_group_members': [list(m) for m, c in sorted(members.items()) if c >= 8]}
     require(template['feature_system']['context_schema'] == expected, 'category vocabulary leaks outside training')
     require(not np.any(template['final_model']['coefficients']), 'old LR weights retained')
-    require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
+    validation.require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
     require(spec['protocol']['flip_extra_rounds'] == 2 and spec['scoring']['correction_threshold'] == .7
             and spec['scoring']['decision_policy'] == 'hybrid' and spec['adoption_allowed'] is False,
             'scoring/scope changed')

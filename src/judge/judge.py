@@ -71,10 +71,11 @@ class Judge:
         self._llm = llm
         # 提示词：优先 Judge 版本目录内的快照（随版本冻结）；无快照的旧版本回退全局模板
         template_path = prompt_path or DEFAULT_TEMPLATE_PATH
-        from ..iteration.learning_guard import RunSeal, require_default_judge_template
+        from ..iteration.materials import validation
+        from ..iteration.materials.seals import RunSeal
         self._material_seal = RunSeal(files=[template_path])
         if prompt_path is None:
-            require_default_judge_template(template_path)
+            validation.require_default_judge_template(template_path)
         self.source_check = None
         self._template = Path(template_path).read_text(encoding="utf-8")
         self._check_sources()

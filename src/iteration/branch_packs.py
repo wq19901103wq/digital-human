@@ -12,7 +12,9 @@ from ..config import ConfigError, load_settings, sha256_file
 from ..generator.generator import ReplyGenerator
 from ..llm import LLMRefusal, build_clients
 from ..tracing import CaseTrace
-from . import acceptance, control, data_guard, datasets, experiment, gates, runtime, task_state, versions, learning_guard
+from . import acceptance, control, data_guard, datasets, experiment, gates, runtime, task_state, versions
+from .materials import validation
+from .materials.seals import RunSeal
 from .parallel import completed_map
 from .storage import write_json, file_lock, read_json, write_once_json
 
@@ -43,8 +45,8 @@ def prepare_initial(kind='calibration', sample=None, reuse_generations=None):
     recipe = {'kind': 'judge_pack', 'dataset': 'development', 'purpose': 'judge_development',
               'data_ref': current['data'], 'generator_ref': info['id'],
               'data_snapshot': data_guard.generation_snapshot(cases, data, [info['config']]),
-              'learning_snapshot': learning_guard.snapshot(current['data'], [info['dir']], 'judge_development')}
-    learning_guard.verify_generation(recipe, cases)
+              'learning_snapshot': validation.snapshot(current['data'], [info['dir']], 'judge_development')}
+    validation.verify_generation(recipe, cases)
     if reuse_generations:
         from . import generation_reuse
         recipe['generation_reuse'] = generation_reuse.prepare(recipe, cases, reuse_generations)
@@ -65,7 +67,7 @@ def prepare(source: dict, current: dict, dataset: str) -> str:
     from . import datasets
     datasets.assert_pack(versions.data_version_dir(current['data']), pack,
                          'judge_development' if dataset == 'development' else dataset)
-    learning_guard.verify_pack(pack, dataset)
+    validation.verify_pack(pack, dataset)
     if pack["c0_gen_version"] == current["production_gen"]:
         return source["ref"]
     recipe = {"source": source, "data_ref": current["data"],
@@ -78,13 +80,13 @@ def prepare(source: dict, current: dict, dataset: str) -> str:
         info = versions.load_generator(recipe["generator_ref"])
         data = versions.data_version_dir(recipe["data_ref"])
         recipe["data_snapshot"] = data_guard.generation_snapshot(datasets.pack_cases(pack), data, [info["config"]])
-        recipe['learning_snapshot'] = learning_guard.snapshot(current['data'], [info['dir']],
+        recipe['learning_snapshot'] = validation.snapshot(current['data'], [info['dir']],
             'judge_development' if dataset == 'development' else dataset)
-        learning_guard.verify_generation(recipe, datasets.pack_cases(pack))
+        validation.verify_generation(recipe, datasets.pack_cases(pack))
         write_json(target, recipe)
         runtime.freeze(target.parent)
     else:
-        learning_guard.verify_generation(json.loads(target.read_text()), datasets.pack_cases(pack))
+        validation.verify_generation(json.loads(target.read_text()), datasets.pack_cases(pack))
     return ref
 
 
@@ -97,7 +99,7 @@ def build(ref: str, workers: int = 1) -> None:
         if (directory / "pack.json").exists():
             pack = json.loads((directory / 'pack.json').read_text())
             recipe = json.loads((directory / 'recipe.json').read_text())
-            learning_guard.verify_pack(pack, recipe['dataset'])
+            validation.verify_pack(pack, recipe['dataset'])
             return
         recipe = json.loads((directory / "recipe.json").read_text())
         if recipe.get('acceptance'):
@@ -115,11 +117,11 @@ def build(ref: str, workers: int = 1) -> None:
             source = {'data_ref': recipe['data_ref'], 'c0_gen_version': recipe['generator_ref'],
                       'rows': load(versions.data_version_dir(recipe['data_ref'])).role(recipe['purpose'])}
         cases = datasets.pack_cases(source)
-        seal = learning_guard.verify_generation(recipe, cases)
+        seal = validation.verify_generation(recipe, cases)
         from . import generation_reuse
         reused, reuse_files = generation_reuse.load(recipe, cases)
         if reuse_files:
-            seal.files.update(learning_guard.RunSeal(files=reuse_files).files)
+            seal.files.update(RunSeal(files=reuse_files).files)
         checkpoint = directory / "building.json"
         saved = json.loads(checkpoint.read_text()) if checkpoint.exists() else {"rows": []}
         done = {str(row["case_id"]): row for row in saved["rows"]}
@@ -181,7 +183,7 @@ def build(ref: str, workers: int = 1) -> None:
             write_json(directory / "pack.json", {
                 **source, "pack_id": ref, "c0_gen_version": info["id"], "data_ref": recipe["data_ref"],
                 "rebuilt_from": recipe.get("source"), "rows": rows,
-                "generation_proof": learning_guard.pack_proof(recipe, rows),
+                "generation_proof": validation.pack_proof(recipe, rows),
                 "generation_failures": sum(row.get("generation_status") == "failed" for row in rows),
                 "identical_options": sum(row["human_reply"] == row.get("ai_replies") for row in rows)})
             progress["status"] = "finished"
@@ -202,8 +204,8 @@ def prepare_batch(receipt, current):
     info = versions.load_generator(recipe['generator_ref'])
     data = versions.data_version_dir(recipe['data_ref'])
     recipe['data_snapshot'] = data_guard.generation_snapshot(cases, data, [info['config']])
-    recipe['learning_snapshot'] = learning_guard.snapshot(current['data'], [info['dir']], 'fixed_test')
-    learning_guard.verify_generation(recipe, cases)
+    recipe['learning_snapshot'] = validation.snapshot(current['data'], [info['dir']], 'fixed_test')
+    validation.verify_generation(recipe, cases)
     path = directory / 'recipe.json'
     if path.exists() and json.loads(path.read_text()) != recipe:
         raise ConfigError('sealed validation recipe changed')
@@ -236,7 +238,7 @@ def recover_terminal_failures(ref: str) -> dict:
         else:
             from ..history.sources import load
             cases = load(versions.data_version_dir(recipe['data_ref'])).role(recipe['purpose'])
-        seal = learning_guard.verify_generation(recipe, cases)
+        seal = validation.verify_generation(recipe, cases)
         info = versions.load_generator(recipe['generator_ref'])
         data_guard.verify(directory, data_guard.generation_snapshot(cases,
             versions.data_version_dir(recipe['data_ref']), [info['config']]),

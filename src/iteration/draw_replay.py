@@ -205,7 +205,7 @@ class SavedDrawReplay:
         actual, self.manifest = manifest(frozen['path'], pack, baseline, candidate)
         require(actual == frozen, 'Replay manifest identity differs')
         self.rows = {str(row['case_id']): row for row in pack['rows']}
-        from .learning_guard import MaterialSeal
+        from .materials.seals import MaterialSeal
         self.info, self.memo = source_info(self.manifest), {}
         self.source_seal = MaterialSeal(self.info['dir'])
         self.supplement = None

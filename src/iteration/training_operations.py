@@ -56,8 +56,8 @@ def check_generations(value, cases, identity):
 
 def generate(directory, spec, snapshot, workers, limit=0):
     cases = snapshot['cases']
-    from .learning_guard import verify_generation
-    seal = verify_generation(spec, cases)
+    from .materials import validation
+    seal = validation.verify_generation(spec, cases)
     identity = cache.digest(spec)
     path = directory / 'generations.json'
     value = read(path) if path.exists() else {'identity': identity, 'entries': {}}
@@ -101,7 +101,8 @@ def generate(directory, spec, snapshot, workers, limit=0):
 
 
 def train_features(directory, spec, rows, workers, limit):
-    from .learning_guard import RunSeal, verify_training
+    from .materials import validation
+    from .materials.seals import RunSeal
     # Seal the old checkpoint/traces before reading them; no reuse or request
     # occurs until their complete source proof has been reconstructed below.
     previous = RunSeal([directory])
@@ -109,7 +110,7 @@ def train_features(directory, spec, rows, workers, limit):
         value = checkpoint(directory, spec, rows)
     except (KeyError, ValueError, TypeError) as exc:
         raise ConfigError('特征检查点缺少有效的冻结来源信息') from exc
-    seal = verify_training(directory, spec, rows, value['entries'])
+    seal = validation.verify_training(directory, spec, rows, value['entries'])
     previous.check()
     tls = local()
     def one(row):

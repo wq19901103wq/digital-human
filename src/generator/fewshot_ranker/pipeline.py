@@ -6,7 +6,7 @@ import time
 
 from ...config import ROOT, sha256_file
 from ...iteration import control, versions
-from ...iteration.learning_guard import RunSeal
+from ...iteration.materials.seals import RunSeal
 from ...iteration.storage import file_lock, locked, read_json, write_json, write_once_json
 from ...judge.corrected import CodexJudgeClient
 from ...history.sources import digest, require

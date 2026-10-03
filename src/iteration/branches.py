@@ -184,8 +184,8 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
         _name(candidate_ref)
         after = _snapshot(kind, candidate_ref)
         if kind == "gen":
-            from .learning_guard import require_materials
-            require_materials(current["data"], [_version(kind, candidate_ref)["dir"]])
+            from .materials import validation
+            validation.require_materials(current["data"], [_version(kind, candidate_ref)["dir"]])
     else:
         if {"data_version", "persona_sha256", "prompt_sha256", "assets"} & overrides.keys():
             raise ConfigError("资产/指纹变更请提交完整候选版本，不能只覆盖指纹")

@@ -41,8 +41,8 @@ def fit(rows, entries, artifact):
     spec = json.loads(spec_path.read_text())
     if len(rows) != spec['training_total'] or any(r.get('split') != 'train' for r in rows):
         raise ConfigError('必须使用完整冻结训练清单，禁止混入评测样本或缩小训练集')
-    from ..iteration.learning_guard import verify_fit
-    seal = verify_fit(rows, entries, artifact)
+    from ..iteration.materials import validation
+    seal = validation.verify_fit(rows, entries, artifact)
     # Same sparse input, solver and defaults as the original train1200 recipe.
     from scipy.sparse import csr_matrix
     from sklearn.linear_model import LogisticRegression

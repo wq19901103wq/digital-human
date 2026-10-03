@@ -34,39 +34,43 @@ def require_promotable(spec: dict) -> None:
 
 def verify_learning(spec: dict, *, historical_directory: Path | None = None) -> None:
     """Use the same verified historical-code paths at evaluation and adoption."""
-    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    from . import gbdt_evidence, pack_transport, runtime
+    from .materials import validation
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
         if historical_directory is None:
-            learning_guard.verify(spec)
+            validation.verify(spec)
         else:
-            learning_guard.verify(spec, historical_directory=historical_directory)
+            validation.verify(spec, historical_directory=historical_directory)
 
 
 def bind_learning(spec: dict) -> None:
     """New experiments use the same verified archive resolver as execution."""
-    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    from . import gbdt_evidence, pack_transport, runtime
+    from .materials import validation
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
-        learning_guard.bind(spec)
+        validation.bind(spec)
 
 
 def require_learning_materials(data_ref, directories, role='development'):
     """Creation resolves archived code with the same proof checks as adoption."""
-    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    from . import gbdt_evidence, pack_transport, runtime
+    from .materials import validation
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
-        return learning_guard.require_materials(data_ref, directories, role)
+        return validation.require_materials(data_ref, directories, role)
 
 
 def learning_execution_seal(spec: dict):
     """Keep source verification identical for direct and frozen-runtime runs."""
-    from . import gbdt_evidence, learning_guard, pack_transport, runtime
+    from . import gbdt_evidence, pack_transport, runtime
+    from .materials import validation
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
-        return learning_guard.execution_seal(spec)
+        return validation.execution_seal(spec)
 
 
 def judge_templates(spec: dict) -> list[Path]:
     """Include the effective pairwise prompt even when it lives outside a version."""
     from ..judge.judge import DEFAULT_TEMPLATE_PATH
-    from .learning_guard import require_default_judge_template
+    from .materials import validation
     refs = ([spec['baseline_ref'], spec['candidate_ref']] if spec['kind'] == 'judge_eval'
             else [spec['judge_ref']])
     paths = []
@@ -78,7 +82,7 @@ def judge_templates(spec: dict) -> list[Path]:
         path = info['dir'] / 'prompt.md'
         if not path.is_file():
             path = DEFAULT_TEMPLATE_PATH
-            require_default_judge_template(path)
+            validation.require_default_judge_template(path)
         paths.append(path)
     return paths
 

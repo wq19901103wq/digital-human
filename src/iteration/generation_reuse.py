@@ -26,8 +26,8 @@ def source(recipe, experiment_id):
                 if spec.get(side + '_ref') == recipe['generator_ref']]
     require(len(branches) == 1, '来源生成器分支不唯一或不匹配')
     old, current = spec.get('learning_snapshot', {}), recipe['learning_snapshot']
-    from .learning_guard import same_materials
-    require(same_materials(old, current), '原始数据、用途清单或冻结生成器材料变化')
+    from .materials import validation
+    require(validation.same_materials(old, current), '原始数据、用途清单或冻结生成器材料变化')
     runtime.verify_historical_implementation(directory, old.get('guard_code'))
     return directory, spec, branches[0]
 

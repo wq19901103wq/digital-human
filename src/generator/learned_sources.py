@@ -132,11 +132,12 @@ def _completed(directory, dependencies):
 
 def reconstruct(model_dir, data_ref, runtime_evidence=None):
     """Validate once per dependency stamp set; no fitting or model requests."""
-    from ..iteration.learning_guard import RunSeal
+    from ..iteration.materials import seals
     from ..iteration.runtime import evidence_path
     from .ranker_report import load_completed
     from .ranker_samples import teacher_overlap
     model_dir = Path(model_dir).resolve()
+    RunSeal = seals.RunSeal
     key = (str(model_dir), data_ref, digest(runtime_evidence))
     if key in _verified:
         saved, result = _verified[key]
@@ -221,13 +222,13 @@ def reconstruct(model_dir, data_ref, runtime_evidence=None):
 
 
 def deploy(model_dir, base_dir, data_ref, output):
-    from ..iteration.learning_guard import GENERATOR_RECIPES, require_materials, MaterialSeal
+    from ..iteration.materials import seals, validation
     base_dir, output = Path(base_dir), Path(output)
-    base_seal = MaterialSeal(base_dir)
-    require_materials(data_ref, [base_dir])
+    base_seal = seals.MaterialSeal(base_dir)
+    validation.require_materials(data_ref, [base_dir])
     inherited = read_json(base_dir / 'learning.json')
     prompt_assets = {k: v for k, v in inherited['asset_files'].items() if not k.startswith('ranker/')}
-    require(prompt_assets in GENERATOR_RECIPES.values(), 'Expected approved mechanical generator prompts')
+    require(prompt_assets in validation.GENERATOR_RECIPES.values(), 'Expected approved mechanical generator prompts')
     parent = read_json(Path(model_dir).parent / 'manifest.json')
     inventory = Path(read_json(Path(parent['source']) / 'manifest.json')['inventory'])
     origin = read_json(inventory / 'labeling/manifest.json')['data']
@@ -247,7 +248,7 @@ def deploy(model_dir, base_dir, data_ref, output):
         information_end=proof['information_end'], asset_files=assets,
         evidence_files={**inherited['evidence_files'], **proof['evidence_files']}))
     base_seal.check()
-    require_materials(data_ref, [output])
+    validation.require_materials(data_ref, [output])
     return output
 
 
@@ -275,7 +276,7 @@ def source_evidence_view(expected, proof, names):
 
 
 def verify(data_ref, directory, record):
-    from ..iteration.learning_guard import GENERATOR_RECIPES
+    from ..iteration.materials import validation
     proof = read_json(directory / 'ranker/provenance.json')
     expected = reconstruct(proof['model_directory'], proof['data_ref'], proof['evidence_files'])
     manifest = read_json(Path(proof['model_directory']).parent / 'manifest.json')
@@ -283,7 +284,7 @@ def verify(data_ref, directory, record):
     require(proof == expected and sha256_file(directory / 'ranker/model.json') == proof['model_sha256'],
             'Deployed ranker differs from completed source')
     prompt_assets = {k: v for k, v in record['asset_files'].items() if not k.startswith('ranker/')}
-    require(prompt_assets in GENERATOR_RECIPES.values() and
+    require(prompt_assets in validation.GENERATOR_RECIPES.values() and
         record['information_end'] == proof['information_end'] and
         all(record['evidence_files'].get(k) == v for k, v in proof['evidence_files'].items()),
         'Deployed ranker learning evidence is incomplete')

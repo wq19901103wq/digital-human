@@ -12,7 +12,9 @@ from pathlib import Path
 
 from ..cache import digest
 from ..config import ConfigError
-from . import learning_guard as guard, versions
+from . import versions
+from .materials import RunSeal
+from .materials import validation as guard
 from .storage import write_json
 
 
@@ -25,7 +27,7 @@ def _proof(target):
     from . import gbdt_evidence, pack_transport, runtime
     dirs = [versions.generator_dir(target['production_gen']),
             versions.judge_dir(target['production_judge'])['dir']]
-    seal = guard.RunSeal([versions.data_version_dir(target['data']), *dirs])
+    seal = RunSeal([versions.data_version_dir(target['data']), *dirs])
     with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
         proof = guard.snapshot(target['data'], dirs, 'development')
     seal.check()
@@ -52,7 +54,7 @@ def prepare(data, generator, judge, *, reason):
 def _data_proof(data, report):
     from ..bootstrap.data_quality import accepted_report
     directory = versions.data_version_dir(data)
-    seal = guard.RunSeal([directory], [Path(report)])
+    seal = RunSeal([directory], [Path(report)])
     proof = accepted_report(directory, report)
     seal.check()
     return proof, seal

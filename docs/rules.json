@@ -154,7 +154,7 @@
       "rule": "GBDT 派生模型必须继承已重建的干净特征来源，只用冻结训练行复现全部树权重；自签哈希不能替代来源核验",
       "enforcement": "code",
       "code": [
-        "src/iteration/learning_guard.py::_reconstructed_judge",
+        "src/iteration/materials/validation.py::_reconstructed_judge",
         "src/iteration/gbdt_evidence.py::verify"
       ],
       "tests": [
@@ -217,7 +217,7 @@
       "enforcement": "code",
       "code": [
         "src/iteration/storage.py::write_once_json",
-        "src/iteration/learning_guard.py::verify"
+        "src/iteration/materials/validation.py::verify"
       ],
       "tests": [
         "tests/test_architecture_contracts.py::test_frozen_json_retry_is_idempotent_and_never_replaces_evidence",
@@ -230,7 +230,7 @@
       "enforcement": "code",
       "code": [
         "src/iteration/datasets.py::case_path",
-        "src/iteration/learning_guard.py::require_materials"
+        "src/iteration/materials/validation.py::require_materials"
       ],
       "tests": [
         "tests/test_leakage_guards.py::test_forged_case_rejected_before_request",

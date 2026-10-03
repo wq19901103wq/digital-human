@@ -161,7 +161,7 @@ def test_archived_training_code_keeps_old_proof_and_action_serving_is_strict(tmp
 
 
 def test_deploy_from_existing_ranker_preserves_prompts_and_original_dataset(tmp_path, monkeypatch):
-    from src.iteration import learning_guard
+    from src.iteration.materials import seals, validation
     base, output = tmp_path/'g29', tmp_path/'candidate'
     model = tmp_path/'comparison/xgb_chat_pair'
     source, inventory = tmp_path/'source', tmp_path/'inventory'
@@ -187,9 +187,9 @@ def test_deploy_from_existing_ranker_preserves_prompts_and_original_dataset(tmp_
             assert directory == base
         def check(self):
             seen.append('seal')
-    monkeypatch.setattr(learning_guard, 'MaterialSeal', Seal)
-    monkeypatch.setattr(learning_guard, 'GENERATOR_RECIPES', {'approved': prompts})
-    monkeypatch.setattr(learning_guard, 'require_materials', lambda data, dirs: seen.append((data, dirs)))
+    monkeypatch.setattr(seals, 'MaterialSeal', Seal)
+    monkeypatch.setattr(validation, 'GENERATOR_RECIPES', {'approved': prompts})
+    monkeypatch.setattr(validation, 'require_materials', lambda data, dirs: seen.append((data, dirs)))
     monkeypatch.setattr(learned_sources, 'reconstruct', reconstruct)
     assert learned_sources.deploy(model, base, 'd-current', output) == output
     assert (output/'prompt.md').read_bytes() == (base/'prompt.md').read_bytes()

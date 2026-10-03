@@ -273,8 +273,8 @@ def sources(directory, spec, evidence):
                 'known_group_members': [list(m) for m, c in sorted(members.items()) if c >= 8]}
     require(template['feature_system']['context_schema'] == expected, 'category vocabulary leaks outside training')
     require(not np.any(template['final_model']['coefficients']), 'old LR weights retained')
-    from .learning_guard import require_materials
-    require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
+    from .materials import validation
+    validation.require_materials(spec['data_ref'], [versions.generator_dir(spec['generator_ref'])])
     return selected
 
 def vector(model, features, blind, metadata):

@@ -273,7 +273,8 @@ def test_deployment_pins_inference_without_rerunning_historical_training(monkeyp
 @pytest.mark.parametrize('evaluation_data', ['original-data', 'new-data'])
 def test_verification_reconstructs_original_data_before_current_guard(tmp_path, monkeypatch, evaluation_data):
     from src.config import sha256_file
-    from src.iteration import learning_guard, material_compatibility
+    from src.iteration import material_compatibility
+    from src.iteration.materials import validation
     deployed = tmp_path / 'generator'
     model = tmp_path / 'training/model'
     write_json(model.parent / 'manifest.json', dict(runtime={}))
@@ -282,7 +283,7 @@ def test_verification_reconstructs_original_data_before_current_guard(tmp_path, 
                  model_sha256=sha256_file(deployed / 'ranker/model.json'), information_end=20)
     proof_path = deployed / 'ranker/provenance.json'
     write_json(proof_path, proof)
-    record = dict(asset_files=dict(next(iter(learning_guard.GENERATOR_RECIPES.values()))),
+    record = dict(asset_files=dict(next(iter(validation.GENERATOR_RECIPES.values()))),
                   information_end=20, evidence_files={})
     calls = []
     def reconstruct(directory, data, evidence):

@@ -5,7 +5,8 @@ from argparse import Namespace
 import pytest
 
 from src.config import ConfigError, parse_overrides
-from src.iteration import branch_packs, experiment, jobs, learning_guard, runtime, scheduler
+from src.iteration import branch_packs, experiment, jobs, runtime, scheduler
+from src.iteration.materials import validation as learning_guard
 from src.iteration.storage import read_json, write_json, write_once_json
 from test_leakage_guards import env as _env
 
@@ -191,6 +192,15 @@ def test_documentation_links_and_presentation_dependency_boundary():
     tree = ast.parse((ROOT / 'src/iteration/learning_guard.py').read_text())
     assert not any(isinstance(node, ast.ImportFrom) and (node.module or '').endswith('branch_packs')
                    for node in ast.walk(tree))
+
+
+def test_materials_validation_hosts_the_real_guard_implementation():
+    from scripts.check_docs import ROOT
+    tree = ast.parse((ROOT / 'src/iteration/materials/validation.py').read_text())
+    names = {node.name for node in ast.walk(tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    for symbol in ('_reconstructed_judge', 'verify', 'require_materials'):
+        assert symbol in names, f'{symbol} must be defined in materials/validation.py'
 
 
 def test_bootstrap_cannot_reinitialize_an_existing_baseline(env, monkeypatch):

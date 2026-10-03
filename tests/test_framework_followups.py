@@ -12,7 +12,8 @@ from test_leakage_guards import env as _env_fixture
 from src.bootstrap import history
 from src.config import ConfigError, sha256_file
 from src.history.sources import load
-from src.iteration import baseline, branches, datasets, journal, learning_guard, protocol, task_state, training_evidence, versions
+from src.iteration import baseline, branches, datasets, journal, protocol, task_state, training_evidence, versions
+from src.iteration.materials import validation
 from src.iteration.storage import write_json
 
 env = _env_fixture
@@ -24,7 +25,7 @@ def test_branch_derivation_keeps_verifiable_learning_assets(env):
     ref = branches._create_version('gen', proposal, 'd-test')
     target = versions.generator_dir(ref)
     assert (target / 'learning.json').read_bytes() == (env.gdir / 'learning.json').read_bytes()
-    assert learning_guard.require_materials('d-test', [target])['promotion_eligible']
+    assert validation.require_materials('d-test', [target])['promotion_eligible']
     assert target.name != env.gdir.name
 
 

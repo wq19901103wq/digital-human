@@ -45,12 +45,12 @@ class ReplyGenerator:
         if pool_path is not None and pool_path.with_name('purposes.json').exists():
             from ..history.sources import load
             self._history_sources = load(pool_path.parent)
-            from ..iteration.learning_guard import require_materials
+            from ..iteration.materials import validation
             if prompt_root is None:
                 raise HistoryError('历史生成必须使用有来源证明的提示词快照')
-            from ..iteration.learning_guard import MaterialSeal
+            from ..iteration.materials.seals import MaterialSeal
             self._material_seal = MaterialSeal(prompt_root)
-            require_materials(pool_path.parent.name, [prompt_root])
+            validation.require_materials(pool_path.parent.name, [prompt_root])
             self._information_end = json.loads((prompt_root / "learning.json").read_text())["information_end"]
 
         self._background = None

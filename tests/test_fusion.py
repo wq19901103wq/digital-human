@@ -9,7 +9,8 @@ import pytest
 from scipy.special import expit
 
 from src.config import ConfigError
-from src.iteration import fusion, learning_guard, versions
+from src.iteration import fusion, versions
+from src.iteration.materials import validation
 from src.judge import corrected
 from src.judge.fusion import FusionJudge, FusionScorer
 from src.judge.gbdt import GBDTScorer
@@ -77,7 +78,7 @@ def test_create_and_reconstruct_without_requests_or_pointer_changes(parents, mon
     before = versions.POINTERS_PATH.read_bytes()
     jid = fusion.create(tree, lr, c['source_spec']['data_ref'], 'fixed fusion')
     directory = versions.judge_dir(jid)['dir']
-    assert learning_guard.require_materials(c['source_spec']['data_ref'], [directory])['promotion_eligible']
+    assert validation.require_materials(c['source_spec']['data_ref'], [directory])['promotion_eligible']
     normalization = fusion.read(directory / 'fusion.json')['normalization']
     assert normalization['total'] == c['source_spec']['training_total']
     assert normalization['method'] == 'training_pair_margin_rms'
@@ -111,7 +112,7 @@ def test_resigned_fusion_forgery_rejected(parents, tmp_path, part):
         save(directory / 'learning.json', doc)
     resign({**c, 'directory': directory})
     with pytest.raises(ConfigError):
-        learning_guard.require_materials(c['source_spec']['data_ref'], [directory])
+        validation.require_materials(c['source_spec']['data_ref'], [directory])
 
 
 def test_nontraining_normalization_rejected(parents, tmp_path):

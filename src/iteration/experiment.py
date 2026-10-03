@@ -489,8 +489,8 @@ def create_judge_eval_experiment(
         pointers = {**pointers, 'data': pack['data_ref']}
     data_dir = versions.data_version_dir(pointers['data'])
     datasets.assert_pack(data_dir, pack, 'judge_development' if dataset == 'development' else 'fixed_test')
-    from . import learning_guard
-    learning_guard.verify_pack(pack, dataset)
+    from .materials import validation
+    validation.verify_pack(pack, dataset)
     gates.require_learning_materials(pointers['data'], [versions.judge_dir(ref)['dir'] for ref in
         {pointers['production_judge'], pointers['iteration_judge'], candidate_ref or pointers['iteration_judge']}])
     if pack.get("c0_gen_version") != pointers["production_gen"]:

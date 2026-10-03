@@ -14,7 +14,9 @@ from .. import cache
 from ..config import ConfigError, load_settings, sha256_file, valid_name
 from ..judge import embedding as net, corrected_v1 as rt
 from ..judge.gbdt import GBDTScorer, option_vectors
-from . import comparisons, draw_replay, experiment, learning_guard, record_contract, task_state, versions
+from . import comparisons, draw_replay, experiment, record_contract, task_state, versions
+from .materials import RunSeal
+from .materials import validation as guard
 from .storage import file_lock, read_json, write_json, write_once_json
 
 SEEDS = (17, 29, 43)
@@ -61,8 +63,8 @@ def bind_batch(directory, spec):
 
 def shared_learning_snapshot(pack, baseline):
     """Existing provenance guards run once per batch, never per trial."""
-    learning_guard.verify_pack(pack, 'development')
-    return learning_guard.snapshot(pack['data_ref'], [baseline['dir']], 'judge_development')
+    guard.verify_pack(pack, 'development')
+    return guard.snapshot(pack['data_ref'], [baseline['dir']], 'judge_development')
 
 
 def _job(payload):
@@ -247,7 +249,7 @@ def _run(directory, source, arm, pack_ref, saved_draws, workers):
     pack = read_json(pack_path)
     if pack['data_ref'] != root_spec['data_ref'] or pack['c0_gen_version'] != root_spec['generator_ref']:
         raise ConfigError('Training and development data/generator conditions differ')
-    material_seal = learning_guard.RunSeal(directories=[
+    material_seal = RunSeal(directories=[
         versions.data_version_dir(pack['data_ref']),
         versions.generator_dir(pack['c0_gen_version']), baseline['dir']])
     learning_snapshot = shared_learning_snapshot(pack, baseline)
@@ -269,8 +271,8 @@ def _run(directory, source, arm, pack_ref, saved_draws, workers):
         learning_snapshot=learning_snapshot)
     bind_batch(directory, spec)
     task_state.update(directory, 'preparing_shared_training', total=len(rows))
-    seal = learning_guard.verify_training(arm_path, source_spec, rows, entries, complete=True)
-    local_seal = learning_guard.RunSeal(files=[*map(Path, spec['inputs']), pack_path,
+    seal = guard.verify_training(arm_path, source_spec, rows, entries, complete=True)
+    local_seal = RunSeal(files=[*map(Path, spec['inputs']), pack_path,
         Path(saved_draws), *[baseline['dir'] / n for n in ['config.json', *baseline['config']['assets']]]])
     def check():
         seal.check()

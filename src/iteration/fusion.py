@@ -80,7 +80,7 @@ def _assemble(gbdt, lr, record, document):
 
 def verify(directory, record, original, study, source_spec, arm):
     """Validate parents against the already reconstructed clean LR training."""
-    from .learning_guard import RunSeal
+    from .materials.seals import RunSeal
     document = read(directory / 'fusion.json')
     parents = document.get('parents', {})
     require(set(parents) == {'gbdt', 'lr'}, 'Fusion parents differ')
@@ -103,7 +103,8 @@ def verify(directory, record, original, study, source_spec, arm):
 
 def create(gbdt_ref, lr_ref, data_ref, change):
     """Create an immutable candidate; never evaluate or move version pointers."""
-    from .learning_guard import RunSeal, require_materials
+    from .materials import validation
+    from .materials.seals import RunSeal
     gbdt, record = _parent(gbdt_ref, 'gbdt_only')
     lr, _ = _parent(lr_ref, 'lr_only')
     origin = read(gbdt['dir'] / 'source_judge.json')
@@ -112,7 +113,7 @@ def create(gbdt_ref, lr_ref, data_ref, change):
                 for n in (name, arm)), 'Fusion training origin is invalid')
     study = versions.PRIVATE / 'judge_training' / name
     seal = RunSeal([gbdt['dir'], lr['dir'], study])
-    require_materials(data_ref, [gbdt['dir'], lr['dir']])
+    validation.require_materials(data_ref, [gbdt['dir'], lr['dir']])
     spec = read(study / 'spec.json')
     original = versions.judge_dir(read(study / arm / 'candidate.json')['judge_ref'])['dir']
     require(lr['config'] == {**read(original / 'config.json'), 'decision_policy': 'lr_only'}

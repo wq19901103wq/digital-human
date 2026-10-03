@@ -44,7 +44,7 @@ def _refit(recipe, a, b, y):
 
 def verify(directory, record, original, study, source_spec, arm):
     """Called only after learning_guard reconstructed the original clean study."""
-    from .learning_guard import RunSeal
+    from .materials.seals import RunSeal
     descriptor = read(directory / 'scorer_source.json')
     require(set(descriptor) == {'schema', 'kind', 'study', 'arm', 'recipe_id'}
             and descriptor['schema'] == 1 and descriptor['kind'] == 'paired_gbdt_v1'

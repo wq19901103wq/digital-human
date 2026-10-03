@@ -16,7 +16,7 @@ import time
 from .. import tracing
 from ..config import ConfigError, ROOT, load_settings, settings_path, sha256_file
 from ..iteration import versions
-from ..iteration.learning_guard import RunSeal
+from ..iteration.materials.seals import RunSeal
 from ..iteration.parallel import completed_map
 from ..iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
 from ..judge.judge import build_judge

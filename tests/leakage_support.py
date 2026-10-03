@@ -6,7 +6,8 @@ import pytest
 from src.iteration import training as recipe
 from src.bootstrap import history
 from src.config import sha256_file
-from src.iteration import datasets, learning_guard, versions
+from src.iteration import datasets, versions
+from src.iteration.materials import MECHANICAL_ASSETS, validation
 from src.iteration.storage import write_json
 
 
@@ -21,7 +22,7 @@ def mechanical(directory):
     write_json(evidence, {'recipe': 'reviewed mechanical instructions'})
     record = {'verified': True, 'information_end': 0,
               'evidence_files': {str(evidence): sha256_file(evidence)},
-              'asset_files': dict(learning_guard.MECHANICAL_ASSETS)}
+              'asset_files': dict(MECHANICAL_ASSETS)}
     write_json(directory / 'learning.json', record)
     return record
 
@@ -65,10 +66,10 @@ def isolated_legacy_provenance(monkeypatch):
     Never enable this fixture globally or use it in leakage integration tests.
     """
     seal = SimpleNamespace(check=lambda: None)
-    monkeypatch.setattr(learning_guard, 'require_materials', lambda *a, **kw: {})
-    monkeypatch.setattr(learning_guard, 'bind', lambda *a: None)
-    monkeypatch.setattr(learning_guard, 'verify', lambda *a, **kw: None)
-    monkeypatch.setattr(learning_guard, 'execution_seal', lambda *a: seal)
-    monkeypatch.setattr(learning_guard, 'verify_pack', lambda *a: None)
-    monkeypatch.setattr(learning_guard, 'snapshot', lambda *a: {})
-    monkeypatch.setattr(learning_guard, 'verify_generation', lambda *a: seal)
+    monkeypatch.setattr(validation, 'require_materials', lambda *a, **kw: {})
+    monkeypatch.setattr(validation, 'bind', lambda *a: None)
+    monkeypatch.setattr(validation, 'verify', lambda *a, **kw: None)
+    monkeypatch.setattr(validation, 'execution_seal', lambda *a: seal)
+    monkeypatch.setattr(validation, 'verify_pack', lambda *a: None)
+    monkeypatch.setattr(validation, 'snapshot', lambda *a: {})
+    monkeypatch.setattr(validation, 'verify_generation', lambda *a: seal)

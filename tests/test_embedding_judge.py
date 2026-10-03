@@ -93,18 +93,18 @@ def test_grid_and_time_split():
 def test_shared_preparation_preserves_existing_learning_guards(monkeypatch, tmp_path):
     calls = []
     pack = {'data_ref': 'd-0011'}
-    monkeypatch.setattr(tuning.learning_guard, 'verify_pack',
+    monkeypatch.setattr(tuning.guard, 'verify_pack',
                         lambda p, role: calls.append(('pack', p, role)))
     def snapshot(data, directories, role):
         calls.append(('materials', data, directories, role))
         return {'validated': True}
-    monkeypatch.setattr(tuning.learning_guard, 'snapshot', snapshot)
+    monkeypatch.setattr(tuning.guard, 'snapshot', snapshot)
     assert tuning.shared_learning_snapshot(pack, {'dir': tmp_path}) == {'validated': True}
     assert calls == [('pack', pack, 'development'),
                      ('materials', 'd-0011', [tmp_path], 'judge_development')]
     def reject(*args):
         raise ConfigError('learning materials contain future information')
-    monkeypatch.setattr(tuning.learning_guard, 'snapshot', reject)
+    monkeypatch.setattr(tuning.guard, 'snapshot', reject)
     with pytest.raises(ConfigError):
         tuning.shared_learning_snapshot(pack, {'dir': tmp_path})
 

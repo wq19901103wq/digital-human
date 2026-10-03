@@ -264,8 +264,8 @@ def run_judge_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path
     spec = experiment.spec_of(exp_dir)
     if spec["kind"] != experiment.KIND_JUDGE_EVAL:
         raise ConfigError(f"不是 Judge 校准实验: {spec['kind']}")
-    from .learning_guard import verify_repair
-    verify_repair(spec)
+    from .materials import validation
+    validation.verify_repair(spec)
     from .gates import learning_execution_seal
     seal = learning_execution_seal(spec)
     state = experiment.state_of(exp_dir)

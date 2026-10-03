@@ -95,7 +95,9 @@ def check_replay(path, pack, baseline, candidate):
 
 def check_judge(args, report):
     from src.config import ConfigError, valid_name
-    from src.iteration import datasets, learning_guard as guard, versions
+    from src.iteration import datasets, versions
+    from src.iteration.materials import validation
+    from src.iteration.materials import seals as guard
     path = versions.PRIVATE / 'judge_eval' / valid_name(args.pack) / 'pack.json'
     pack = json.loads(path.read_text())
     pointers = versions.load_pointers()
@@ -116,7 +118,7 @@ def check_judge(args, report):
     report.run('development_pack', check_pack)
     def learning_sources():
         from src import cache
-        proof = guard.snapshot(pack['data_ref'], dirs, 'judge_development')
+        proof = validation.snapshot(pack['data_ref'], dirs, 'judge_development')
         return dict(snapshot_sha256=cache.digest(proof), materials=list(proof['materials']),
                     guard_code=proof['guard_code'])
     report.run('learning_sources', learning_sources)
@@ -127,7 +129,7 @@ def check_judge(args, report):
             raise ConfigError('材料可以核验，但当前基线尚未衔接：' + json.dumps(differences, ensure_ascii=False))
         # Ordinary creation also validates the production Judge, if different.
         if pointers['production_judge'] != baseline['id']:
-            guard.require_materials(pack['data_ref'], [versions.judge_dir(pointers['production_judge'])['dir']])
+            validation.require_materials(pack['data_ref'], [versions.judge_dir(pointers['production_judge'])['dir']])
         return expected
     report.run('current_baseline_context', current_context)
     if args.saved_draw_manifest:
@@ -204,10 +206,11 @@ def check_materials(args, report):
         return '来源记录未见冲突；不替代模型重建和正式实验保护'
     report.run('material_source_compatibility', inspect)
     if args.reconstruct:
-        from src.iteration import gbdt_evidence, learning_guard, pack_transport, runtime
+        from src.iteration import gbdt_evidence, pack_transport, runtime
+        from src.iteration.materials import validation
         def reconstruct():
             with pack_transport.archived_gbdt_paths(gbdt_evidence, runtime):
-                return learning_guard.require_materials(args.data,
+                return validation.require_materials(args.data,
                     [versions.judge_dir(args.judge)['dir'], versions.generator_dir(args.generator)])
         report.run('material_reconstruction', reconstruct)
 
