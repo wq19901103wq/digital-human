@@ -266,3 +266,8 @@ def test_recover_legacy_terminal_failure_preserves_frozen_runtime(env, monkeypat
     branch_packs.build(ref)
     assert read_json(directory / 'pack.json')['generation_failures'] == 1
     assert read_json(directory / 'building.json')['rows'][:2] == saved
+
+
+def test_frozen_fewshot_ranker_serving_bytes_unchanged():
+    from tests.frozen_boundaries import frozen_violations
+    assert frozen_violations() == []
