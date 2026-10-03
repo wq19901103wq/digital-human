@@ -10,7 +10,7 @@ import numpy as np
 
 from src import cache, tracing
 from src.generator.history import HistoryError
-from src.generator.history_sources import Message
+from src.history.sources import Message
 from src.judge import background_features as features
 from src.judge import memory_search as memory
 

@@ -12,7 +12,7 @@ from src.config import ConfigError, sha256_file
 from src.generator import learned_sources, ranker_report
 from src.generator.fewshot_ranker import concern, concern_comparison as comparison, supplemental
 from src.generator.fewshot_ranker.features import context_view
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration.storage import read_json, write_json
 from tests.test_fewshot_ranker_actions import control_model, frozen_control
 from tests.test_fewshot_ranker_lr import feature_row, frozen_source

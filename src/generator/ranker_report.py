@@ -8,7 +8,7 @@ from ..config import ROOT, sha256_file
 from ..iteration.storage import atomic_write, file_lock, read_json, write_once_json
 from .fewshot_ranker.dataset import load_dataset
 from .fewshot_ranker.training import metrics, summarize_topk, topk_expectation
-from .history_sources import digest, require
+from ..history.sources import digest, require
 
 
 def selection_comparison(observations, predictions, baseline_ids):

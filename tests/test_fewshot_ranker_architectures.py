@@ -8,7 +8,7 @@ from src.config import ConfigError, sha256_file
 from src.generator.fewshot_ranker import (
     architecture_comparison as comparison, boosting, neural_models, neural_sweep, training,
 )
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration.storage import read_json, write_json
 from tests.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.test_fewshot_ranker_training import synthetic

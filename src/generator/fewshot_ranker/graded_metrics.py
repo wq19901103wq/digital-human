@@ -4,7 +4,7 @@ from collections import defaultdict
 import numpy as np
 from sklearn.metrics import ndcg_score
 
-from ..history_sources import require
+from ...history.sources import require
 from .training import metrics, topk_expectation
 
 

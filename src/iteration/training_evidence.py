@@ -26,7 +26,7 @@ from ..cache import digest
 from ..config import ConfigError, load_settings, sha256_file
 from ..generator.history import eligible
 from ..generator.few_shot import PersonaFewShotRetriever
-from ..generator.history_sources import load as load_history
+from ..history.sources import load as load_history
 from ..generator.persona import PersonaPromptBuilder
 from ..judge import corrected_v1 as rt
 from ..judge.corrected import blind_case

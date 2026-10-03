@@ -5,7 +5,7 @@ from pathlib import Path
 from ...config import sha256_file
 from ...iteration.storage import read_json
 from ..history import eligible
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_labels import _saved
 
 

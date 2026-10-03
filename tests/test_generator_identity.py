@@ -6,7 +6,7 @@ import pytest
 from src import tracing
 from src.config import ConfigError, load_settings
 from src.generator.generator import ReplyGenerator
-from src.generator.history_sources import prompt_case
+from src.history.sources import prompt_case
 from src.generator.persona import CONTEXT_IDENTITY_POLICY, PersonaPromptBuilder
 from test_leakage_guards import env as env
 

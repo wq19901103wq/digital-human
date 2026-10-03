@@ -10,8 +10,9 @@ import pytest
 from src.cache import Store
 from src import config
 from src.config import ConfigError
-from src.generator import disk_history, few_shot, history_sources, learned_sources
-from src.generator.history_sources import stamp
+from src.generator import disk_history, few_shot, learned_sources
+from src.history import sources as history_sources
+from src.history.sources import stamp
 from src.iteration import control, learning_guard, material_reuse, versions
 from src.iteration.training_evidence import SavedCache
 from src.iteration.transport_profile import TransportProfile

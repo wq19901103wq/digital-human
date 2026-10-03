@@ -6,7 +6,7 @@ import pytest
 
 from src.config import ConfigError, load_settings
 from src.generator.generator import ReplyGenerator
-from src.generator.history_sources import Message
+from src.history.sources import Message
 from src.generator.source_projection import POLICY, project_validated, validate_policy
 from test_leakage_guards import env as env
 

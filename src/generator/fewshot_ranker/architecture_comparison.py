@@ -9,7 +9,7 @@ import xgboost
 
 from ...config import ROOT, sha256_file
 from ...iteration.storage import atomic_write, file_lock, read_json, write_once_json
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_report import load_completed
 from . import boosting, crosses, identity_crosses, neural_sweep
 from .comparison import evaluate

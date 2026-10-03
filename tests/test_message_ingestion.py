@@ -9,7 +9,7 @@ from src.bootstrap import history, import_coverage, ingest
 from src.bootstrap.build_fewshot_pool import extract_examples
 from src.config import ConfigError, sha256_file
 from src.generator.history import HistoryError
-from src.generator.history_sources import HistorySources
+from src.history.sources import HistorySources
 from src.iteration import versions
 from src.iteration.storage import write_json
 from test_conversation_boundaries import source_fixture

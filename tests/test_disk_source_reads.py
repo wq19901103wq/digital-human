@@ -10,7 +10,8 @@ from test_disk_history import FLAGS, queries, retriever
 from test_fewshot_selection import generator
 from test_leakage_guards import env as env
 from src.config import ConfigError, sha256_file
-from src.generator import disk_history, disk_source_reads, few_shot, history_sources
+from src.generator import disk_history, disk_source_reads, few_shot
+from src.history import sources as history_sources
 from src.iteration import pack_transport, transport_profile
 
 

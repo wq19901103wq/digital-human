@@ -9,7 +9,7 @@ from ...iteration import control, versions
 from ...iteration.learning_guard import RunSeal
 from ...iteration.storage import file_lock, locked, read_json, write_json, write_once_json
 from ...judge.corrected import CodexJudgeClient
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from . import extraction
 from .dataset import load_dataset
 

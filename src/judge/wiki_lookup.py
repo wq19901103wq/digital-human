@@ -13,7 +13,7 @@ IDENTITY_STATES = {'user_confirmed', 'source_account_bound'}
 
 def context_accounts(directory, case):
     """Recover speaker accounts by exact saved context IDs, never by display name."""
-    from ..generator import history_sources
+    from ..history import sources as history_sources
     sources = history_sources.load(directory)
     sources.validate(case)
     chat = case['source_span']['chat_id']

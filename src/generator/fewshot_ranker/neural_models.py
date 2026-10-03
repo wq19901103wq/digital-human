@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from ...judge import embedding
-from ..history_sources import require
+from ...history.sources import require
 
 
 def token_mix(x):

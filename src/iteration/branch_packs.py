@@ -34,7 +34,7 @@ def prepare_initial(kind='calibration', sample=None, reuse_generations=None):
         raise ConfigError('固定回复包必须由候选分支绑定验收批次后构建；请使用 iterate_branches.py')
     if kind != 'calibration':
         raise ConfigError('未知回复包用途')
-    from ..generator.history_sources import load
+    from ..history.sources import load
     data = versions.data_version_dir(current['data'])
     cases = load(data).role('judge_development')
     if not cases or (sample is not None and sample != len(cases)):
@@ -111,7 +111,7 @@ def build(ref: str, workers: int = 1) -> None:
                 raise ConfigError("源包指纹不一致，拒绝续建")
             source = json.loads(source_path.read_text())
         else:
-            from ..generator.history_sources import load
+            from ..history.sources import load
             source = {'data_ref': recipe['data_ref'], 'c0_gen_version': recipe['generator_ref'],
                       'rows': load(versions.data_version_dir(recipe['data_ref'])).role(recipe['purpose'])}
         cases = datasets.pack_cases(source)
@@ -234,7 +234,7 @@ def recover_terminal_failures(ref: str) -> dict:
                 raise ConfigError('源包指纹不一致，拒绝恢复')
             cases = datasets.pack_cases(read_json(path))
         else:
-            from ..generator.history_sources import load
+            from ..history.sources import load
             cases = load(versions.data_version_dir(recipe['data_ref'])).role(recipe['purpose'])
         seal = learning_guard.verify_generation(recipe, cases)
         info = versions.load_generator(recipe['generator_ref'])

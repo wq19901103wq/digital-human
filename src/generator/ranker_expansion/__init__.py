@@ -9,7 +9,7 @@ from ...iteration.datasets import case_path
 from ...iteration.storage import file_lock, read_json, write_json, write_once_json, atomic_write
 from ..few_shot import PersonaFewShotRetriever
 from ..history import eligible
-from ..history_sources import digest, load, require
+from ...history.sources import digest, load, require
 from ..ranker_labels import POLICY, select_targets
 from ..ranker_samples import RECIPE, fingerprint, select_candidates, summarize, teacher_overlap
 

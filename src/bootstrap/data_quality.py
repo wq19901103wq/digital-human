@@ -20,7 +20,7 @@ def acceptance_binding(directory):
     The frozen manifest binds the raw exports checked by import_coverage. Later
     adoption checks these archive/manifest bytes, without reimporting the corpus.
     """
-    from ..generator.history_sources import stamp
+    from ..history.sources import stamp
     from ..iteration import datasets
     directory = Path(directory).resolve()
     purpose = datasets.manifest(directory)
@@ -65,7 +65,7 @@ def require_passed(result):
 
 
 def audit(directory, *, segmentation=None):
-    from ..generator.history_sources import HistorySources
+    from ..history.sources import HistorySources
     directory = Path(directory)
     source = HistorySources(directory)
     rule = conversations.validate_policy(segmentation or source.segmentation or conversations.policy())

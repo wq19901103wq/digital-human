@@ -15,7 +15,7 @@ import numpy as np
 
 from .. import cache
 from ..config import sha256_file
-from ..generator.history_sources import stamp
+from ..history.sources import stamp
 
 
 class BGEEncoder:

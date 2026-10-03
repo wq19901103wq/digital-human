@@ -11,9 +11,10 @@ import time
 from ..config import sha256_file
 from ..iteration import datasets, learned_gen, pack_transport, versions
 from ..iteration.storage import file_lock, read_json, write_json
-from . import few_shot, history_sources, learned_selection
+from . import few_shot, learned_selection
+from ..history import sources as history_sources
 from .fewshot_ranker import extraction
-from .history_sources import digest, require
+from ..history.sources import digest, require
 
 
 def analyze_case(case, rows, selector, retriever, *, count, budgets):

@@ -429,7 +429,8 @@ def test_main_records_and_scopes_disk_storage(env, tmp_path, monkeypatch, kind, 
     import faulthandler
     import sys
     from src.config import sha256_file
-    from src.generator import disk_history, history_sources
+    from src.generator import disk_history
+    from src.history import sources as history_sources
     from src.iteration import jobs, learning_guard, material_reuse
     from src.iteration.storage import read_json, write_json
     directory = env.root / 'experiments/synthetic'
@@ -687,7 +688,7 @@ def test_invalid_feature_responses_remain_retryable_and_restore_hooks(tmp_path):
 @pytest.mark.parametrize('legacy', [False, True])
 def test_feature_validation_preserves_client_binding_failures(tmp_path, monkeypatch, legacy):
     from src.generator.fewshot_ranker import supplemental
-    from src.generator.history_sources import digest
+    from src.history.sources import digest
     if legacy:
         monkeypatch.delattr(supplemental, 'failed')
     client = CachedFeatureClient([])
@@ -703,7 +704,7 @@ def test_feature_validation_preserves_client_binding_failures(tmp_path, monkeypa
 @pytest.mark.parametrize('invalid_evidence', [False, True])
 def test_feature_validation_preserves_success_cache_integrity_failures(tmp_path, invalid_evidence):
     from src.generator.fewshot_ranker import supplemental
-    from src.generator.history_sources import digest
+    from src.history.sources import digest
     client = CachedFeatureClient([concern_cache_response(True)])
     key, request = concern_cache_request(client)
     supplemental.extract_one(tmp_path / 'features', key, request, client)

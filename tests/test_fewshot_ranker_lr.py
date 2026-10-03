@@ -10,7 +10,7 @@ pytest.importorskip('xgboost')  # 可选重依赖
 from src.config import ConfigError, sha256_file
 from src.generator import ranker_report
 from src.generator.fewshot_ranker import comparison, crosses, features, logistic, schema, training
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration.storage import read_json, write_json
 from tests.test_fewshot_ranker_training import record, synthetic
 

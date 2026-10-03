@@ -428,7 +428,7 @@ def launch(directory, *, instance, job, workers, seconds, kind='pack', feature_o
 def complete_saved_features(directory, output, workers):
     """Extract only a complete frozen recall checkpoint, without history loading."""
     from src.config import sha256_file
-    from src.generator.history_sources import digest, require
+    from src.history.sources import digest, require
     from src.iteration import control, experiment, learned_gen, learning_guard, runtime, versions
     from src.iteration.parallel import worker_limit
     from src.iteration.storage import file_lock, read_json, write_json

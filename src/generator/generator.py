@@ -43,7 +43,7 @@ class ReplyGenerator:
         self._material_seal = None
         self._information_end = None
         if pool_path is not None and pool_path.with_name('purposes.json').exists():
-            from .history_sources import load
+            from ..history.sources import load
             self._history_sources = load(pool_path.parent)
             from ..iteration.learning_guard import require_materials
             if prompt_root is None:
@@ -184,7 +184,7 @@ class ReplyGenerator:
     def build_prompt(self, case: dict[str, Any], forced_reply: bool = True) -> list[dict[str, str]]:
         """组装完整模型输入（触发预检和生成共用，保证比对的输入与真实一致）。"""
         if self._history_sources is not None:
-            from .history_sources import prompt_case
+            from ..history.sources import prompt_case
             self._material_seal.check()
             self._history_sources.validate(case)
             if self._information_end >= case["input_cutoff"]["timestamp"]:

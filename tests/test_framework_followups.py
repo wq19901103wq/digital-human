@@ -11,7 +11,7 @@ from test_leakage_guards import env as _env_fixture
 
 from src.bootstrap import history
 from src.config import ConfigError, sha256_file
-from src.generator.history_sources import load
+from src.history.sources import load
 from src.iteration import baseline, branches, datasets, journal, learning_guard, protocol, task_state, training_evidence, versions
 from src.iteration.storage import write_json
 

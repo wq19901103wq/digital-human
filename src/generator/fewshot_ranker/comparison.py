@@ -9,7 +9,7 @@ import sklearn
 
 from ...config import ROOT, sha256_file
 from ...iteration.storage import atomic_write, file_lock, read_json, write_once_json
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_report import load_completed, selection_comparison, topk_comparison
 from . import crosses, logistic
 from .training import metrics

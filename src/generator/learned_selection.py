@@ -4,7 +4,7 @@ from pathlib import Path
 from ..iteration.storage import read_json
 from ..judge.corrected import CodexJudgeClient
 from .history import eligible
-from .history_sources import digest, require
+from ..history.sources import digest, require
 from .fewshot_ranker import extraction, crosses, identity_crosses
 from .fewshot_ranker.features import combine, context_local, reply_local
 

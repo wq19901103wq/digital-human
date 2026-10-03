@@ -28,7 +28,7 @@ def saved_features(tmp_path, monkeypatch):
     from src.config import sha256_file
     from src.generator.fewshot_ranker import concern
     from src.generator.fewshot_ranker.features import context_view
-    from src.generator.history_sources import digest
+    from src.history.sources import digest
     from src.iteration import pack_transport, runtime
 
     root = tmp_path / 'instance'
@@ -125,7 +125,7 @@ def test_saved_features_only_fills_missing_cache_without_advancing(saved_feature
 @pytest.mark.parametrize('changed', ['binding', 'payload', 'incomplete', 'task_key', 'client',
                                    'material', 'extra_material', 'source', 'code', 'manifest', 'state'])
 def test_saved_features_rejects_changed_inputs_before_extraction(saved_features, monkeypatch, changed):
-    from src.generator.history_sources import digest
+    from src.history.sources import digest
     value = saved_features
     saved = read_json(value.checkpoint)
     if changed == 'binding':

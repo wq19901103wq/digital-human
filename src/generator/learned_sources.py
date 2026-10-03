@@ -6,7 +6,7 @@ from ..config import ROOT, sha256_file
 from ..iteration import versions
 from ..iteration.storage import read_json, write_json
 from .history import eligible
-from .history_sources import digest, load, require, stamp
+from ..history.sources import digest, load, require, stamp
 
 TRANSFORM = dict(semantic='local_crosses_v2', chat_id_pair=True,
                  identity_crosses='identity_crosses_v1')

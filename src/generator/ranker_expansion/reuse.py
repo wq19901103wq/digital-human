@@ -4,7 +4,7 @@ import json
 import time
 
 from ...iteration.storage import LockBusy, file_lock, read_json, write_json
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_labels import LabelBatch, _save, _saved
 
 

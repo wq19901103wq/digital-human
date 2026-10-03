@@ -6,7 +6,7 @@ import pytest
 
 from src.config import ConfigError
 from src.generator import background
-from src.generator.history_sources import Message
+from src.history.sources import Message
 from src.iteration import shares
 
 

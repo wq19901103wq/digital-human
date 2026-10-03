@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.generator import history_sources
+from src.history import sources as history_sources
 from src.judge import background_features, feature_inspection, wiki_lookup
 
 

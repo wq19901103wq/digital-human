@@ -13,7 +13,7 @@ from threadpoolctl import threadpool_limits
 
 from ...config import ROOT, sha256_file
 from ...iteration.storage import atomic_write, file_lock, read_json, write_once_json
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_report import load_completed
 from . import boosting, graded_labels, graded_metrics, logistic, neural_models, training
 from .architecture_comparison import feature_rows

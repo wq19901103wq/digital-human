@@ -2,7 +2,7 @@
 import numpy as np
 
 from .neural_models import document
-from ..history_sources import require
+from ...history.sources import require
 from . import training
 
 

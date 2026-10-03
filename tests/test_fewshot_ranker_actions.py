@@ -11,7 +11,7 @@ from src.config import ConfigError, sha256_file
 from src.generator import learned_sources, ranker_report
 from src.generator.fewshot_ranker import action_comparison as comparison, action_crosses, boosting
 from src.generator.fewshot_ranker.architecture_comparison import feature_rows
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration.storage import read_json, write_json
 from tests.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.test_fewshot_ranker_training import synthetic

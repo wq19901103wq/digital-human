@@ -7,7 +7,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 
-from ..history_sources import require
+from ...history.sources import require
 from .training import inner_split, pairs
 
 RECIPE = dict(c_values=[.01, .1, 1., 10.], inner_fraction=.2, penalty='l2',

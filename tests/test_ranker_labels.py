@@ -6,7 +6,7 @@ import pytest
 
 from src.config import ConfigError, load_settings
 from src.generator import ranker_labels as labels
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration import versions
 from src.iteration.storage import read_json, write_json
 from tests.leakage_support import historical, mechanical

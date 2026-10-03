@@ -12,7 +12,7 @@ from ...config import ROOT, sha256_file
 from ...iteration import control, versions
 from ...iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
 from ...judge.corrected import CodexJudgeClient
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_report import load_completed
 from . import concern, supplemental
 from .action_comparison import METHOD, control_binding, fit_selected

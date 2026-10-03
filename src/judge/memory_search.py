@@ -11,7 +11,7 @@ import re
 import numpy as np
 
 from .. import cache, tracing
-from ..generator import history_sources
+from ..history import sources as history_sources
 
 VERSION = 'judge_memory_bge_hybrid_v3'
 MAX_CALLS = 3

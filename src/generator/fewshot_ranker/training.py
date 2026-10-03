@@ -10,7 +10,7 @@ from sklearn.metrics import average_precision_score, ndcg_score, roc_auc_score
 
 from ...judge.embedding import fit_encoder
 from ...iteration.storage import write_json, write_once_json, atomic_write
-from ..history_sources import require
+from ...history.sources import require
 from .features import combine, context_local, reply_local
 from .neural_models import create, document
 

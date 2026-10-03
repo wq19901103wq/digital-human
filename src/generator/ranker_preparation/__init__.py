@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ...config import sha256_file
 from ...iteration.storage import file_lock, read_json, write_once_json
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_expansion import cap_rows, isolated_rows
 from ..ranker_labels import POLICY
 from ..ranker_samples import RECIPE, fingerprint

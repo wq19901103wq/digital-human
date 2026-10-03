@@ -5,7 +5,7 @@ import pytest
 
 from src.config import ConfigError, sha256_file
 from src.generator.few_shot import PersonaFewShotRetriever
-from src.generator.history_sources import load
+from src.history.sources import load
 from src.generator.ranker_samples import object_match, prepare, select_candidates, teacher_overlap
 from src.iteration.storage import read_json, write_json
 from tests.leakage_support import historical

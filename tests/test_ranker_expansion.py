@@ -10,7 +10,7 @@ pytest.importorskip('xgboost')  # 可选重依赖
 from src.bootstrap.history import write_rows
 from src.config import ConfigError, sha256_file
 from src.generator.few_shot import PersonaFewShotRetriever
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.generator.ranker_expansion import cap_rows, isolated_rows, prepare, read_inventory
 from src.generator.ranker_expansion.reuse import import_labels, reuse_source
 from src.generator.ranker_samples import prepare as original_prepare

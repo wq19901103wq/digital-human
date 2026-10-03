@@ -16,7 +16,7 @@ from ..config import ConfigError, sha256_file
 from ..iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
 from .few_shot import PersonaFewShotRetriever
 from .history import eligible
-from .history_sources import digest, load, require
+from ..history.sources import digest, load, require
 
 RECIPE = dict(schema=1, role='gen_optimization', queries=[3, 1], route_limit=12,
               candidate_limit=8, baseline_limit=3, char_budget=2500,

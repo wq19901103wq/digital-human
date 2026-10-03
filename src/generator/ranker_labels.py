@@ -24,7 +24,7 @@ from ..llm import build_clients
 from .few_shot import PersonaFewShotRetriever
 from .generator import ReplyGenerator
 from .history import eligible
-from .history_sources import digest, load, require
+from ..history.sources import digest, load, require
 from .ranker_samples import fingerprint
 
 POLICY = dict(schema=1, teacher='offline_nonoverlapping_supervision', single_example=True,

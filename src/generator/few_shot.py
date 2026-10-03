@@ -518,7 +518,7 @@ class PersonaFewShotRetriever:
             return False
         self.history_policy = report.get('history_policy')
         if self.history_policy or self.path.with_name('purposes.json').exists():
-            from .history_sources import load
+            from ..history.sources import load
             self._history_sources = load(self.path.parent)
             self.history_policy = self._history_sources.purpose['history_policy']
         try:

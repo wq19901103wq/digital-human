@@ -13,7 +13,7 @@ from src.generator.fewshot_ranker import (
     boosting, graded_comparison as comparison, graded_labels, graded_metrics,
     logistic, neural_models, stability, training,
 )
-from src.generator.history_sources import digest
+from src.history.sources import digest
 from src.iteration.storage import read_json, write_json
 from tests.test_fewshot_ranker_architectures import mixer_recipe
 from tests.test_fewshot_ranker_lr import feature_row, frozen_source

@@ -19,7 +19,7 @@ from ...iteration.parallel import completed_map
 from ...iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
 from ...judge.judge import build_judge
 from ...llm import build_clients
-from ..history_sources import digest, require
+from ...history.sources import digest, require
 from ..ranker_labels import SingleExampleGenerator, _saved, label_one
 from ..ranker_samples import fingerprint
 from .dataset import load_dataset

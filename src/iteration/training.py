@@ -10,7 +10,7 @@ import numpy as np
 
 from .. import cache, tracing
 from ..config import ConfigError, ROOT, load_settings, settings_path, sha256_file
-from ..generator.history_sources import load
+from ..history.sources import load
 from ..judge import lr_retrain as lr, corrected_v1 as rt
 from ..judge.corrected import CodexJudgeClient, MODE, RUNTIME_PATH, blind_case
 from . import branches, control, datasets, experiment, learning_guard, runtime, task_state, versions
