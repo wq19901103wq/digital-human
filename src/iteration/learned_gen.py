@@ -9,9 +9,10 @@ import sys
 import time
 
 from ..config import ROOT, ConfigError, sha256_file
-from ..generator import few_shot, learned_sources
+from ..generator import learned_sources
+from ..generator.fewshot import open_session
+from ..generator.fewshot import rank as fewshot_rank
 from ..history import sources as history_sources
-from ..generator.few_shot import PersonaFewShotRetriever
 from ..history.sources import require
 from ..generator.learned_selection import LearnedSelector, POLICY, recall
 from ..generator.fewshot_ranker import supplemental as extraction
@@ -178,11 +179,11 @@ def precompute(directory, candidate, output, workers):
               f'{value["elapsed_seconds"]}s elapsed', flush=True)
     if completed < len(cases):
         progress('waiting_for_memory', completed)
-        with history_phase(output), pack_transport.history_feature_cache(few_shot):
+        with history_phase(output), pack_transport.history_feature_cache(fewshot_rank):
             retriever = None
             try:
                 progress('loading', completed)
-                retriever = PersonaFewShotRetriever(path=data_dir / 'fewshot_pool.jsonl')
+                retriever = open_session(path=data_dir / 'fewshot_pool.jsonl')
                 require(retriever.is_approved(), 'Historical recall pool is not approved')
                 progress('recalling', completed)
                 reported = time.time()

@@ -24,7 +24,7 @@ def generation_snapshot(cases: list[dict], data_dir: Path, configs: list[dict]) 
     if 'purposes_sha256' in snapshot:
         source = Path(__file__).parents[1]
         snapshot['implementation_sha256'] = {name: sha256_file(source / name) for name in
-            ('generator/generator.py', 'generator/few_shot.py', 'generator/history.py', 'iteration/datasets.py')}
+            ('generator/generator.py', 'generator/fewshot/session.py', 'generator/history.py', 'iteration/datasets.py')}
     # 检索关闭时池不参与计算；开启时，池内容及审批条件都属于输入依赖。
     if any(config.get("retriever", {}).get("enabled", True) for config in configs):
         pool = data_dir / "fewshot_pool.jsonl"

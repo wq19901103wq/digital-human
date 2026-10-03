@@ -25,7 +25,7 @@ from .. import cache
 from ..cache import digest
 from ..config import ConfigError, load_settings, sha256_file
 from ..generator.history import eligible
-from ..generator.few_shot import PersonaFewShotRetriever
+from ..generator.fewshot import RecallSession
 from ..history.sources import load as load_history
 from ..generator.persona import PersonaPromptBuilder
 from ..judge import corrected_v1 as rt
@@ -166,7 +166,7 @@ def generations(directory, spec, cases, pool, evidence, complete):
         for example in selected:
             history.validate(example, example=True)
         budget = gen['config'].get('shots_char_budget', settings['evaluation']['few_shots_char_budget'])
-        rendered, ids = PersonaFewShotRetriever.render(selected, max_chars=budget)
+        rendered, ids = RecallSession.render(selected, max_chars=budget)
         require(rendered == refs[0]['rendered'] and ids == refs[0]['selected_ids'],
                 'rendered few-shot text does not match its source examples')
         prompt = builder.build_messages(case, rendered, True)
