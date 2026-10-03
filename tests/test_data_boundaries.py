@@ -130,7 +130,7 @@ def test_publish_does_not_create_models_or_move_pointers(priv):
 
 def test_full_history_retriever_requires_boundary_and_cannot_downgrade(tmp_path):
     from src.config import sha256_file
-    from src.generator.few_shot import PersonaFewShotRetriever
+    from src.generator.fewshot import open_session
     from src.generator.generator import ReplyGenerator
     source = historical(tmp_path)
     rows = source.examples
@@ -138,7 +138,7 @@ def test_full_history_retriever_requires_boundary_and_cannot_downgrade(tmp_path)
     history.write_rows(pool, rows)
     (tmp_path / 'report.json').write_text(json.dumps({'review_status': 'approved',
         'examples_sha256': sha256_file(pool), 'history_policy': 'complete_before_input_v1'}))
-    retriever = PersonaFewShotRetriever(pool)
+    retriever = open_session(pool, index_policy='use_if_present')
     assert retriever.is_approved()
     with pytest.raises(HistoryError):
         retriever.retrieve(query='问题', chat_name='例子', is_group=False)

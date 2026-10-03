@@ -11,7 +11,9 @@ import time
 from ..config import sha256_file
 from ..iteration import datasets, learned_gen, pack_transport, versions
 from ..iteration.storage import file_lock, read_json, write_json
-from . import few_shot, learned_selection
+from . import learned_selection
+from .fewshot import open_session
+from .fewshot import rank as fewshot_rank
 from ..history import sources as history_sources
 from .fewshot_ranker import extraction
 from ..history.sources import digest, require
@@ -102,8 +104,8 @@ def report(output, *, spec_path, generator, budgets, case_ids=()):
         sources={str(path): sha256_file(path) for path in source_paths}, budgets=budgets, count=count)
     with file_lock(output / '.selection_analysis.lock', blocking=False):
         records = []
-        with learned_gen.history_phase(output), pack_transport.history_feature_cache(few_shot):
-            retriever = few_shot.PersonaFewShotRetriever(path=data_dir / 'fewshot_pool.jsonl')
+        with learned_gen.history_phase(output), pack_transport.history_feature_cache(fewshot_rank):
+            retriever = open_session(path=data_dir / 'fewshot_pool.jsonl')
             require(retriever.is_approved(), 'Historical recall pool is not approved')
             last_report = time.time()
             for case in cases:

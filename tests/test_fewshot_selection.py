@@ -4,14 +4,14 @@ import json
 import pytest
 
 from src.config import ConfigError, load_settings
-from src.generator.few_shot import PersonaFewShotRetriever
+from src.generator.fewshot import RecallSession
 from src.generator.generator import ReplyGenerator
 from src.generator.selection import POLICY, select
 from test_leakage_guards import env as env
 
 
 class Renderer:
-    render_selected = staticmethod(PersonaFewShotRetriever.render)
+    render_selected = staticmethod(RecallSession.render)
 
 
 def row(identity, context, reply):

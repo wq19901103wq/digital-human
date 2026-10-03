@@ -92,7 +92,7 @@ def saved_features(tmp_path, monkeypatch):
         pytest.fail('feature completion must not recall, load history, prepare or advance')
 
     monkeypatch.setattr(pack_transport, 'history_memory_lane', forbidden)
-    monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', forbidden)
+    monkeypatch.setattr(learned_gen, 'open_session', forbidden)
     monkeypatch.setattr(learned_gen, 'prepare', forbidden)
     monkeypatch.setattr(branches, 'advance', forbidden)
     return SimpleNamespace(directory=directory, output=output, selector=selector, tasks=tasks,
@@ -496,7 +496,7 @@ def test_precompute_initializes_history_filter_before_recall(tmp_path, monkeypat
         assert source_overlap_policy == source_policy
         events.append('recall')
         return []
-    monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', Retriever)
+    monkeypatch.setattr(learned_gen, 'open_session', Retriever)
     monkeypatch.setattr(learned_gen, 'LearnedSelector', lambda *a: selector)
     monkeypatch.setattr(learned_gen, 'recall', recall)
     monkeypatch.setattr(learned_gen, 'recall_binding', lambda *a: ('binding', [], []))
@@ -589,7 +589,7 @@ def test_recall_checkpoint_reuses_exact_inputs_and_invalidates_changes(tmp_path,
         def is_approved(self):
             return True
     monkeypatch.setattr(learned_gen, 'ROOT', tmp_path)
-    monkeypatch.setattr(learned_gen, 'PersonaFewShotRetriever', Retriever)
+    monkeypatch.setattr(learned_gen, 'open_session', Retriever)
     monkeypatch.setattr(learned_gen, 'LearnedSelector', lambda *args: selector)
     monkeypatch.setattr(learned_gen, 'recall', lambda *args, **kwargs: [])
     monkeypatch.setattr(learned_gen.experiment, 'spec_of', lambda *args: spec)

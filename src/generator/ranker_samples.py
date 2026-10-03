@@ -14,7 +14,7 @@ import time
 
 from ..config import ConfigError, sha256_file
 from ..iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
-from .few_shot import PersonaFewShotRetriever
+from .fewshot import open_session
 from .history import eligible
 from ..history.sources import digest, load, require
 
@@ -192,7 +192,7 @@ def prepare(data_dir, teacher_dir, generator_dir, output, progress=print):
         paths = [*source.files, data_dir / 'gen_optimization.jsonl', teacher_dir / 'learning.json',
                  teacher_dir / 'config.json', *teacher_paths,
                  *[p for p in generator_dir.rglob('*') if p.is_file()],
-                 Path(__file__), Path(__file__).with_name('few_shot.py'),
+                 Path(__file__), Path(__file__).parent / 'fewshot' / 'session.py',
                  Path(__file__).with_name('history.py'), Path(__file__).with_name('history_sources.py')]
         hashes = fingerprint(paths)
         manifest = dict(schema=1, recipe=RECIPE, inputs=hashes, data=data_dir.name,
@@ -211,7 +211,7 @@ def prepare(data_dir, teacher_dir, generator_dir, output, progress=print):
             report = read_json(existing_report)
             require(report['manifest_sha256'] == digest(manifest), '汇总与冻结配方不符')
             return report
-        retriever = PersonaFewShotRetriever(data_dir / 'fewshot_pool.jsonl')
+        retriever = open_session(data_dir / 'fewshot_pool.jsonl')
         require(retriever.is_approved(), '历史召回库未批准')
         records = []
         start = time.monotonic()

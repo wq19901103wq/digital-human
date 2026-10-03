@@ -395,3 +395,298 @@ def _row_situation_tags(
         return tags
     return inferred
 
+
+
+# ---------------------------------------------------------------------------
+# score_and_select：旧 retrieve() 打分循环到 return selected 的搬迁
+# （few_shot.py 746-1017 行）。改造点仅三处，均与 AST 补丁等价：
+# 1) 排除检查：candidates 由 session 按引擎筛好（内存引擎照旧语义，索引引擎
+#    由 SQL 保证），循环内跳过判断逐字保留；
+# 2) sample_text/sample_terms/overlap/length_similarity 四行：indexed_features
+#    非 None 时取 (overlap, context_length)，length_similarity 用 context_length
+#    计算（与补丁一致）；为 None 时走旧四行（Counter 路径）；
+# 3) 处境/画像从 pool 的物化缓存按 (id, gap_move) 取（旧 763-786 行逻辑的
+#    准备期固化），prioritize_latest_turn 分支的 _latest_*_by_id 直取语义不变。
+# below_threshold 回退、排序键、多样性、trace 全部字段（含
+# production_semantic_gate_fallback_used 的两处赋值差异）、dict(row) 拷贝
+# 均逐字保留。
+# ---------------------------------------------------------------------------
+
+
+def score_and_select(pool, q, candidates, indexed_features=None) -> list[dict]:
+    query_terms = q.query_terms
+    query = q.query
+    exclude_ids = q.exclude_ids
+    query_situations = q.query_situations
+    query_profile = q.query_profile
+    precise_situation = q.precise_situation
+    scored = []
+    below_threshold = []
+    for row in candidates:
+        if exclude_ids and str(row["id"]) in exclude_ids:
+            continue
+        if indexed_features is None:
+            sample_text = " ".join(row["context"])
+            sample_terms = pool._terms_by_id[str(row["id"])]
+            overlap = sum(min(count, sample_terms.get(term, 0)) for term, count in query_terms.items())
+            length_similarity = 1.0 / (1.0 + abs(len(query) - len(sample_text)) / 20.0)
+        else:
+            overlap, context_length = indexed_features.get(str(row["id"]), (0, 0))
+            length_similarity = 1.0 / (1.0 + abs(len(query) - context_length) / 20.0)
+        same_chat = bool(q.current_chat_id and row.get("chat_id") == q.current_chat_id)
+        same_relationship = bool(q.relationship and row.get("relationship") == q.relationship)
+        lexical_score = overlap / max(1, sum(query_terms.values()))
+        if pool.prioritize_latest_turn:
+            row_situations = pool._latest_situations_by_id[str(row["id"])]
+            row_profile = pool._latest_profiles_by_id[str(row["id"])]
+            if (
+                pool.enable_information_gap_response_move
+                and query_profile.get("expected_response_move") != "verify_or_request_detail"
+            ):
+                row_messages = [str(value).strip() for value in row.get("context") or [] if str(value).strip()]
+                row_profile = _situation_profile(
+                    row_messages[-1] if row_messages else "",
+                    enable_clarification=pool.enable_clarification,
+                )
+        else:
+            row_id = str(row["id"])
+            row_situations = pool._row_situation_tag_by_id[row_id]
+            gap_move = (
+                pool.enable_information_gap_response_move
+                and query_profile.get("expected_response_move") == "verify_or_request_detail"
+            )
+            row_profile = pool._row_situation_profile_by_id[(row_id, gap_move)]
+        situation_overlap = query_situations & row_situations
+        profile_compatibility = _profile_compatibility(query_profile, row_profile)
+        query_response_move = query_profile.get("expected_response_move")
+        row_response_move = row_profile.get("expected_response_move")
+        response_move_rank = (
+            0
+            if query_response_move and query_response_move == row_response_move
+            else 2
+            if query_response_move and row_response_move
+            else 1
+        )
+        row_latest_form = pool._latest_turn_forms_by_id.get(str(row["id"]), "")
+        latest_turn_form_comparable = bool(q.query_latest_form and row_latest_form)
+        latest_turn_form_match = bool(
+            latest_turn_form_comparable and q.query_latest_form == row_latest_form
+        )
+        group_participant_match_count = 0
+        if q.use_situation:
+            score = lexical_score * 1.5 + length_similarity * 0.5
+            if situation_overlap:
+                score += 7.0
+            elif query_situations and row_situations:
+                score -= 3.0
+            score += profile_compatibility
+            if pool.prefer_latest_turn_form and not q.is_group and q.query_latest_form and row_latest_form:
+                score += 4.0 if q.query_latest_form == row_latest_form else -1.0
+            if pool.prefer_group_participant_structure and q.is_group and q.current_context_messages:
+                row_group_profile = pool._group_participant_profiles_by_id.get(str(row["id"]))
+                if row_group_profile:
+                    group_participant_match_count = sum(
+                        int(query_value == row_value)
+                        for query_value, row_value in zip(
+                            q.query_group_participant_profile, row_group_profile,
+                        )
+                    )
+                    score += sum(
+                        1.5 if query_value == row_value else -1.5
+                        for query_value, row_value in zip(q.query_group_participant_profile, row_group_profile)
+                    )
+        else:
+            score = lexical_score * 8.0 + length_similarity
+        semantic_similarity = 0.0
+        # 语义编码器已随策略冻结移除（SOP §1.6）：query_embedding 恒 None，
+        # 以下门控分支保持旧代码形状（含 trace 字段取值），自然退化不进入。
+        query_embedding = None
+        embedding_by_id = {}
+        semantic_embedding_available = bool(
+            query_embedding is not None and row["id"] in embedding_by_id
+        )
+        semantic_gate_rejected = False
+        semantic_score_weight = 0.0
+        if query_embedding is not None and row["id"] in embedding_by_id:
+            semantic_similarity = float(query_embedding @ embedding_by_id[row["id"]])
+            if semantic_similarity < 0.45 and (not q.use_situation or profile_compatibility < 5.0):
+                semantic_gate_rejected = True
+                trace = None
+                if q.include_retrieval_features:
+                    trace = {
+                        "production_final_score": float(score + semantic_similarity * 4.0),
+                        "production_lexical_score": float(lexical_score),
+                        "production_lexical_overlap_count": float(overlap),
+                        "production_length_similarity": float(length_similarity),
+                        "production_semantic_similarity": float(semantic_similarity),
+                        "production_semantic_embedding_available": semantic_embedding_available,
+                        "production_semantic_gate_rejected": semantic_gate_rejected,
+                        "production_semantic_score_weight": 4.0,
+                        "production_profile_compatibility": float(profile_compatibility),
+                        "production_situation_overlap_count": float(len(situation_overlap)),
+                        "production_situation_overlap_any": bool(situation_overlap),
+                        "production_precise_situation_match": bool(precise_situation),
+                        "production_same_chat": same_chat,
+                        "production_same_relationship": same_relationship,
+                        "production_response_move_rank": float(response_move_rank),
+                        "production_response_move_exact_match": response_move_rank == 0,
+                        "production_latest_turn_form_comparable": latest_turn_form_comparable,
+                        "production_latest_turn_form_match": latest_turn_form_match,
+                        "production_group_participant_match_count": float(group_participant_match_count),
+                        "production_multi_message_reply_coverage": False,
+                        "production_candidate_pool_situation_filtered": q.candidate_pool_situation_filtered,
+                        "production_candidate_pool_precise_situation": q.candidate_pool_precise_situation,
+                        "production_candidate_pool_exhaustion_fallback": q.candidate_pool_exhaustion_fallback,
+                        "production_candidate_pool_sparse_portable": q.candidate_pool_sparse_portable,
+                        "production_semantic_gate_fallback_used": False,
+                    }
+                below_threshold.append((
+                    -(score + semantic_similarity * 4.0),
+                    row["id"],
+                    row,
+                    profile_compatibility,
+                    same_chat,
+                    bool(situation_overlap or precise_situation),
+                    response_move_rank,
+                    trace,
+                ))
+                continue
+            situation_semantic_weight = 8.0 if pool.increase_semantic_topic_weight else 4.0
+            semantic_score_weight = situation_semantic_weight if q.use_situation else 10.0
+            score += semantic_similarity * semantic_score_weight
+        multi_message_reply_coverage = False
+        if q.use_situation:
+            score += (2.5 if situation_overlap else 0.5) if same_chat else 0.0
+            score += 0.5 if same_relationship else 0.0
+            if (
+                pool.prefer_multi_message_reply_coverage
+                and q.query_has_multiple_messages
+                and len([value for value in row.get("context") or [] if str(value).strip()]) >= 2
+                and len([value for value in row.get("reply") or [] if str(value).strip()]) >= 2
+            ):
+                score += 1.0
+                multi_message_reply_coverage = True
+        else:
+            score += 1.5 if same_chat else 0.0
+            score += 2.0 if same_relationship else 0.0
+        trace = None
+        if q.include_retrieval_features:
+            trace = {
+                "production_final_score": float(score),
+                "production_lexical_score": float(lexical_score),
+                "production_lexical_overlap_count": float(overlap),
+                "production_length_similarity": float(length_similarity),
+                "production_semantic_similarity": float(semantic_similarity),
+                "production_semantic_embedding_available": semantic_embedding_available,
+                "production_semantic_gate_rejected": semantic_gate_rejected,
+                "production_semantic_score_weight": float(semantic_score_weight),
+                "production_profile_compatibility": float(profile_compatibility),
+                "production_situation_overlap_count": float(len(situation_overlap)),
+                "production_situation_overlap_any": bool(situation_overlap),
+                "production_precise_situation_match": bool(precise_situation),
+                "production_same_chat": same_chat,
+                "production_same_relationship": same_relationship,
+                "production_response_move_rank": float(response_move_rank),
+                "production_response_move_exact_match": response_move_rank == 0,
+                "production_latest_turn_form_comparable": latest_turn_form_comparable,
+                "production_latest_turn_form_match": latest_turn_form_match,
+                "production_group_participant_match_count": float(group_participant_match_count),
+                "production_multi_message_reply_coverage": multi_message_reply_coverage,
+                "production_candidate_pool_situation_filtered": q.candidate_pool_situation_filtered,
+                "production_candidate_pool_precise_situation": q.candidate_pool_precise_situation,
+                "production_candidate_pool_exhaustion_fallback": q.candidate_pool_exhaustion_fallback,
+                "production_candidate_pool_sparse_portable": q.candidate_pool_sparse_portable,
+                "production_semantic_gate_fallback_used": False,
+            }
+        scored.append((
+            -score,
+            row["id"],
+            row,
+            profile_compatibility,
+            same_chat,
+            bool(situation_overlap or precise_situation),
+            response_move_rank,
+            trace,
+        ))
+    if q.use_situation and not scored and below_threshold:
+        scored = below_threshold
+        for item in scored:
+            trace = item[7]
+            if trace is not None:
+                trace["production_semantic_gate_fallback_used"] = True
+    best_profile_compatibility = max((item[3] for item in scored), default=0.0)
+    scored.sort(key=lambda item: (
+        item[6] if pool.prefer_response_move_before_relevance else 0,
+        0 if (
+            (
+                pool.prefer_same_chat_after_situation
+                and item[3] >= best_profile_compatibility
+            )
+            or (
+                pool.prefer_same_chat_after_exact_move
+                and query_response_move
+                and item[6] == 0
+            )
+        )
+        and item[4]
+        and item[5]
+        else 1,
+        item[0],
+        item[1],
+    ))
+    selected = []
+    bucket_counts: Counter[str] = Counter()
+    semantic_move_counts: Counter[tuple[str, str]] = Counter()
+    diversity_skips = 0
+    for pre_diversity_rank, item in enumerate(scored, start=1):
+        _, _, row, profile_compatibility, same_chat, situation_match, response_move_rank, trace = item
+        bucket = str(row.get("reply_shape") or "default")
+        profile = row.get("semantic_profile") or {}
+        semantic_move = (
+            str(profile.get("incoming_act") or ""),
+            str(profile.get("response_move") or ""),
+        )
+        enforce_diversity = (
+            q.diversity_prefix_size is None
+            or len(selected) < max(0, q.diversity_prefix_size)
+        )
+        if enforce_diversity:
+            if bucket == "laugh" and bucket_counts[bucket] >= 2:
+                diversity_skips += 1
+                continue
+            if all(semantic_move) and semantic_move_counts[semantic_move] >= 3:
+                diversity_skips += 1
+                continue
+        if trace is None:
+            selected.append(row)
+        else:
+            same_chat_priority = bool(
+                (
+                    pool.prefer_same_chat_after_situation
+                    and profile_compatibility >= best_profile_compatibility
+                )
+                or (
+                    pool.prefer_same_chat_after_exact_move
+                    and query_response_move
+                    and response_move_rank == 0
+                )
+            ) and same_chat and situation_match
+            trace.update({
+                "production_pre_diversity_rank": float(pre_diversity_rank),
+                "production_final_rank": float(len(selected) + 1),
+                "production_sort_response_move_priority": bool(
+                    pool.prefer_response_move_before_relevance
+                ),
+                "production_sort_same_chat_priority": same_chat_priority,
+                "production_diversity_filter_active": enforce_diversity,
+                "production_diversity_skips_before_selection": float(diversity_skips),
+            })
+            selected_row = dict(row)
+            selected_row["retrieval_features"] = trace
+            selected.append(selected_row)
+        bucket_counts[bucket] += 1
+        if all(semantic_move):
+            semantic_move_counts[semantic_move] += 1
+        if len(selected) >= max(0, q.limit):
+            break
+    return selected

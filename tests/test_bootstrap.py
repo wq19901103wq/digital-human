@@ -43,9 +43,9 @@ def test_fewshot_pool_rows_loadable(tmp_path):
     assert row["source_provenance"] == "before_automation_cutoff"
     assert isinstance(row["context"], list) and isinstance(row["reply"], list)
     # 检索器认可该池（report.json 存在 → is_approved）
-    from src.generator.few_shot import PersonaFewShotRetriever
+    from src.generator.fewshot import open_session
 
-    retriever = PersonaFewShotRetriever(path=tmp_path / "pool.jsonl")
+    retriever = open_session(path=tmp_path / "pool.jsonl", index_policy='use_if_present')
     assert retriever.is_approved()
     rows = retriever.retrieve(query="晚上聚餐", chat_name="x", is_group=True, limit=3)
     assert rows, "池非空时应当能召回示例"

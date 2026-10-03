@@ -9,7 +9,7 @@ pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
 from src.bootstrap.history import write_rows
 from src.config import ConfigError, sha256_file
-from src.generator.few_shot import PersonaFewShotRetriever
+from src.generator.fewshot import RecallSession
 from src.history.sources import digest
 from src.generator.ranker_expansion import cap_rows, isolated_rows, prepare, read_inventory
 from src.generator.ranker_expansion.reuse import import_labels, reuse_source
@@ -43,12 +43,12 @@ def test_expansion_deduplicates_roles_reuses_candidates_and_resumes(tmp_path, mo
     args = (fixture.directory, teacher, generator, output)
     kw = dict(observations=3, reuse_inventory=old, progress=lambda *a, **k: None)
     calls = []
-    original = PersonaFewShotRetriever.retrieve
+    original = RecallSession.retrieve
     def retrieve(self, *a, **k):
         calls.append(k['history_case']['case_id'])
         assert k['history_case']['case_id'] != fixture.cases[1]['case_id']
         return original(self, *a, **k)
-    monkeypatch.setattr(PersonaFewShotRetriever, 'retrieve', retrieve)
+    monkeypatch.setattr(RecallSession, 'retrieve', retrieve)
     result = prepare(*args, **kw)
     assert result['candidate_observations'] == 3
     assert result['targets'] == 2 and result['shortfall'] == 0

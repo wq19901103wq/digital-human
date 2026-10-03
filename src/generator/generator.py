@@ -14,7 +14,7 @@ from typing import Any
 from ..config import ConfigError
 from ..llm import ChatClient
 from .. import cache, tracing
-from .few_shot import PersonaFewShotRetriever
+from .fewshot import RecallSession, open_session
 from .persona import PersonaPromptBuilder
 from .history import HistoryError
 
@@ -99,14 +99,14 @@ class ReplyGenerator:
                 raise ConfigError('few-shot 重排需要启用历史召回')
             from .reranker import FewShotReranker
             self._reranker = FewShotReranker(ChatClient(settings, switches['reranker']))
-        self._retriever: PersonaFewShotRetriever | None = None
+        self._retriever: RecallSession | None = None
         if switches.get("enabled", True):
             if pool_path is None or not pool_path.exists():
                 raise ConfigError(
                     f"配置启用 few-shot 但池文件缺失: {pool_path}（F02：缺失依赖不得静默降级，"
                     f"明确 retriever.enabled=false 才可无池运行）"
                 )
-            retriever = PersonaFewShotRetriever(path=pool_path)
+            retriever = open_session(path=pool_path)
             if not retriever.is_approved():
                 raise ConfigError(
                     f"few-shot 池未通过审批（状态或内容 hash 不符）: {pool_path}"

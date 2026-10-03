@@ -1,7 +1,7 @@
 import pytest
 
 from src.config import ConfigError
-from src.generator.few_shot import PersonaFewShotRetriever
+from src.generator.fewshot import RecallSession
 from src.generator.ranker_expansion import prepare, read_inventory
 from src.generator.ranker_preparation import seed_checkpoints
 from src.iteration.storage import read_json, write_json
@@ -25,7 +25,7 @@ def test_resize_reuses_partial_preparation_without_retrieval(tmp_path, monkeypat
     source_bytes = (source / 'expansion_plan.json').read_bytes()
     def forbidden(*args, **kwargs):
         raise AssertionError('cached retrieval must not repeat')
-    monkeypatch.setattr(PersonaFewShotRetriever, 'retrieve', forbidden)
+    monkeypatch.setattr(RecallSession, 'retrieve', forbidden)
     provenance = seed_checkpoints(source, output, observations=2, reuse_inventory=old)
     assert provenance['copied_targets'] == 2
     assert seed_checkpoints(source, output, observations=2, reuse_inventory=old) == provenance

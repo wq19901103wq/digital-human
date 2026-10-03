@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.config import ConfigError, sha256_file
-from src.generator.few_shot import PersonaFewShotRetriever
+from src.generator.fewshot import RecallSession, open_session
 from src.history.sources import load
 from src.generator.ranker_samples import object_match, prepare, select_candidates, teacher_overlap
 from src.iteration.storage import read_json, write_json
@@ -51,7 +51,7 @@ def test_group_identity_and_whole_reply_budget(tmp_path):
     case, row = fixture.cases[1], fixture.examples[0]
     assert object_match(case, row) == 'same'
     assert object_match({**case, 'chat_type': 'group'}, row) == 'unknown'
-    retriever = PersonaFewShotRetriever(fixture.directory / 'fewshot_pool.jsonl')
+    retriever = open_session(fixture.directory / 'fewshot_pool.jsonl', index_policy='use_if_present')
     assert retriever.is_approved()
     record = select_candidates(case, {'recent3': [row], 'latest1': [row]}, retriever)
     assert len(record['candidates']) == 1
@@ -65,11 +65,16 @@ def test_group_identity_and_whole_reply_budget(tmp_path):
 
 def test_unbudgeted_example_cannot_be_truncated_into_candidate(tmp_path):
     fixture = historical(tmp_path / 'history')
-    # Exercise the pure selector budget boundary separately from source checks.
+    # Exercise the pure selector budget boundary separately from source checks:
+    # 独立普通池（无 report/purposes）上打开的会话不做来源校验。
     row = deepcopy(fixture.examples[0])
     row['reply'] = ['x' * 3000, 'last bubble']
     row['context_messages'] = deepcopy(row['context_messages'])
-    retriever = PersonaFewShotRetriever(fixture.directory / 'fewshot_pool.jsonl')
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    from src.bootstrap.history import write_rows
+    write_rows(plain / 'fewshot_pool.jsonl', [row])
+    retriever = open_session(plain / 'fewshot_pool.jsonl', index_policy='use_if_present')
     result = select_candidates(fixture.cases[1], {'recent3': [row], 'latest1': []}, retriever)
     assert not result['candidates']
     assert result['rejected'][0]['reason'] == 'complete_example_over_budget'
@@ -88,7 +93,7 @@ def test_blocked_inventory_is_resumable_and_unlabeled(tmp_path, monkeypatch):
                                    mixed_targets=None, all_zero_targets=None, all_one_targets=None, directed_pairs=0)
     def no_retrieval(*a, **kw):
         raise AssertionError('completed inventory must resume without retrieval')
-    monkeypatch.setattr(PersonaFewShotRetriever, 'retrieve', no_retrieval)
+    monkeypatch.setattr(RecallSession, 'retrieve', no_retrieval)
     assert prepare(fixture.directory, teacher, generator, output, progress=lambda _: None) == read_json(output / 'report.json')
     path = next((output / 'targets').glob('*.json'))
     value = read_json(path)

@@ -7,7 +7,7 @@ import time
 from ...config import sha256_file
 from ...iteration.datasets import case_path
 from ...iteration.storage import file_lock, read_json, write_json, write_once_json, atomic_write
-from ..few_shot import PersonaFewShotRetriever
+from ..fewshot import open_session
 from ..history import eligible
 from ...history.sources import digest, load, require
 from ..ranker_labels import POLICY, select_targets
@@ -121,7 +121,7 @@ def prepare(data_dir, teacher_dir, generator_dir, output, *, observations, reuse
         if (output / 'report.json').exists():
             read_inventory(output)
             return read_json(output / 'report.json')
-        retriever = PersonaFewShotRetriever(data_dir / 'fewshot_pool.jsonl')
+        retriever = open_session(data_dir / 'fewshot_pool.jsonl')
         require(retriever.is_approved(), '历史召回库未批准')
         rows, total, purged = [], 0, []
         started = time.monotonic()

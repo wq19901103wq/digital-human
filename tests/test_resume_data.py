@@ -172,15 +172,15 @@ def test_generator_workers_share_one_pinned_history_index(priv, monkeypatch):
     class Generator(original):
         def __init__(self, *args, pool_path, **kwargs):
             super().__init__(*args, **kwargs)
-            retrievers.append(generator.PersonaFewShotRetriever(path=pool_path))
+            retrievers.append(generator.open_session(path=pool_path))
 
-    monkeypatch.setattr(generator, 'PersonaFewShotRetriever', Retriever)
+    monkeypatch.setattr(generator, 'open_session', Retriever)
     monkeypatch.setattr(runner, 'ReplyGenerator', Generator)
     runner.run_gen_experiment(exp, workers=4)
     assert loaded == [pool.resolve()]
     assert len(retrievers) >= 4  # Preflight and multiple thread-local generator pairs.
     assert len({id(value) for value in retrievers}) == 1
-    assert generator.PersonaFewShotRetriever is Retriever
+    assert generator.open_session is Retriever
     assert experiment.state_of(exp)['metrics']['pairs'] == 6
 
 

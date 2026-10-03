@@ -1,4 +1,9 @@
-"""Share one pinned history index within an offline generation process."""
+"""Share one pinned history index within an offline generation process.
+
+新代码装配入口为 generator.open_session（fewshot 包）；本模块按设计 §5
+替换 generator 模块属性，工厂签名与 open_session(path, *, render_path=None)
+兼容。
+"""
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
@@ -55,8 +60,11 @@ class PinnedRetriever:
 
 @contextmanager
 def shared_history_index(inputs):
-    """Scoped factory adapter; frozen prompt, ranking and exclusion code is used."""
-    original = generator.PersonaFewShotRetriever
+    """Scoped factory adapter; frozen prompt, ranking and exclusion code is used.
+
+    装配入口为 generator.open_session（fewshot 包；设计 §5 属性替换迁移）。
+    """
+    original = generator.open_session
     instances = {}
     lock = RLock()
 
@@ -69,8 +77,8 @@ def shared_history_index(inputs):
                 instances[path] = PinnedRetriever(original, path, inputs)
             return instances[path]
 
-    generator.PersonaFewShotRetriever = factory
+    generator.open_session = factory
     try:
         yield instances
     finally:
-        generator.PersonaFewShotRetriever = original
+        generator.open_session = original

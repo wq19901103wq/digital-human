@@ -33,7 +33,7 @@ def fixture(tmp_path, monkeypatch):
         def render_selected(self, rows, max_chars):
             return str(rows)[:max_chars], [r['id'] for r in rows]
 
-    monkeypatch.setattr(runtime.generator, 'PersonaFewShotRetriever', Original)
+    monkeypatch.setattr(runtime.generator, 'open_session', Original)
     return pool, report, inputs, loaded, Original
 
 
@@ -41,7 +41,7 @@ def test_parallel_workers_and_retry_pools_load_once_preserve_exclusions(tmp_path
     pool, _, inputs, loaded, original = fixture(tmp_path, monkeypatch)
     with runtime.shared_history_index(inputs):
         def one(blocked):
-            retriever = ExcludingRetriever(runtime.generator.PersonaFewShotRetriever(path=pool))
+            retriever = ExcludingRetriever(runtime.generator.open_session(path=pool))
             retriever.blocked = {blocked}
             assert retriever.is_approved()
             rows = retriever.retrieve(exclude_ids={'c'})
@@ -53,7 +53,7 @@ def test_parallel_workers_and_retry_pools_load_once_preserve_exclusions(tmp_path
             assert [r[0] for r in result] == [[{'id': 'b'}], [{'id': 'a'}]] * 8
             assert all(row == (str(rows), [r['id'] for r in rows]) for rows, row in result)
         assert len(loaded) == 1
-    assert runtime.generator.PersonaFewShotRetriever is original
+    assert runtime.generator.open_session is original
 
 
 @pytest.mark.parametrize('changed', ['pool', 'report'])
@@ -61,12 +61,12 @@ def test_changed_file_rejected_before_original_retrieval(tmp_path, monkeypatch, 
     pool, report, inputs, _, original = fixture(tmp_path, monkeypatch)
     with pytest.raises(ConfigError, match='文件发生变化'):
         with runtime.shared_history_index(inputs):
-            retriever = runtime.generator.PersonaFewShotRetriever(path=pool)
+            retriever = runtime.generator.open_session(path=pool)
             target = pool if changed == 'pool' else report
             target.write_text('changed')
             monkeypatch.setattr(original, 'retrieve', lambda **kw: pytest.fail('must reject before retrieval'))
             retriever.retrieve(exclude_ids=set())
-    assert runtime.generator.PersonaFewShotRetriever is original
+    assert runtime.generator.open_session is original
 
 
 def test_wrong_frozen_content_or_render_pool_rejected(tmp_path, monkeypatch):
@@ -74,9 +74,9 @@ def test_wrong_frozen_content_or_render_pool_rejected(tmp_path, monkeypatch):
     inputs[str(pool.resolve())] = 'wrong'
     with runtime.shared_history_index(inputs):
         with pytest.raises(ConfigError, match='替换展示库'):
-            runtime.generator.PersonaFewShotRetriever(path=pool, render_path=report)
+            runtime.generator.open_session(path=pool, render_path=report)
         with pytest.raises(ConfigError, match='冻结内容不符'):
-            runtime.generator.PersonaFewShotRetriever(path=pool)
+            runtime.generator.open_session(path=pool)
     assert loaded == []
 
 
@@ -92,7 +92,7 @@ def test_frozen_retrieval_and_render_calls_overlap(tmp_path, monkeypatch, method
 
     monkeypatch.setattr(original, method, parallel)
     with runtime.shared_history_index(inputs):
-        instance = runtime.generator.PersonaFewShotRetriever(path=pool)
+        instance = runtime.generator.open_session(path=pool)
 
         def work(number):
             if method == 'retrieve':
@@ -120,7 +120,7 @@ def test_file_changed_during_original_call_is_rejected(tmp_path, monkeypatch, ch
 
     monkeypatch.setattr(original, method, changing)
     with runtime.shared_history_index(inputs):
-        instance = runtime.generator.PersonaFewShotRetriever(path=pool)
+        instance = runtime.generator.open_session(path=pool)
         with pytest.raises(ConfigError, match='文件发生变化'):
             if method == 'retrieve':
                 instance.retrieve(exclude_ids=set())

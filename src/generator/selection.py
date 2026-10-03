@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from math import sqrt
 
-from .few_shot import _terms
+from .fewshot.rank import _terms
 
 POLICY = 'context_mmr_v1'
 

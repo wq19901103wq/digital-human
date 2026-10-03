@@ -21,7 +21,7 @@ from ..iteration.parallel import completed_map
 from ..iteration.storage import atomic_write, file_lock, read_json, write_json, write_once_json
 from ..judge.judge import build_judge
 from ..llm import build_clients
-from .few_shot import PersonaFewShotRetriever
+from .fewshot import RecallSession
 from .generator import ReplyGenerator
 from .history import eligible
 from ..history.sources import digest, load, require
@@ -79,7 +79,7 @@ class SingleExampleGenerator(ReplyGenerator):
         require(self._example is not None and self._history_sources is not None, '缺少单示例或历史来源')
         self._history_sources.validate(self._example, example=True)
         require(eligible(self._example, case), '单示例不早于目标或包含目标答案')
-        block, ids = PersonaFewShotRetriever.render([self._example], max_chars=self._budget)
+        block, ids = RecallSession.render([self._example], max_chars=self._budget)
         require(ids == [self._example['id']] and len(block) <= self._budget, '完整单示例超过篇幅预算')
         tracing.note('retrieval', dict(enabled=True, selected_ids=ids, max_shots=1,
                                      char_budget=self._budget, rendered=block, policy='frozen_single_example'))
