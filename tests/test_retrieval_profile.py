@@ -57,12 +57,18 @@ def test_check_retrieval_dispatch_is_offline(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(versions, 'switch_instance', lambda name: tmp_path)
     monkeypatch.setattr(versions, 'POINTERS_PATH', pointer)
     calls = []
+    from src.iteration import retrieval_compare
+    monkeypatch.setattr(retrieval_compare, 'compare', lambda *args, **options:
+        calls.append(('compare', args, options)) or dict(equivalent=True, model_calls=0))
     monkeypatch.setattr(retrieval_profile, 'inspect', lambda *args, **options:
-        calls.append((args, options)) or dict(equivalent=True, model_calls=0))
+        calls.append(('inspect', args, options)) or dict(equivalent=True, model_calls=0))
     assert check.main(['retrieval', '--instance', 'demo', '--exp', 'saved', '--cases', '2']) == 0
     report = json.loads(capsys.readouterr().out)
     assert report['model_requests_prohibited'] and not report['evaluation_started']
-    assert calls == [(('demo', 'saved'), dict(cases=2, repeats=1, materials=False))]
+    assert calls == [
+        ('compare', ('demo', 'saved'), dict(cases=2, baseline_runtime=None, output=None)),
+        ('inspect', ('demo', 'saved'), dict(cases=2, repeats=1, materials=False)),
+    ]
 
 
 def test_profile_launches_verified_isolated_executor(tmp_path, monkeypatch):
@@ -89,14 +95,17 @@ def test_material_failure_preserves_successful_retrieval(tmp_path, monkeypatch, 
     pointer.write_text('{}')
     monkeypatch.setattr(versions, 'switch_instance', lambda name: tmp_path)
     monkeypatch.setattr(versions, 'POINTERS_PATH', pointer)
+    from src.iteration import retrieval_compare
+    monkeypatch.setattr(retrieval_compare, 'compare', lambda *args, **options:
+        dict(equivalent=True, model_calls=0))
     result = dict(equivalent=True, model_calls=0, timings={'indexed': 1},
                   materials=dict(status='failed', error='cached input missing'))
     monkeypatch.setattr(retrieval_profile, 'inspect', lambda *args, **options: result)
     assert check.main(['retrieval', '--instance', 'demo', '--exp', 'saved', '--materials']) == 1
     report = json.loads(capsys.readouterr().out)
-    assert report['checks'][0]['detail']['timings'] == {'indexed': 1}
-    assert report['checks'][0]['status'] == 'passed'
-    assert report['checks'][1]['status'] == 'failed'
+    assert report['checks'][1]['detail']['timings'] == {'indexed': 1}
+    assert report['checks'][1]['status'] == 'passed'
+    assert report['checks'][2]['status'] == 'failed'
 
 
 def test_material_diagnostic_collects_reuse_and_partial_failure():

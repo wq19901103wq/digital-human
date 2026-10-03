@@ -226,7 +226,12 @@ def check_dashboard(args, report):
 
 
 def check_retrieval(args, report):
+    from src.iteration import retrieval_compare
     from src.iteration.retrieval_profile import inspect
+    if not report.run('retrieval_three_way_compare', lambda: retrieval_compare.compare(
+            args.instance, args.exp, cases=args.cases,
+            baseline_runtime=args.baseline_runtime, output=args.compare_output)):
+        return
     if not report.run('frozen_retrieval_profile', lambda: inspect(args.instance, args.exp,
             cases=args.cases, repeats=args.repeats, materials=args.materials)):
         return
@@ -287,12 +292,15 @@ def main(argv=None):
     dashboard.add_argument('--share', nargs='+', default=[], help='需核验页面及 XML 下载的 Share 版本')
     dashboard.add_argument('--download', choices=['knowledge.json', 'wiki.xml'], default='knowledge.json',
                            help='Share 下载文件；XML 快照使用 wiki.xml')
-    retrieval = sub.add_parser('retrieval', help='离线对比冻结召回与索引召回；无模型请求、无实验写入')
+    retrieval = sub.add_parser('retrieval', help='离线三方对比：归档旧基准 vs 当前树内存/索引召回；无模型请求、无实验写入')
     retrieval.add_argument('--instance', required=True)
     retrieval.add_argument('--exp', required=True)
     retrieval.add_argument('--cases', type=int, default=3)
     retrieval.add_argument('--repeats', type=int, default=1)
     retrieval.add_argument('--materials', action='store_true', help='附加跨上下文材料校验凭据复用耗时')
+    retrieval.add_argument('--baseline-runtime', help='认证归档 runtime 名或路径（旧基准，默认 a5118947 归档）')
+    retrieval.add_argument('--output', dest='compare_output', help='三方对比完整数据落盘路径（默认 '
+                           'instances/<instance>/analysis/retrieval-compare-<日期>.json；不可覆盖）')
     args = parser.parse_args(argv)
     if args.mode == 'experiment' and args.gate == 'fixed-entry' and not args.exp:
         parser.error('--gate fixed-entry 需要 --exp 正式开发实验 ID')

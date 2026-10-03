@@ -155,7 +155,7 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
 3. 同时传入聊天标识、群聊/私聊、当前上下文消息、题目来源边界及排除 ID。
 4. 按示例 ID 去重，重复示例保留较好的召回名次，再稳定排序；候选上限为 24，不保证一定有 24 条。
 
-基础召回在 [`src/generator/few_shot.py`](src/generator/few_shot.py) 的 `PersonaFewShotRetriever.retrieve`。其查询表示是规则词频，不是 embedding：
+基础召回在新包 [`src/generator/fewshot/session.py`](src/generator/fewshot/session.py) 的 `RecallSession.retrieve`（旧 `PersonaFewShotRetriever.retrieve` 全语义）。其查询表示是规则词频，不是 embedding：
 
 - `_terms` 对文本去空白、转小写，仅保留字母、数字、汉字；取前 12 个单字符，加上文本相邻双字符的 bigram，组成 `Counter`。
 - 同时用规则识别情境、期望接话动作、末条消息形态、群参与结构等。
@@ -397,9 +397,9 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 | 公开已有入口 | 核对内容 |
 |---|---|
 | [`generator.py`](src/generator/generator.py) | 回复提示词与示例选择入口 |
-| [`few_shot.py`](src/generator/few_shot.py) | `_terms`、`_candidate_rows`、`retrieve`、粗排与多样性规则 |
+| [`fewshot/session.py`](src/generator/fewshot/session.py) + [`fewshot/rank.py`](src/generator/fewshot/rank.py) | `retrieve`、候选桶、粗排与多样性规则（词项入口 `rank._terms`） |
 | [`learned_selection.py`](src/generator/learned_selection.py) | `recall`、`feature_rows`、`tasks`、`select`、`choose` |
-| [`history.py`](src/generator/history.py) / [`history_sources.py`](src/generator/history_sources.py) | 逐题资格与源记录对应 |
+| [`history.py`](src/generator/history.py) / [`src/history/sources.py`](src/history/sources.py) | 逐题资格与源记录对应 |
 | [`extraction.py`](src/generator/fewshot_ranker/extraction.py) / [`schema.py`](src/generator/fewshot_ranker/schema.py) | 内容寻址特征提取与字段定义 |
 | [`features.py`](src/generator/fewshot_ranker/features.py) / [`crosses.py`](src/generator/fewshot_ranker/crosses.py) | 本地统计与语义交叉 |
 | [`boosting.py`](src/generator/fewshot_ranker/boosting.py) | 稀疏编码、训练与本地预测 |
@@ -485,7 +485,7 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 
 #### 12.5 terms：示例已经预计算，查询才按路计算
 
-入口：[`few_shot.py`](src/generator/few_shot.py) 的 `_terms`：
+入口：[`fewshot/rank.py`](src/generator/fewshot/rank.py) 的 `_terms`（旧 `few_shot.py` 逐字迁入）：
 
 ```python
 def _terms(text: str) -> list[str]:
@@ -515,7 +515,7 @@ def _terms(text: str) -> list[str]:
 
 #### 12.6 按题隔离：当前确实先遍历整个历史池
 
-入口：[`few_shot.py`](src/generator/few_shot.py) 的 `retrieve`：
+入口：[`fewshot/session.py`](src/generator/fewshot/session.py) 的 `retrieve`（资格排除现由召回引擎提供：内存引擎 `history.filter_rows` 语义，索引引擎 `disk_history.BoundedReader.excluded_ids`）：
 
 ```python
             self._history_sources.validate(history_case)

@@ -43,7 +43,7 @@ def execute(inventory, output, feature_config, feature_cache, instance, *, worke
             source_files = [*Path(__file__).parent.glob('*.py'), ROOT / 'scripts/train_fewshot_ranker.py',
                 *[ROOT / name for name in ('src/judge/embedding.py', 'src/judge/corrected.py',
                     'src/judge/corrected_v1.py', 'src/generator/history.py', 'src/generator/ranker_labels.py',
-                    'src/generator/history_sources.py', 'src/iteration/storage.py', 'src/cache.py')]]
+                    'src/history/sources.py', 'src/iteration/storage.py', 'src/cache.py')]]
             sources = {str(p.relative_to(ROOT)): sha256_file(p) for p in source_files}
             inputs = [inventory / 'manifest.json', inventory / 'inventory.json',
                       inventory / 'labeling/manifest.json', feature_config]

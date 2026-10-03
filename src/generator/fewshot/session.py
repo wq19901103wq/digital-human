@@ -8,6 +8,11 @@ precise_situation 覆盖、耗尽回退、sparse 逻辑）+ rank.score_and_selec
 
 render/render_selected/is_approved 与旧类逐字节语义一致
 （含逐题前后的 _history_sources.check() 调用点）。
+
+受控 identity 属性（设计 §6）：path/render_path/history_policy、全部 flags
+及 _history_sources 以实例属性暴露（与旧 PersonaFewShotRetriever 的
+vars() 形状一致），供适配器层 retrieval_cache 的 vars(retriever._original)
+键扫描继续工作；flags 镜像仅作缓存键身份，行为一律读 PreparedPool。
 """
 from __future__ import annotations
 
@@ -29,20 +34,17 @@ class RecallSession:
     def __init__(self, pool: PreparedPool, engine=None):
         self._pool = pool
         self._engine = engine if engine is not None else InMemoryRecallEngine()
+        # 受控 identity 属性（适配器层 retrieval_cache 键扫描兼容，见模块文档）。
+        # 属性在构造时从 PreparedPool 快照；与旧 PersonaFewShotRetriever 一样
+        # 逐题路径不重读这些值。
+        self.path = pool.path
+        self.render_path = pool.render_path
+        self.history_policy = pool.history_policy
+        self._history_sources = pool.history_sources
+        for name, value in pool.flags.items():
+            setattr(self, name, value)
 
     # -- 只读属性（调用方兼容旧接口）--------------------------------------
-    @property
-    def history_policy(self) -> str | None:
-        return self._pool.history_policy
-
-    @property
-    def path(self) -> Path:
-        return self._pool.path
-
-    @property
-    def render_path(self) -> Path | None:
-        return self._pool.render_path
-
     @property
     def pool(self) -> PreparedPool:
         return self._pool

@@ -465,3 +465,23 @@ def test_open_session_plain_pool_never_indexes(tmp_path):
     session = open_session(pool, index_policy='build')
     assert isinstance(session._engine, InMemoryRecallEngine)
     assert not (tmp_path / '.cache').exists()
+
+
+def test_session_exposes_controlled_identity_attributes_for_adapter_cache_key(tmp_path):
+    """vars() 公共身份面与旧 PersonaFewShotRetriever 一致：适配器层 retrieval_cache
+    的 vars(retriever._original) 键扫描对 open_session 产物继续显式稳定（设计 §6）。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())
+    session = open_session(pool_path, flags=dict(enable_clarification=True),
+                           index_policy='use_if_present')
+    try:
+        old = {name for name in vars(few_shot.PersonaFewShotRetriever(pool_path))
+               if not name.startswith('_')}
+        public = {name: value for name, value in vars(session).items()
+                  if not name.startswith('_')}
+        assert set(public) == old
+        assert public['path'] == Path(pool_path) and public['render_path'] is None
+        assert public['history_policy'] is None and session._history_sources is None
+        assert public['enable_clarification'] is True
+        assert public['enable_information_gap_response_move'] is True
+    finally:
+        session.close()
