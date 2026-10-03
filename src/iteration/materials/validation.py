@@ -929,11 +929,15 @@ def verified_materials(*, profile=None, capacity=CAPACITY, disk_rows=None):
             entry['lock'].release()
         return reuse(saved)
 
-    try:
+    # disk_rows 路径仅服务旧类（适配器层场景）；新包由 PreparedPool.load 原生核验，
+    # 不触碰 few_shot。条件导入保证 few_shot.py 从活树删除后本模块仍可用。
+    history_pools = nullcontext()
+    if disk_rows is not None:
         from ...generator import few_shot
         from ...history import sources as history_sources
-        history_pools = (verified_history_pools(few_shot, history_sources, disk_rows=disk_rows, profile=profile)
-                         if disk_rows is not None else nullcontext())
+        history_pools = verified_history_pools(few_shot, history_sources,
+                                               disk_rows=disk_rows, profile=profile)
+    try:
         with history_pools as pool_validation, cached_training_reads() as (capture_cache, check_cache):
             globals()['require_materials'] = (pool_validation(require_materials_reuse)
                                               if pool_validation is not None else require_materials_reuse)
