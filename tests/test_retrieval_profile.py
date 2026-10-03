@@ -71,7 +71,106 @@ def test_check_retrieval_dispatch_is_offline(tmp_path, monkeypatch, capsys):
     ]
 
 
-def test_profile_launches_verified_isolated_executor(tmp_path, monkeypatch):
+def test_modern_micro_snapshot_passes_check_retrieval_entry(tmp_path, monkeypatch, capsys):
+    """新代（微）快照通过 check.py retrieval 完整入口：旧 profiler 不再从快照
+    import few_shot，改为按认证 manifest 分代并对新包做身份核验。"""
+    import argparse
+    import sys
+    from pathlib import Path
+    from src.config import sha256_file
+    from src.generator import fewshot as fewshot_package
+    from src.iteration import pack_transport, runtime, retrieval_compare
+    from src.iteration.storage import write_json
+
+    # 新代微快照：真实 fewshot 包字节 + 认证清单（含冻结 transport 条目）。
+    snapshot = tmp_path / 'snapshot'
+    package_dir = Path(fewshot_package.__file__).parent
+    sources = {}
+    for path in sorted(package_dir.glob('*.py')):
+        sources[f'src/generator/fewshot/{path.name}'] = path
+    sources['src/iteration/pack_transport.py'] = Path(pack_transport.__file__)
+    files = {}
+    for name, source in sources.items():
+        target = snapshot / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        files[name] = sha256_file(source)
+    write_json(snapshot / 'manifest.json', {'files': files})
+
+    instance = tmp_path / 'instance'
+    directory = instance / 'experiments' / 'frozen'
+    directory.mkdir(parents=True)
+    write_json(directory / 'runtime.json', {'ref': snapshot.name})
+    pointer = tmp_path / 'pointers.json'
+    pointer.write_text('{}')
+
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: instance)
+    monkeypatch.setattr(versions, 'PRIVATE', instance)
+    monkeypatch.setattr(versions, 'POINTERS_PATH', pointer)
+    monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
+    monkeypatch.setattr(runtime, 'require_current', lambda path: None)
+    monkeypatch.setattr(retrieval_compare, 'compare', lambda *args, **options:
+        dict(equivalent=True, model_calls=0))
+
+    def run_frozen_in_process(command, **options):
+        namespace = argparse.Namespace(
+            snapshot=Path(command[command.index('--snapshot') + 1]),
+            instance=command[command.index('--instance') + 1],
+            experiment=command[command.index('--experiment') + 1],
+            cases=int(command[command.index('--cases') + 1]),
+            repeats=int(command[command.index('--repeats') + 1]),
+            materials='--materials' in command)
+        sys_path_before = list(sys.path)
+        try:
+            result = retrieval_profile.frozen(namespace)
+        finally:
+            sys.path[:] = sys_path_before
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr='')
+
+    monkeypatch.setattr(retrieval_profile.subprocess, 'run', run_frozen_in_process)
+    assert check.main(['retrieval', '--instance', 'demo', '--exp', 'frozen', '--materials']) == 0
+    report = json.loads(capsys.readouterr().out)
+    profile = next(c for c in report['checks'] if c['name'] == 'frozen_retrieval_profile')
+    assert profile['status'] == 'passed'
+    assert profile['detail']['generation'] == 'fewshot_package_v1'
+    assert profile['detail']['equivalent'] is True
+    reuse = next(c for c in report['checks'] if c['name'] == 'material_reuse')
+    assert reuse['status'] == 'passed'
+
+
+def test_modern_snapshot_identity_mismatch_is_rejected(tmp_path, monkeypatch):
+    """新代快照 fewshot 包字节与认证清单不符 → 身份核验拒绝（fail-closed）。"""
+    import argparse
+    from pathlib import Path
+    from src.config import sha256_file
+    from src.generator import fewshot as fewshot_package
+    from src.iteration import runtime, versions
+    from src.iteration.storage import write_json
+
+    snapshot = tmp_path / 'snapshot'
+    package_dir = Path(fewshot_package.__file__).parent
+    files = {}
+    for path in sorted(package_dir.glob('*.py')):
+        target = snapshot / 'src' / 'generator' / 'fewshot' / path.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+        files[f'src/generator/fewshot/{path.name}'] = sha256_file(path)
+    write_json(snapshot / 'manifest.json', {'files': files})
+    tampered = next(snapshot.glob('src/generator/fewshot/*.py'))
+    tampered.write_text('# tampered\n')
+
+    instance = tmp_path / 'instance'
+    directory = instance / 'experiments' / 'frozen'
+    directory.mkdir(parents=True)
+    write_json(directory / 'runtime.json', {'ref': snapshot.name})
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: instance)
+    monkeypatch.setattr(versions, 'PRIVATE', instance)
+    monkeypatch.setattr(runtime, 'verify', lambda path: snapshot)
+    monkeypatch.setattr(runtime, 'require_current', lambda path: None)
+    args = argparse.Namespace(snapshot=snapshot, instance='demo', experiment='frozen',
+                              cases=1, repeats=1, materials=False)
+    with pytest.raises(RuntimeError, match='identity mismatch'):
+        retrieval_profile.frozen(args)
     from src.iteration import runtime
     monkeypatch.setattr(versions, 'PRIVATE', tmp_path / 'instances' / 'demo')
     snapshot = tmp_path / 'runtime'

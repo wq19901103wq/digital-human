@@ -7,8 +7,9 @@ import sqlite3
 import pytest
 
 from src import llm, tracing
-from src.generator import (disk_history, few_shot, history, learned_sources,
+from src.generator import (disk_history, history, learned_sources,
                            ranker_report, ranker_samples, shared_history)
+from _reference_few_shot import few_shot
 from src.history import sources as history_sources
 from src.iteration import control, datasets, learning_guard, pack_transport, transport_profile
 

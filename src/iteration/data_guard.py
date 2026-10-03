@@ -15,6 +15,46 @@ def _digest(value) -> str:
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+# 检索实现的完整实现清单：排序/召回语义由这四件共同决定，指纹必须全量绑定
+# （只绑 session.py 时改动 rank.py 等不会使冻结指纹失配，断点会被脏实现续跑）。
+RETRIEVAL_IMPLEMENTATION = tuple('generator/fewshot/' + name for name in
+                                 ('session.py', 'prepare.py', 'rank.py', 'recall_engines.py'))
+
+# 过渡兼容：清单扩展前的旧形态实现键集（few_shot.py 单件时代）。旧断点/旧包
+# 按归档字节核验（runtime 归档才是旧运行的身份），不得要求重跑已完成题目；
+# 只认这一种旧形态，不做模糊匹配。
+LEGACY_IMPLEMENTATION = ('generator/generator.py', 'generator/few_shot.py',
+                         'generator/history.py', 'iteration/datasets.py')
+
+
+def _is_legacy_shape(snapshot: dict) -> bool:
+    implementation = snapshot.get('implementation_sha256')
+    return isinstance(implementation, dict) and \
+        set(implementation) == set(LEGACY_IMPLEMENTATION)
+
+
+def _legacy_implementation(directory: Path) -> dict:
+    """旧形态 current 的 implementation_sha256：公共三件用活树现值；已删除的
+    generator/few_shot.py 用 directory/runtime.json 归档字节哈希。归档缺失或
+    归档中没有该文件时按失配处理（实现演进不阻断续跑，归档字节才是旧运行的身份）。"""
+    from . import runtime
+    try:
+        archive = runtime.verify(directory / 'runtime.json', check_environment=False)
+        files = json.loads((archive / 'manifest.json').read_text(encoding='utf-8'))['files']
+    except (OSError, KeyError, json.JSONDecodeError, ConfigError) as exc:
+        raise ConfigError('旧形态数据指纹缺少可核验的运行归档证据（runtime.json 缺失、'
+                          '无效或已变化），无法按归档字节确认旧实现，禁止续跑') from exc
+    archived = next((files[name] for name in files
+                     if name == 'src/generator/few_shot.py' or
+                     name == 'src/digital_human/generator/few_shot.py'), None)
+    if archived is None:
+        raise ConfigError('旧形态数据指纹缺少归档证据：runtime 归档未包含 '
+                          'src/generator/few_shot.py，无法确认旧实现，禁止续跑')
+    source = Path(__file__).parents[1]
+    return {name: (archived if name == 'generator/few_shot.py' else sha256_file(source / name))
+            for name in LEGACY_IMPLEMENTATION}
+
+
 def generation_snapshot(cases: list[dict], data_dir: Path, configs: list[dict]) -> dict:
     ids = [str(case["case_id"]) for case in cases]
     if not cases or len(set(ids)) != len(ids):
@@ -24,7 +64,8 @@ def generation_snapshot(cases: list[dict], data_dir: Path, configs: list[dict]) 
     if 'purposes_sha256' in snapshot:
         source = Path(__file__).parents[1]
         snapshot['implementation_sha256'] = {name: sha256_file(source / name) for name in
-            ('generator/generator.py', 'generator/fewshot/session.py', 'generator/history.py', 'iteration/datasets.py')}
+            ('generator/generator.py', 'generator/history.py', 'iteration/datasets.py',
+             *RETRIEVAL_IMPLEMENTATION)}
     # 检索关闭时池不参与计算；开启时，池内容及审批条件都属于输入依赖。
     if any(config.get("retriever", {}).get("enabled", True) for config in configs):
         pool = data_dir / "fewshot_pool.jsonl"
@@ -50,9 +91,15 @@ def verify(directory: Path, current: dict, *, expected: dict | None = None,
     path = directory / "data_snapshot.json"
     saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     for original in (expected, saved):
-        if original is not None and original != current:
-            changed = sorted(key for key in original.keys() | current.keys()
-                             if original.get(key) != current.get(key))
+        if original is None:
+            continue
+        # 过渡兼容：旧形态快照与“旧形态 current”（公共三件取现值，few_shot.py 取归档字节）比较；
+        # 新形态照旧与 current 比较。has_checkpoint 语义不变。
+        candidate = {**current, 'implementation_sha256': _legacy_implementation(directory)} \
+            if _is_legacy_shape(original) else current
+        if original != candidate:
+            changed = sorted(key for key in original.keys() | candidate.keys()
+                             if original.get(key) != candidate.get(key))
             raise ConfigError(f"冻结数据指纹不一致（{', '.join(changed)}），禁止复用旧断点或改变本轮样本；"
                               "请恢复原始数据后续跑，变更数据应使用新版本、新实验")
     if expected is None and saved is None and has_checkpoint:

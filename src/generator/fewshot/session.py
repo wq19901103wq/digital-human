@@ -16,14 +16,13 @@ vars() 形状一致），供适配器层 retrieval_cache 的 vars(retriever._ori
 """
 from __future__ import annotations
 
-import copy
 from collections import Counter
 from html import escape as xml_escape
 from pathlib import Path
 from typing import Any
 
 from . import rank
-from .prepare import PreparedPool
+from .prepare import PreparedPool, thaw_value
 from .query import QueryContext
 from .recall_engines import (InMemoryRecallEngine, build_index_engine,
                              prepare_engine)
@@ -197,9 +196,9 @@ class RecallSession:
             pool, q, candidates, indexed_features,
             (self._row_situation_tag_cache, self._row_situation_profile_cache),
         )
-        # 设计 §4 返回边界：先解冻为独立 dict 再递归深拷贝，嵌套可变、与池
-        # 内部零共享（I10 冻结后行是 MappingProxyType，不可直接 deepcopy）。
-        return copy.deepcopy([dict(row) for row in selected])
+        # 设计 §4 返回边界：先递归解冻（I10 冻结值不可 deepcopy）为独立普通
+        # list/dict 容器，与池内部零共享；嵌套修改不污染池内状态。
+        return [thaw_value(dict(row)) for row in selected]
 
     def _candidate_rows(self, is_group: bool, situations: set[str], excluded=None) -> list[dict[str, Any]]:
         pool = self._pool

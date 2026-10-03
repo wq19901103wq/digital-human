@@ -565,6 +565,73 @@ def test_prepared_pool_is_deep_read_only(tmp_path):
         row.injected = True
 
 
+def test_prepared_pool_nested_structures_are_deep_read_only(tmp_path):
+    """I10 深只读：行内嵌套 dict/list、桶成员列表、特征 Counter 的写/增/删全抛错。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())
+    pool = _new_session(pool_path).pool
+    row = pool.rows[0]
+    # 行内嵌套 list：改/增/删一律 TypeError。
+    with pytest.raises(TypeError, match='冻结列表'):
+        row['reply'].clear()
+    with pytest.raises(TypeError, match='冻结列表'):
+        row['context'].append('注入')
+    with pytest.raises(TypeError, match='冻结列表'):
+        row['context'][0] = '改写'
+    with pytest.raises(TypeError, match='冻结列表'):
+        del row['reply'][0]
+    with pytest.raises(TypeError, match='冻结列表'):
+        row['context'] += ['绕过 iadd']
+    # 行内嵌套 dict（isinstance dict 语义保留，但写入被拒）。
+    profiled = next(r for r in pool.rows if 'semantic_profile' in r)
+    assert isinstance(profiled['semantic_profile'], dict)
+    with pytest.raises(TypeError, match='冻结映射'):
+        profiled['semantic_profile']['incoming_act'] = 'tampered'
+    with pytest.raises(TypeError, match='冻结映射'):
+        profiled['semantic_profile'].update({'incoming_act': 'tampered'})
+    with pytest.raises(TypeError, match='冻结映射'):
+        profiled['semantic_profile'].pop('incoming_act')
+    # 桶成员与 _rows 是同一批行代理：经桶写同样被拒，桶本身也不可增删。
+    bucket_row = pool._rows_by_group[False][0]
+    with pytest.raises(TypeError):
+        bucket_row['id'] = 'changed'
+    with pytest.raises(TypeError, match='冻结列表'):
+        pool._rows_by_group[False].append({'id': '注入'})
+    with pytest.raises(TypeError, match='冻结列表'):
+        pool._rows_by_group_situation[next(iter(pool._rows_by_group_situation))].pop()
+    # 特征 Counter（只读映射视图）：外层与内层写入均拒绝。
+    terms = pool._terms_by_id[str(row['id'])]
+    with pytest.raises(TypeError):
+        terms['注入词'] = 99
+    with pytest.raises(AttributeError):
+        terms.update({'注入词': 99})
+    with pytest.raises(TypeError):
+        pool._terms_by_id['注入id'] = Counter()
+    with pytest.raises(TypeError):
+        pool._latest_profiles_by_id[str(row['id'])]['expected_response_move'] = 'tampered'
+    # 冻结不破坏正常只读语义（list/dict 身份与相等）。
+    assert isinstance(row['context'], list) and isinstance(row['reply'], list)
+    assert row['reply'] == [value for value in row['reply']]
+
+
+def test_retrieve_returns_fully_thawed_plain_containers(tmp_path):
+    """I10 返回边界：retrieve 返回递归解冻后的普通 list/dict，修改不回流污染共享池。"""
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())
+    session = _new_session(pool_path)
+    request = dict(query='在吗', chat_name='某友', is_group=False, limit=4)
+    rows = session.retrieve(**request)
+    assert rows and all(type(row) is dict for row in rows)
+    for row in rows:
+        assert all(type(value) in (dict, list) or not isinstance(value, (dict, list))
+                   for value in row.values())
+        assert all(type(value) is dict for value in row.values() if isinstance(value, dict))
+    tampered = session.retrieve(**request)
+    tampered[0]['context'].append('随意修改')
+    tampered[0]['reply'].clear()
+    tampered[0].setdefault('semantic_profile', {})['incoming_act'] = 'tampered'
+    expected = _new_session(pool_path).retrieve(**request)
+    assert session.retrieve(**request) == expected
+
+
 def test_returned_row_nested_mutation_does_not_leak_between_retrieves(tmp_path):
     """I10：两次 retrieve 之间经返回行修改嵌套 list/dict 不影响第二次结果。"""
     pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', _synthetic_rows())

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.config import ConfigError, sha256_file
+from src.generator import ranker_samples
 from src.generator.fewshot import RecallSession, open_session
 from src.history.sources import load
 from src.generator.ranker_samples import object_match, prepare, select_candidates, teacher_overlap
@@ -111,5 +112,26 @@ def test_changed_recipe_cannot_reuse_inventory(tmp_path):
     output = tmp_path / 'inventory'
     prepare(fixture.directory, teacher, generator, output, progress=lambda _: None)
     write_json(generator / 'config.json', dict(max_shots_per_case=3, shots_char_budget=2500, llm='different'))
+    with pytest.raises(ConfigError, match='frozen artifact changed'):
+        prepare(fixture.directory, teacher, generator, output, progress=lambda _: None)
+
+
+def test_changed_rank_implementation_rejects_inventory_resume(tmp_path, monkeypatch):
+    """排序实现（fewshot/rank.py）字节变化 → 实现清单失配 → 断点清单拒绝续跑。"""
+    fixture = historical(tmp_path / 'history')
+    teacher = teacher_at(tmp_path, fixture, 0)
+    generator = tmp_path / 'generator'
+    write_json(generator / 'config.json', dict(max_shots_per_case=3, shots_char_budget=2500))
+    output = tmp_path / 'inventory'
+    prepare(fixture.directory, teacher, generator, output, progress=lambda _: None)
+    rank_path = Path(ranker_samples.__file__).parent / 'fewshot' / 'rank.py'
+    original_sha256 = ranker_samples.sha256_file
+
+    def changed(path):
+        if Path(path).resolve() == rank_path.resolve():
+            return '0' * 64
+        return original_sha256(path)
+
+    monkeypatch.setattr(ranker_samples, 'sha256_file', changed)
     with pytest.raises(ConfigError, match='frozen artifact changed'):
         prepare(fixture.directory, teacher, generator, output, progress=lambda _: None)

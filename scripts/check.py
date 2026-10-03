@@ -112,7 +112,7 @@ def check_judge(args, report):
 
     def check_pack():
         datasets.assert_pack(data, pack, 'judge_development')
-        guard.verify_pack(pack, 'development')
+        validation.verify_pack(pack, 'development')
         return {'cases': len(pack['rows'])}
 
     report.run('development_pack', check_pack)

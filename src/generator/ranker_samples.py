@@ -24,6 +24,77 @@ RECIPE = dict(schema=1, role='gen_optimization', queries=[3, 1], route_limit=12,
               strata_order='high_mid_low_x_same_different_unknown',
               teacher_policy='before_each_target_and_no_answer_overlap')
 
+# 检索排序实现的完整清单（与 src/iteration/data_guard.RETRIEVAL_IMPLEMENTATION 同源）：
+# 候选打分/召回语义由 session/prepare/rank/recall_engines 四件共同决定，清单变化
+# 必须使已冻结清单失配，拒绝续跑。
+IMPLEMENTATION_FILES = tuple(Path(__file__).parent / 'fewshot' / name for name in
+                             ('session.py', 'prepare.py', 'rank.py', 'recall_engines.py'))
+
+# 过渡兼容：清单扩展前的旧 inventory 形态（只认两种，不做模糊匹配）：
+# 1) 整体绑 generator/few_shot.py 单件；2) 只绑 fewshot/session.py 单件（无其余三件）。
+# 旧清单按清单目录向上找到的 runtime 归档字节核验；归档缺失则失败并说明。
+_LEGACY_MONOLITH = 'src/generator/few_shot.py'
+_LEGACY_SESSION = 'src/generator/fewshot/session.py'
+_FEWSHOT_OTHERS = ('prepare.py', 'rank.py', 'recall_engines.py')
+
+
+def _legacy_implementation_inputs(inputs: dict) -> dict:
+    """旧清单形态 → {清单键: 归档相对名}；非旧形态返回 {}。"""
+    normalized = {str(k).replace('\\', '/'): k for k in inputs}
+    monolith = [k for name, k in normalized.items() if name.endswith('/' + _LEGACY_MONOLITH)]
+    if monolith:
+        return {k: _LEGACY_MONOLITH for k in monolith}
+    session = [k for name, k in normalized.items() if name.endswith('/' + _LEGACY_SESSION)]
+    others = [k for name, k in normalized.items()
+              if any(name.endswith('/src/generator/fewshot/' + n) for n in _FEWSHOT_OTHERS)]
+    if len(session) == 1 and not others:
+        return {session[0]: _LEGACY_SESSION}
+    return {}
+
+
+def _verify_legacy_manifest(output: Path, frozen: dict, legacy_inputs: dict) -> None:
+    """旧形态清单核验：实现件按 runtime 归档字节，其余输入仍按活树现值。"""
+    runtime_json = next((parent / 'runtime.json'
+                         for parent in (output, *output.parents) if (parent / 'runtime.json').is_file()), None)
+    if runtime_json is None:
+        raise ConfigError('旧形态候选清单缺少可核验的运行归档证据：自清单目录向上找不到 '
+                          'runtime.json，无法按归档字节确认旧实现，拒绝续跑')
+    from ..iteration import runtime
+    try:
+        archive = runtime.verify(runtime_json, check_environment=False)
+        files = json.loads((archive / 'manifest.json').read_text(encoding='utf-8'))['files']
+    except (OSError, KeyError, json.JSONDecodeError, ConfigError) as exc:
+        raise ConfigError('旧形态候选清单的运行归档无效或已变化，无法按归档字节确认旧实现，'
+                          '拒绝续跑') from exc
+    inputs = frozen['inputs']
+    for key, relative in legacy_inputs.items():
+        candidates = (relative, relative.replace('src/', 'src/digital_human/', 1))
+        archived = next((files[name] for name in candidates if name in files), None)
+        if archived is None:
+            raise ConfigError(f'旧形态候选清单缺少归档证据：runtime 归档未包含 {relative}，'
+                              '无法确认旧实现，拒绝续跑')
+        require(archived == inputs[key], '旧实现清单与运行归档字节不符，拒绝续跑')
+    for key, expected in inputs.items():
+        if key in legacy_inputs:
+            continue  # 已删除的旧实现件只能按归档字节核验
+        path = Path(key)
+        require(path.is_file() and sha256_file(path) == expected,
+                f'旧候选输入变化: {path.name}')
+
+
+def _resolve_manifest(output: Path, manifest: dict) -> dict:
+    """manifest.json 已存在且为旧形态清单时，按归档字节核验后沿用冻结清单
+    （归档字节才是旧运行的身份，实现演进不阻断续跑）；否则照旧用新清单。"""
+    existing = output / 'manifest.json'
+    if not existing.exists():
+        return manifest
+    frozen = read_json(existing)
+    legacy_inputs = _legacy_implementation_inputs(frozen.get('inputs', {}))
+    if legacy_inputs:
+        _verify_legacy_manifest(output, frozen, legacy_inputs)
+        return frozen
+    return manifest
+
 
 def fingerprint(paths):
     return {str(Path(p).resolve()): sha256_file(Path(p)) for p in sorted(paths)}
@@ -192,13 +263,14 @@ def prepare(data_dir, teacher_dir, generator_dir, output, progress=print):
         paths = [*source.files, data_dir / 'gen_optimization.jsonl', teacher_dir / 'learning.json',
                  teacher_dir / 'config.json', *teacher_paths,
                  *[p for p in generator_dir.rglob('*') if p.is_file()],
-                 Path(__file__), Path(__file__).parent / 'fewshot' / 'session.py',
+                 Path(__file__), *IMPLEMENTATION_FILES,
                  Path(__file__).with_name('history.py'), Path(__file__).with_name('history_sources.py')]
         hashes = fingerprint(paths)
         manifest = dict(schema=1, recipe=RECIPE, inputs=hashes, data=data_dir.name,
                         generator=generator_dir.name, teacher=teacher_dir.name,
                         target_ids=[c['case_id'] for c in cases], usage='provisional_candidate_inventory',
                         label_definition='z=1 iff frozen judge fails to identify single-shot generation')
+        manifest = _resolve_manifest(output, manifest)
         write_once_json(output / 'manifest.json', manifest)
         write_once_json(output / 'teacher_sources.json', audit)
         progress(json.dumps({'teacher_sources': audit['summary']}, ensure_ascii=False))

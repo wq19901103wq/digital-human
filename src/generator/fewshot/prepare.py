@@ -16,8 +16,10 @@ I4：处境标签/画像不在准备期按 ID 物化——重复 ID 时旧类是
 
 I10：load 完成后 PreparedPool 深只读——行 tuple 化并逐行包 MappingProxyType，
 桶/特征/画像/flags 等映射包 MappingProxyType；任何属性赋值抛 TypeError。
-嵌套 list（如 row['context']）保持可变（顶层结构冻结、深层不做防御拷贝），
-文档注明：召回返回时已做递归解冻深拷贝，调用方拿到的仍是独立 list/dict。
+行内嵌套结构递归冻结：dict（含 Counter 等 dict 子类）包只读映射视图、
+list 包 FrozenList（list 子类，支持取值/迭代/in 与 list 相等语义，改/增/删
+一律 TypeError）、set 包 frozenset；解冻见 thaw_value——召回返回时已递归
+解冻为全新普通 list/dict，调用方拿到的与池内部零共享。
 
 I9：历史池存在有效磁盘索引时，open_session 先探测索引绑定（代码摘要/
 flags/内容哈希），有效则本模块 hydrate_from_index 从 sqlite 单遍恢复物化
@@ -38,6 +40,91 @@ from ...history.sources import load as load_history_sources
 from . import rank
 
 _logger = logging.getLogger("src.generator.fewshot")
+
+
+class FrozenList(list):
+    """只读 list（I10）：保持 list 子类身份（isinstance/相等/序列协议与旧实现一致），
+    任何修改操作抛 TypeError。防正常接口的意外写入，不防 list.append(x) 式主动绕行。"""
+
+    _MESSAGE = 'fewshot 冻结列表禁止修改'
+
+    def __init__(self, items=()):
+        list.__init__(self, items)
+
+    def _readonly(self, *args, **kwargs):
+        raise TypeError(self._MESSAGE)
+
+    __setitem__ = _readonly
+    __delitem__ = _readonly
+    __iadd__ = _readonly
+    __imul__ = _readonly
+    append = _readonly
+    extend = _readonly
+    insert = _readonly
+    pop = _readonly
+    remove = _readonly
+    clear = _readonly
+    sort = _readonly
+    reverse = _readonly
+
+
+class FrozenDict(dict):
+    """只读 dict（I10）：保持 dict 子类身份（rank.py 的 isinstance(explicit, dict)
+    显式画像判定不受影响），任何修改操作抛 TypeError。"""
+
+    _MESSAGE = 'fewshot 冻结映射禁止修改'
+
+    def _readonly(self, *args, **kwargs):
+        raise TypeError(self._MESSAGE)
+
+    __setitem__ = _readonly
+    __delitem__ = _readonly
+    __ior__ = _readonly
+    update = _readonly
+    setdefault = _readonly
+    pop = _readonly
+    popitem = _readonly
+    clear = _readonly
+
+
+# 标量/不可变类型快速通道：冻结递归对叶子节点一律原样返回，
+# 用 type() 精确匹配避免逐节点多次 isinstance 调用（10 万行规模加载期基准）。
+_IMMUTABLE_TYPES = (str, int, float, bool, bytes, type(None))
+
+
+def _freeze_value(value: Any) -> Any:
+    """递归冻结行内嵌套结构：普通 dict→FrozenDict、其他 dict 子类→只读映射视图
+    （Counter 等计数视图零拷贝直接包装，计数值为不可变 int）、list→FrozenList、
+    set→frozenset、tuple 递归重建；标量原样返回。"""
+    if type(value) in _IMMUTABLE_TYPES:
+        return value
+    if type(value) is dict:
+        return FrozenDict({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, dict):
+        # Counter 等计数映射：计数值为 int，零拷贝只读视图即可。
+        return MappingProxyType(value)
+    if isinstance(value, list):
+        return FrozenList([_freeze_value(item) for item in value])
+    if isinstance(value, set):
+        return frozenset(_freeze_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def thaw_value(value: Any) -> Any:
+    """冻结值的递归解冻（I10 返回边界）：MappingProxyType/FrozenDict→dict、
+    FrozenList→list、frozenset→set、tuple 递归重建；产物为全新普通容器，
+    与池内部零共享。"""
+    if isinstance(value, (MappingProxyType, dict)):
+        return {key: thaw_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [thaw_value(item) for item in value]
+    if isinstance(value, (frozenset, set)):
+        return {thaw_value(item) for item in value}
+    if isinstance(value, tuple):
+        return tuple(thaw_value(item) for item in value)
+    return value
 
 _TRUSTED_PROVENANCE = {"explicit_human_marker", "before_automation_cutoff"}
 
@@ -109,25 +196,36 @@ class PreparedPool:
         object.__setattr__(self, name, value)
 
     def _freeze(self) -> None:
-        """构建完成后冻结全部内部结构（行 tuple + MappingProxyType）。
+        """构建完成后递归冻结全部内部结构（行 tuple + 只读包装，I10 深只读）。
 
-        桶成员与 _rows 持有同一批行代理（id(row) 映射保证身份一致，
-        _build_examples 的 ``member is row`` 判定不受影响）。
+        行内嵌套 dict/list/set 经 _freeze_value 递归冻结；桶成员与 _rows 持有
+        同一批行代理（id(row) 缓存保证身份一致，_build_examples 的
+        ``member is row`` 判定不受影响）。
         """
-        proxies = {id(row): MappingProxyType(row) for row in self._rows}
-        object.__setattr__(self, '_rows', tuple(proxies[id(row)] for row in self._rows))
+        frozen_rows: dict[int, Any] = {}
+
+        def freeze_row(row):
+            proxy = frozen_rows.get(id(row))
+            if proxy is None:
+                proxy = MappingProxyType(_freeze_value(row))
+                frozen_rows[id(row)] = proxy
+            return proxy
+
+        object.__setattr__(self, '_rows', tuple(freeze_row(row) for row in self._rows))
         for name in ('_rows_by_group', '_rows_by_group_situation',
                      '_rows_by_group_precise_situation', '_rows_by_group_latest_situation'):
             mapping = getattr(self, name)
             object.__setattr__(self, name, MappingProxyType({
-                key: [proxies[id(member)] for member in members]
+                key: FrozenList(freeze_row(member) for member in members)
                 for key, members in mapping.items()
             }))
         for name in ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
                      '_group_participant_profiles_by_id', '_terms_by_id'):
-            object.__setattr__(self, name, MappingProxyType(getattr(self, name)))
+            object.__setattr__(self, name, MappingProxyType({
+                key: _freeze_value(value) for key, value in getattr(self, name).items()
+            }))
         object.__setattr__(self, '_render_rows_by_id', MappingProxyType({
-            key: MappingProxyType(row) for key, row in self._render_rows_by_id.items()
+            key: MappingProxyType(_freeze_value(row)) for key, row in self._render_rows_by_id.items()
         }))
         object.__setattr__(self, 'flags', MappingProxyType(self.flags))
         object.__setattr__(self, '_frozen', True)

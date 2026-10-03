@@ -108,10 +108,13 @@ def _build_examples(connection, pool) -> None:
                        'PRIMARY KEY(term,id)) WITHOUT ROWID')
     connection.execute('CREATE INDEX term_ids ON terms(id)')
     position = 0
+    from .prepare import thaw_value
+
     locations = iter((json.loads(line), location) for line, location in _line_locations(pool))
     for row in pool.rows:
         identity = str(row['id'])
-        values = {name: getattr(pool, name)[identity] for name in disk_history.FEATURES}
+        # I10 深只读后特征值为只读映射/冻结集合视图，编码前递归解冻为普通容器。
+        values = thaw_value({name: getattr(pool, name)[identity] for name in disk_history.FEATURES})
         values['_latest_situations_by_id'] = sorted(values['_latest_situations_by_id'])
         buckets = [[key[1] for key, members in getattr(pool, name).items()
                     if any(member is row for member in members)] for name in disk_history.BUCKETS]

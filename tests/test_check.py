@@ -107,6 +107,33 @@ def test_judge_aggregates_data_and_source_failures(saved, monkeypatch, capsys):
     assert versions.POINTERS_PATH.read_bytes() == before and len(saved.calls) == count
 
 
+def test_legal_pack_passes_development_pack_check(env, monkeypatch, capsys):
+    """合法回复包（带生成证明）经统一 judge 入口时 development_pack 必须通过：
+    verify_pack 指向 materials.validation 正式实现（历史上误指 materials.seals，
+    该模块无此函数，合法包也 AttributeError）。"""
+    from src.config import sha256_file
+    from src.history.sources import load
+    from src.iteration.materials import validation as materials_validation
+
+    monkeypatch.setattr(versions, 'switch_instance', lambda name: env.root)
+    source = load(env.source.directory)
+    cases = source.role('judge_development')
+    recipe = {'kind': 'judge_pack', 'dataset': 'development',
+              'data_ref': 'd-test', 'generator_ref': 'g-0001',
+              'inputs': {str(path.resolve()): sha256_file(path) for path in source.files}}
+    rows = [{**case, 'ai_replies': ['模拟回复']} for case in cases]
+    pack = {'data_ref': 'd-test', 'c0_gen_version': 'g-0001', 'rows': rows,
+            'generation_proof': materials_validation.pack_proof(recipe, rows)}
+    write_json(env.root / 'judge_eval/pack/pack.json', pack)
+    assert check.main(['judge', '--instance', 'demo', '--pack', 'pack',
+                       '--candidate', 'j-0001']) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'passed'
+    development_pack = next(c for c in report['checks'] if c['name'] == 'development_pack')
+    assert development_pack['status'] == 'passed'
+    assert development_pack['detail'] == {'cases': len(rows)}
+
+
 def test_setup_failure_is_machine_readable(priv, monkeypatch, capsys):
     monkeypatch.setattr(versions, 'switch_instance', lambda name: priv)
     assert check.main(['judge', '--instance', 'demo', '--pack', 'missing', '--candidate', 'j-0001']) == 1

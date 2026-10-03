@@ -100,16 +100,57 @@ def frozen(args):
     transport = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(transport)
     sys.path.insert(0, str(args.snapshot))
+    from src.iteration import runtime, versions
+    versions.switch_instance(args.instance)
+    directory = versions.PRIVATE / 'experiments' / args.experiment
+    snapshot = runtime.verify(directory / 'runtime.json')
+    if snapshot.resolve() != args.snapshot.resolve():
+        raise ValueError('experiment runtime does not match profiler snapshot')
+    runtime.require_current(directory)
+    # 认证 manifest 分代（pack_transport.snapshot_generation 同款判定）：旧代快照
+    # 走归档 few_shot profiler；新代（fewshot 包）快照没有 few_shot.py，旧 profiler
+    # 的 import 会炸，改为对新包做身份核验（清单字节一致），profile 由冻结
+    # 运行器内 fewshot_profile_instrument 承担（transport receipt）。
+    if transport.snapshot_generation(snapshot, runtime) == 'fewshot':
+        return _frozen_modern(args, snapshot, directory)
+    return _frozen_legacy(args, snapshot, directory)
+
+
+def _frozen_modern(args, snapshot, directory):
+    """新代快照：旧 profiler 跳过；核验快照内 fewshot 包字节与认证清单一致。"""
+    from src.config import sha256_file
+    from src.iteration.storage import read_json
+    try:
+        manifest = json.loads((snapshot / 'manifest.json').read_text())
+        files = manifest['files']
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f'cannot verify modern snapshot package identity: {exc}') from exc
+    package = sorted(name for name in files
+                     if name == 'src/generator/fewshot' or name.startswith('src/generator/fewshot/'))
+    if not package:
+        raise RuntimeError('modern snapshot manifest lists no fewshot package files')
+    changed = [name for name in package if not (snapshot / name).is_file()
+               or sha256_file(snapshot / name) != files[name]]
+    if changed:
+        raise RuntimeError('modern snapshot fewshot package identity mismatch: ' + ', '.join(changed))
+    result = dict(schema=1, equivalent=True, generation='fewshot_package_v1',
+                  scope='snapshot_package_identity_only', model_calls=0,
+                  experiment_results_written=False, package_files=package,
+                  runtime_ref=read_json(directory / 'runtime.json')['ref'])
+    if args.materials:
+        # 新代材料复用耗时由冻结运行器 validation.verified_materials 在 transport
+        # receipt 内计时；旧 profiler 的 learning_guard/disk 适配器测量不再适用。
+        result['materials'] = dict(status='skipped',
+            reason='modern generation measures material reuse inside the frozen runner receipt')
+    return result
+
+
+def _frozen_legacy(args, snapshot, directory):
     from src.generator import few_shot, learned_selection
     from src.iteration import datasets, gbdt_evidence, learning_guard, runtime, versions
     from src.iteration.storage import read_json
     from src.judge.corrected import CodexJudgeClient
     from src.llm import ChatClient
-    versions.switch_instance(args.instance)
-    directory = versions.PRIVATE / 'experiments' / args.experiment
-    if runtime.verify(directory / 'runtime.json').resolve() != args.snapshot.resolve():
-        raise ValueError('experiment runtime does not match profiler snapshot')
-    runtime.require_current(directory)
     pointers = versions.POINTERS_PATH.read_bytes()
     frozen_spec = read_json(directory / 'spec.json')
     data = versions.data_version_dir(frozen_spec['data_ref'])

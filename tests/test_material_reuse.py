@@ -10,7 +10,9 @@ import pytest
 from src.cache import Store
 from src import config
 from src.config import ConfigError
-from src.generator import disk_history, few_shot, learned_sources
+from src.generator import disk_history, learned_sources
+from src.generator import history_sources as generator_history_sources
+from _reference_few_shot import few_shot
 from src.history import sources as history_sources
 from src.history.sources import stamp
 from src.iteration import control, learning_guard, material_reuse, versions
@@ -753,6 +755,11 @@ def test_material_scope_reuses_examples_across_full_checks_and_pool(
         materials, pool_modules, monkeypatch):
     monkeypatch.setattr(few_shot, 'PersonaFewShotRetriever', pool_modules.retrievers.PersonaFewShotRetriever)
     monkeypatch.setattr(history_sources, 'HistorySources', pool_modules.sources.HistorySources)
+    # 适配器层经 src.generator.history_sources shim 取类：shim 首次 import 时按当时
+    # 属性 late-bind，必须同步 patch shim 模块，否则适配器看到真类还是假类取决于
+    # shim 的 import 时机（本模块顶部已先行 import shim，绑定确定在真类上）。
+    monkeypatch.setattr(generator_history_sources, 'HistorySources',
+                        pool_modules.sources.HistorySources)
     retriever = few_shot.PersonaFewShotRetriever()
     source = retriever._history_sources
     row = retriever.rows[0]
@@ -787,6 +794,11 @@ def test_material_scope_reuses_examples_across_full_checks_and_pool(
 def test_failed_material_scope_does_not_publish_rows(materials, pool_modules, monkeypatch, failure):
     monkeypatch.setattr(few_shot, 'PersonaFewShotRetriever', pool_modules.retrievers.PersonaFewShotRetriever)
     monkeypatch.setattr(history_sources, 'HistorySources', pool_modules.sources.HistorySources)
+    # 适配器层经 src.generator.history_sources shim 取类：shim 首次 import 时按当时
+    # 属性 late-bind，必须同步 patch shim 模块，否则适配器看到真类还是假类取决于
+    # shim 的 import 时机（本模块顶部已先行 import shim，绑定确定在真类上）。
+    monkeypatch.setattr(generator_history_sources, 'HistorySources',
+                        pool_modules.sources.HistorySources)
     retriever = few_shot.PersonaFewShotRetriever()
     source = retriever._history_sources
     original = materials.module.require_materials
@@ -809,6 +821,11 @@ def test_failed_material_scope_does_not_publish_rows(materials, pool_modules, mo
 def test_material_scope_rejects_source_changes_at_exit(materials, pool_modules, monkeypatch):
     monkeypatch.setattr(few_shot, 'PersonaFewShotRetriever', pool_modules.retrievers.PersonaFewShotRetriever)
     monkeypatch.setattr(history_sources, 'HistorySources', pool_modules.sources.HistorySources)
+    # 适配器层经 src.generator.history_sources shim 取类：shim 首次 import 时按当时
+    # 属性 late-bind，必须同步 patch shim 模块，否则适配器看到真类还是假类取决于
+    # shim 的 import 时机（本模块顶部已先行 import shim，绑定确定在真类上）。
+    monkeypatch.setattr(generator_history_sources, 'HistorySources',
+                        pool_modules.sources.HistorySources)
     source = history_sources.HistorySources()
     original = materials.module.require_materials
 
@@ -827,6 +844,13 @@ def test_material_scopes_do_not_reuse_another_threads_pending_rows(
         materials, pool_modules, monkeypatch):
     monkeypatch.setattr(few_shot, 'PersonaFewShotRetriever', pool_modules.retrievers.PersonaFewShotRetriever)
     monkeypatch.setattr(history_sources, 'HistorySources', pool_modules.sources.HistorySources)
+    # 适配器层经 src.generator.history_sources shim 取类：shim 首次 import 时按当时
+    # 属性 late-bind，必须同步 patch shim 模块，否则适配器看到真类还是假类取决于
+    # shim 的 import 时机（本模块顶部已先行 import shim，绑定确定在真类上）。
+    monkeypatch.setattr(generator_history_sources, 'HistorySources',
+                        pool_modules.sources.HistorySources)
+    monkeypatch.setattr(generator_history_sources, 'HistorySources',
+                        pool_modules.sources.HistorySources)
     source = history_sources.HistorySources()
     original = materials.module.require_materials
     barrier = Barrier(2, timeout=10)
