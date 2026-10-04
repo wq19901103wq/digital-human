@@ -363,6 +363,56 @@ def _history_fixture(tmp_path):
     return historical(tmp_path / 'data')
 
 
+def _visible_overlap_fixture(tmp_path):
+    """真实数据形态夹具：后一例的上文包含前一例的回复消息 ID。
+
+    真实 d-0015 数据 30 题等价对比的 10 题“少选”差异根因是 recall 配方两侧
+    后过滤不一致（exclude_reply_in_context_v1 只在一边套用），而非检索实现
+    偏差；本夹具合成同形数据（目标题上文回望到早段示例的本人回复），锁住
+    learned_selection.recall 两路策略在旧类与新包 RecallSession 上逐字节
+    一致，且 visible 过滤确实作用于两路同一选择集。
+    """
+    from types import SimpleNamespace
+
+    from src.bootstrap import history
+    from src.config import sha256_file
+    from src.iteration.storage import write_json
+
+    directory = tmp_path / 'data'
+    directory.mkdir(parents=True, exist_ok=True)
+    write_json(directory / 'manifest.json', {'id': directory.name})
+
+    def message(offset, self_, text):
+        return {'chat_id': 'chat-0', 'chat_type': 'private', 'source_chat_id': 'source-0',
+                'chat_name': '例子', 'sender': '本人' if self_ else '朋友', 'is_self': self_,
+                'text': text, 'timestamp': 100000 + offset}
+
+    messages = [
+        message(0, False, '出来吃饭吗'),    # 早段示例 E 的上文
+        message(60, True, '好啊一起去'),     # E 的回复；将出现在目标题的上文里
+        message(7200, False, '最近忙吗'),    # 新会话开始（超出 context_gap）
+        message(7260, False, '项目上线了吧'),
+        message(7320, False, '周末打球吗'),
+        message(7380, True, '可以啊'),       # 目标题回复；上文回望包含 E 的回复
+    ]
+    examples = history.examples(messages)
+    cases = [history.as_case(e) for e in examples]
+    history.write_rows(directory / 'messages.jsonl', messages)
+    history.write_rows(directory / 'fewshot_pool.jsonl', examples)
+    purpose = {'history_policy': 'complete_before_input_v1', 'roles': {},
+               'protocol': {'development_start': 130000, 'acceptance_start': 160000,
+                            'unseen_chat_ids': []}}
+    write_json(directory / 'purposes.json', purpose)
+    write_json(directory / 'report.json', {'review_status': 'approved',
+               'history_policy': purpose['history_policy'],
+               'examples_sha256': sha256_file(directory / 'fewshot_pool.jsonl')})
+    target = cases[-1]
+    overlapped = next(e for e in examples
+                      if set(e['reply_message_ids']) & set(target['context_message_ids']))
+    return SimpleNamespace(directory=directory, target=target,
+                           overlapped_id=str(overlapped['id']))
+
+
 def _history_kwargs(case, size):
     messages = case['context']
     return dict(
@@ -430,6 +480,48 @@ def test_recall_session_history_pool_indexed_parity(tmp_path):
                 kwargs = _history_kwargs(case, size)
                 assert indexed.retrieve(**kwargs) == [dict(row) for row in old.retrieve(**kwargs)]
     indexed.close()
+
+
+def _assert_recipe_parity(old, new, case, overlapped_id):
+    """learned_selection.recall 两路策略：旧类与新包逐字节一致，且
+    exclude_reply_in_context_v1 只从同一份无策略选择集中去掉可见回复示例。"""
+    from src.generator.learned_selection import SOURCE_OVERLAP_POLICY, recall
+
+    for policy in (None, SOURCE_OVERLAP_POLICY):
+        expected = [dict(row) for row in recall(old, case, source_overlap_policy=policy)]
+        actual = recall(new, case, source_overlap_policy=policy)
+        assert actual == expected
+    plain = recall(old, case)
+    overlapped = recall(old, case, source_overlap_policy=SOURCE_OVERLAP_POLICY)
+    assert overlapped_id in {str(row['id']) for row in plain}
+    assert overlapped_id not in {str(row['id']) for row in overlapped}
+    assert [str(row['id']) for row in overlapped] == \
+        [i for i in (str(row['id']) for row in plain) if i != overlapped_id]
+
+
+def test_learned_recall_recipe_parity_visible_overlap_in_memory(tmp_path):
+    """recall 配方等价（内存引擎）：visible 过滤咬到的真实数据形态。"""
+    fixture = _visible_overlap_fixture(tmp_path)
+    pool = fixture.directory / 'fewshot_pool.jsonl'
+    old = few_shot.PersonaFewShotRetriever(pool)
+    old.is_approved()
+    new = open_session(pool, index_policy='use_if_present')
+    assert isinstance(new._engine, InMemoryRecallEngine)
+    _assert_recipe_parity(old, new, fixture.target, fixture.overlapped_id)
+
+
+def test_learned_recall_recipe_parity_visible_overlap_indexed(tmp_path):
+    """recall 配方等价（索引引擎）：同一夹具构建索引后逐字节一致。"""
+    fixture = _visible_overlap_fixture(tmp_path)
+    pool = fixture.directory / 'fewshot_pool.jsonl'
+    old = few_shot.PersonaFewShotRetriever(pool)
+    old.is_approved()
+    indexed = open_session(pool, index_policy='build')
+    assert isinstance(indexed._engine, SqliteIndexedRecallEngine)
+    try:
+        _assert_recipe_parity(old, indexed, fixture.target, fixture.overlapped_id)
+    finally:
+        indexed.close()
 
 
 def test_open_session_index_policy_matrix(tmp_path):
