@@ -33,6 +33,8 @@ def main():
     submit.add_argument("--development-pack")
     submit.add_argument("--validation-pack")
     submit.add_argument("--saved-draw-manifest", help="复用已核验的开发观察；缺失轮次不请求模型")
+    submit.add_argument("--revalidate", action="store_true",
+                        help="重跑固定验收：仅限已通过开发晋级且候选未变（执行器演进后以当前代码验收）")
     submit.add_argument("--from-branch", help="继承同条件下已通过的分支开发版作为对照和改动起点")
     run = sub.add_parser("run", help="启动调度；分支通过固定验收后自动推全")
     run.add_argument("--max-experiments", type=int, default=2)
@@ -80,7 +82,8 @@ def main():
                                  candidate_ref=args.candidate, development_pack=args.development_pack,
                                  validation_pack=args.validation_pack,
                                  saved_draw_manifest=args.saved_draw_manifest,
-                                 prompt_recipe=args.prompt_recipe, from_branch=args.from_branch)
+                                 prompt_recipe=args.prompt_recipe, from_branch=args.from_branch,
+                                 revalidate=args.revalidate)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "run":
         scheduler.Scheduler(max_experiments=args.max_experiments, workers=args.workers,

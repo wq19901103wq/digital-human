@@ -22,9 +22,9 @@ list 包 FrozenList（list 子类，支持取值/迭代/in 与 list 相等语义
 解冻为全新普通 list/dict，调用方拿到的与池内部零共享。
 
 I9：历史池存在有效磁盘索引时，open_session 先探测索引绑定（代码摘要/
-flags/内容哈希），有效则本模块 hydrate_from_index 从 sqlite 单遍恢复物化
-状态（行/桶/特征一次按 position 顺序载入；来源验证由绑定内容哈希保证，
-恢复后仍调 check() 做 stamp 轻量检查）；无效/缺失才走内存 _load。
+flags/内容哈希），有效则本模块 hydrate_from_index 从 sqlite 恢复行定位与桶，
+正文和词表保留按需读取的深只读视图，不全量解码；来源验证由绑定内容哈希
+保证，恢复后仍调 check() 做 stamp 轻量检查；无效/缺失才走内存 _load。
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -92,6 +93,24 @@ class FrozenDict(dict):
 _IMMUTABLE_TYPES = (str, int, float, bool, bytes, type(None))
 
 
+class _FrozenMapping(Mapping):
+    """按访问冻结磁盘映射的值，不枚举或物化未访问的正文与特征。"""
+
+    __slots__ = ('_mapping',)
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def __getitem__(self, key):
+        return _freeze_value(self._mapping[key])
+
+    def __iter__(self):
+        return iter(self._mapping)
+
+    def __len__(self):
+        return len(self._mapping)
+
+
 def _freeze_value(value: Any) -> Any:
     """递归冻结行内嵌套结构：普通 dict→FrozenDict、其他 dict 子类→只读映射视图
     （Counter 等计数视图零拷贝直接包装，计数值为不可变 int）、list→FrozenList、
@@ -109,6 +128,8 @@ def _freeze_value(value: Any) -> Any:
         return frozenset(_freeze_value(item) for item in value)
     if isinstance(value, tuple):
         return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return _FrozenMapping(value)
     return value
 
 
@@ -116,7 +137,7 @@ def thaw_value(value: Any) -> Any:
     """冻结值的递归解冻（I10 返回边界）：MappingProxyType/FrozenDict→dict、
     FrozenList→list、frozenset→set、tuple 递归重建；产物为全新普通容器，
     与池内部零共享。"""
-    if isinstance(value, (MappingProxyType, dict)):
+    if isinstance(value, Mapping):
         return {key: thaw_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [thaw_value(item) for item in value]
@@ -221,9 +242,10 @@ class PreparedPool:
             }))
         for name in ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
                      '_group_participant_profiles_by_id', '_terms_by_id'):
-            object.__setattr__(self, name, MappingProxyType({
-                key: _freeze_value(value) for key, value in getattr(self, name).items()
-            }))
+            mapping = getattr(self, name)
+            frozen = ({key: _freeze_value(value) for key, value in mapping.items()}
+                      if isinstance(mapping, dict) else _FrozenMapping(mapping))
+            object.__setattr__(self, name, MappingProxyType(frozen))
         object.__setattr__(self, '_render_rows_by_id', MappingProxyType({
             key: MappingProxyType(_freeze_value(row)) for key, row in self._render_rows_by_id.items()
         }))
@@ -393,10 +415,9 @@ class PreparedPool:
         self._terms_by_id = terms_by_id
         return rows
 
-    # -- I9：从有效磁盘索引单遍水合物化状态（等价适配器 load_examples 恢复段）----
     def hydrate_from_index(self, reader) -> None:
         """索引绑定已由 database() 校验（代码摘要/flags/来源内容哈希），此处
-        单遍恢复行/桶/特征（按 position 顺序；行内容经 reader pread 按需解码）。
+        恢复行定位/桶及小特征（按 position 顺序）；正文和词表按需解码。
 
         语义与适配器 disk_history.load_examples 的恢复后半段一致，重复 ID
         保持末行覆盖（latest_* / terms 均 ORDER BY position 后写）。恢复后
@@ -407,14 +428,16 @@ class PreparedPool:
         if self.history_sources is None:
             raise ValueError('仅历史策略池可从磁盘索引恢复')
         connection = reader.connection
-        rows: list[dict[str, Any]] = []
-        rows_by_group: dict[bool, list[dict[str, Any]]] = {False: [], True: []}
-        restored_buckets: dict[str, dict[tuple[bool, str], list[dict[str, Any]]]] = {
+        rows = []
+        identities = set()
+        rows_by_group = {False: [], True: []}
+        restored_buckets = {
             name: {} for name in disk_history.BUCKETS}
-        for offset, size, stored_buckets in connection.execute(
-                'SELECT offset,size,buckets FROM examples ORDER BY position'):
-            row = reader.row(offset, size)
+        for offset, size, header, stored_buckets in connection.execute(
+                'SELECT offset,size,header,buckets FROM examples ORDER BY position'):
+            row = disk_history.Row(reader, offset, size, json.loads(header))
             rows.append(row)
+            identities.add(str(row['id']))
             group = row.get('relationship') == 'group'
             rows_by_group[group].append(row)
             for name, keys in zip(disk_history.BUCKETS, json.loads(stored_buckets)):
@@ -431,9 +454,6 @@ class PreparedPool:
             latest_profiles_by_id[identity] = json.loads(profile)
             latest_turn_forms_by_id[identity] = turn_form
             group_participant_profiles_by_id[identity] = tuple(json.loads(participants))
-        terms_by_id: dict[str, Counter] = {}
-        for identity, term, count in connection.execute('SELECT id, term, count FROM terms'):
-            terms_by_id.setdefault(identity, Counter())[term] = count
         self._mtime_ns = self.path.stat().st_mtime_ns
         self._rows = rows
         self._rows_by_group = rows_by_group
@@ -444,6 +464,6 @@ class PreparedPool:
         self._latest_profiles_by_id = latest_profiles_by_id
         self._latest_turn_forms_by_id = latest_turn_forms_by_id
         self._group_participant_profiles_by_id = group_participant_profiles_by_id
-        self._terms_by_id = terms_by_id
+        self._terms_by_id = disk_history.FeatureMap(reader, frozenset(identities), '_terms_by_id')
         self.check()
         self._freeze()

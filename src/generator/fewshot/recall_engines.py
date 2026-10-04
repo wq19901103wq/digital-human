@@ -90,7 +90,22 @@ class SqliteIndexedRecallEngine:
         self._reader.close()
 
 
-# -- 磁盘索引打开/构建（设计 §4 矩阵；database() 的抛错即拒绝，fail-closed）----
+def _buckets_by_row(pool):
+    """一次反向映射桶成员，保留行对象身份、桶顺序与重复 ID 语义。"""
+    from .. import disk_history
+
+    result = {}
+    for position, name in enumerate(disk_history.BUCKETS):
+        for key, members in getattr(pool, name).items():
+            seen = set()
+            for member in members:
+                identity = id(member)
+                if identity not in seen:
+                    seen.add(identity)
+                    buckets = result.setdefault(identity, [[] for _ in disk_history.BUCKETS])
+                    buckets[position].append(key[1])
+    return result
+
 
 def _build_examples(connection, pool) -> None:
     """从 PreparedPool 物化状态构建 examples/terms 表（disk_history.load_examples 的
@@ -110,14 +125,14 @@ def _build_examples(connection, pool) -> None:
     position = 0
     from .prepare import thaw_value
 
+    buckets_by_row = _buckets_by_row(pool)
     locations = iter((json.loads(line), location) for line, location in _line_locations(pool))
     for row in pool.rows:
         identity = str(row['id'])
         # I10 深只读后特征值为只读映射/冻结集合视图，编码前递归解冻为普通容器。
         values = thaw_value({name: getattr(pool, name)[identity] for name in disk_history.FEATURES})
         values['_latest_situations_by_id'] = sorted(values['_latest_situations_by_id'])
-        buckets = [[key[1] for key, members in getattr(pool, name).items()
-                    if any(member is row for member in members)] for name in disk_history.BUCKETS]
+        buckets = buckets_by_row.get(id(row), [[] for _ in disk_history.BUCKETS])
         for parsed, location in locations:
             if parsed == row:
                 offset, size = location
@@ -205,7 +220,11 @@ def prepare_engine(pool, policy: str) -> SqliteIndexedRecallEngine | None:
 
     connection = disk_history.database(source, binding, build)
     reader = disk_history.BoundedReader(source, connection)
-    pool.hydrate_from_index(reader)
+    try:
+        pool.hydrate_from_index(reader)
+    except BaseException:
+        reader.close()
+        raise
     return SqliteIndexedRecallEngine(reader)
 
 

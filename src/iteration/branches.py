@@ -148,8 +148,13 @@ def _accepted_source(name: str, kind: str, current: dict) -> dict:
 def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
            candidate_ref: str | None = None, development_pack: str | None = None,
            validation_pack: str | None = None, saved_draw_manifest: str | None = None,
-           prompt_recipe: str | None = None, from_branch: str | None = None) -> dict:
-    """创建/更新一个方向。每次提交冻结新的提案；已有在途实验保留。"""
+           prompt_recipe: str | None = None, from_branch: str | None = None,
+           revalidate: bool = False) -> dict:
+    """创建/更新一个方向。每次提交冻结新的提案；已有在途实验保留。
+
+    revalidate=True 仅允许在分支已完成开发晋级（stage_limit=fixed_test）且
+    提案候选 == 已接受开发候选时跳过"与全量相同"检查——目的是在执行器
+    演进（如模块化重构）后以当前代码重跑固定验收；提案记录 revalidate 意图。"""
     root = _root(name)
     if kind not in {"gen", "judge"} or not change.strip():
         raise ConfigError("需要 gen/judge 类型和非空改动说明")
@@ -190,8 +195,14 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
         if {"data_version", "persona_sha256", "prompt_sha256", "assets"} & overrides.keys():
             raise ConfigError("资产/指纹变更请提交完整候选版本，不能只覆盖指纹")
         after = {**before, "config": experiment._merge(before["config"], overrides)}
-    if before == after:
+    if before == after and not revalidate:
         raise ConfigError("提案与当前全量相同，没有可迭代的改动")
+    if revalidate:
+        if not (state.get('stage_limit') == 'fixed_test' and candidate_ref and
+                accepted.get('candidate_ref') == candidate_ref and
+                accepted.get('basis') == current):
+            raise ConfigError('revalidate 仅限已通过开发晋级、候选与基线均未变的分支'
+                              '（重跑固定验收），禁止用于绕过迭代检查')
     candidate_ref = candidate_ref or _create_version(kind, after, current["data"])
     replay_binding = None
     if saved_draw_manifest is not None:
@@ -206,6 +217,8 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
                 "development_ref": development_ref,
                 "packs": packs, "protocol": experiment._protocol_snapshot(load_settings()),
                 "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if revalidate:
+        proposal['revalidate'] = True
     if replay_binding is not None:
         proposal['saved_draw_replay'] = replay_binding
     if from_branch is not None:
