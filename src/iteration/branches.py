@@ -198,6 +198,10 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
     if before == after and not revalidate:
         raise ConfigError("提案与当前全量相同，没有可迭代的改动")
     if revalidate:
+        if kind != 'gen':
+            raise ConfigError('revalidate 仅限 gen 分支（Judge 分支的固定轮复用路径未定义），拒绝提交')
+        if from_branch is not None:
+            raise ConfigError('revalidate 禁止与 --from-branch 组合：接受记录必须来自本分支')
         if not (state.get('stage_limit') == 'fixed_test' and candidate_ref and
                 accepted.get('candidate_ref') == candidate_ref and
                 accepted.get('basis') == current):

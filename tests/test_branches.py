@@ -1050,3 +1050,63 @@ def test_direct_development_promotion_recovers_blocked_round(tree):
     assert versions.load_pointers() == before
     assert not list((tree / 'experiments').glob('*-fixed'))
     assert all((directory / name).read_bytes() == blob for name, blob in evidence.items())
+
+
+def _accepted_fixed_branch(monkeypatch, eligible=True):
+    """已过开发晋级、stage_limit=fixed_test 的 gen 分支；返回 (候选 ref, 原始提案)。"""
+    settings = branches.load_settings()
+    settings['evaluation']['adoption']['fixed_entry_min_net_win_rate'] = .1 if eligible else .5
+    monkeypatch.setattr(branches, 'load_settings', lambda: settings)
+    proposal = submit_gen('reval', {'llm': {'model': 'mA'}})
+    branches.set_stage_limit('reval', 'development')
+    assert pass_to_fixed() == []
+    branches.set_stage_limit('reval', 'fixed_test')
+    candidate = branches.status()[0]['development']['candidate_ref']
+    return candidate, proposal
+
+
+def test_revalidate_submit_re_runs_fixed_acceptance(monkeypatch, tree):
+    candidate, _ = _accepted_fixed_branch(monkeypatch)
+    with pytest.raises(ConfigError, match='没有可迭代的改动'):
+        branches.submit('reval', 'gen', '重跑固定验收', candidate_ref=candidate)
+    proposal = branches.submit('reval', 'gen', '执行器演进后重跑固定验收',
+                               candidate_ref=candidate, revalidate=True)
+    assert proposal['revalidate'] is True
+    jobs = branches.advance('reval')
+    assert jobs and all(job['id'].endswith('-fixed') for job in jobs)
+    assert branches.status()[0]['rounds'] == ['r-0001', 'r-0002']
+    assert branches.advance('reval') == jobs  # 重复 advance 不新增轮次
+
+
+def test_revalidate_rejects_judge_and_from_branch_and_mismatch(monkeypatch, tree):
+    candidate, _ = _accepted_fixed_branch(monkeypatch)
+    with pytest.raises(ConfigError, match='from-branch'):
+        branches.submit('reval', 'gen', '重跑固定验收', candidate_ref=candidate,
+                        revalidate=True, from_branch='other')
+    with pytest.raises(ConfigError, match='禁止用于绕过迭代检查'):
+        branches.submit('reval', 'gen', '重跑固定验收', candidate_ref='g-missing', revalidate=True)
+
+
+def test_revalidate_rejects_judge_branch(monkeypatch, tree):
+    submit_judge('reval-judge', {'llm': {'model': 'mA'}})
+    root = branches._root('reval-judge')
+    state = branches._read(root / 'state.json')
+    state['stage_limit'] = 'fixed_test'
+    state['development'] = {'candidate_ref': 'j-x', 'basis': branches.basis()}
+    branches.write_json(root / 'state.json', state)
+    with pytest.raises(ConfigError, match='仅限 gen'):
+        branches.submit('reval-judge', 'judge', '重跑固定验收', candidate_ref='j-x', revalidate=True,
+                        development_pack='pack-calibration-test',
+                        validation_pack='pack-validation-test')
+        branches.submit('reval', 'gen', '重跑固定验收', candidate_ref=candidate,
+                        revalidate=True, from_branch='other')
+    with pytest.raises(ConfigError, match='禁止用于绕过迭代检查'):
+        branches.submit('reval', 'gen', '重跑固定验收', candidate_ref='g-missing', revalidate=True)
+
+
+def test_revalidate_rejects_branch_without_accepted_development(monkeypatch, tree):
+    submit_gen('fresh', {'llm': {'model': 'mA'}})
+    branches.set_stage_limit('fresh', 'fixed_test')
+    candidate = submit_gen('other', {'llm': {'model': 'mB'}})['candidate_ref']
+    with pytest.raises(ConfigError, match='禁止用于绕过迭代检查'):
+        branches.submit('fresh', 'gen', '重跑固定验收', candidate_ref=candidate, revalidate=True)
