@@ -178,6 +178,18 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
                  (("development", development_pack), ("fixed_test", validation_pack)) if ref}
     origin = current[f"production_{kind}"]
     accepted = state.get('development', {})
+    if revalidate:
+        # 先于候选/来源分支解析执行：revalidate 请求条件不符时尽早拒绝，
+        # 且不允许借 --from-branch 替换本分支接受记录。
+        if kind != 'gen':
+            raise ConfigError('revalidate 仅限 gen 分支（Judge 分支的固定轮复用路径未定义），拒绝提交')
+        if from_branch is not None:
+            raise ConfigError('revalidate 禁止与 --from-branch 组合：接受记录必须来自本分支')
+        if not (state.get('stage_limit') == 'fixed_test' and candidate_ref and
+                accepted.get('candidate_ref') == candidate_ref and
+                accepted.get('basis') == current):
+            raise ConfigError('revalidate 仅限已通过开发晋级、候选与基线均未变的分支'
+                              '（重跑固定验收），禁止用于绕过迭代检查')
     if from_branch is not None:
         accepted = _accepted_source(from_branch, kind, current)
     development_ref = accepted.get('candidate_ref') if accepted.get('basis') == current else origin
@@ -197,16 +209,6 @@ def submit(name: str, kind: str, change: str, *, overrides: dict | None = None,
         after = {**before, "config": experiment._merge(before["config"], overrides)}
     if before == after and not revalidate:
         raise ConfigError("提案与当前全量相同，没有可迭代的改动")
-    if revalidate:
-        if kind != 'gen':
-            raise ConfigError('revalidate 仅限 gen 分支（Judge 分支的固定轮复用路径未定义），拒绝提交')
-        if from_branch is not None:
-            raise ConfigError('revalidate 禁止与 --from-branch 组合：接受记录必须来自本分支')
-        if not (state.get('stage_limit') == 'fixed_test' and candidate_ref and
-                accepted.get('candidate_ref') == candidate_ref and
-                accepted.get('basis') == current):
-            raise ConfigError('revalidate 仅限已通过开发晋级、候选与基线均未变的分支'
-                              '（重跑固定验收），禁止用于绕过迭代检查')
     candidate_ref = candidate_ref or _create_version(kind, after, current["data"])
     replay_binding = None
     if saved_draw_manifest is not None:
