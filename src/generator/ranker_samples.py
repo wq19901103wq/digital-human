@@ -90,6 +90,24 @@ def _verify_legacy_manifest(output: Path, frozen: dict) -> None:
                 f'旧候选输入变化: {path.name}')
 
 
+def _require_legacy_manifest_consistency(frozen: dict, current: dict) -> None:
+    """旧清单放行仅限代码指纹的归档兼容：配方/版本/目标字段与数据类输入键集合
+    必须与当前清单一致，防止换配方、换生成器资产或增删数据依赖复用旧清单。"""
+    legacy_keys = set(_legacy_implementation_inputs(frozen.get('inputs', {})))
+    frozen_data_keys = {str(k) for k in frozen.get('inputs', {}) if k not in legacy_keys}
+    current_impl = {str(p.resolve()) for p in IMPLEMENTATION_FILES}
+    current_data_keys = {str(k) for k in current.get('inputs', {}) if str(k) not in current_impl}
+    require(frozen_data_keys == current_data_keys,
+            '旧形态清单与当前输入集合不一致：数据类输入键集合已变化，拒绝续跑')
+    for key, value in current.items():
+        if key == 'inputs':
+            continue
+        require(frozen.get(key) == value, f'旧形态清单与当前 {key} 不一致，拒绝续跑')
+    for key in frozen:
+        if key != 'inputs' and key not in current:
+            raise ConfigError(f'旧形态清单含当前不存在的字段 {key}，拒绝续跑')
+
+
 def _resolve_manifest(output: Path, manifest: dict) -> dict:
     """manifest.json 已存在且为旧形态清单时，按归档字节核验后沿用冻结清单
     （归档字节才是旧运行的身份，实现演进不阻断续跑）；否则照旧用新清单。"""
@@ -99,6 +117,7 @@ def _resolve_manifest(output: Path, manifest: dict) -> dict:
     frozen = read_json(existing)
     legacy_inputs = _legacy_implementation_inputs(frozen.get('inputs', {}))
     if legacy_inputs:
+        _require_legacy_manifest_consistency(frozen, manifest)
         _verify_legacy_manifest(output, frozen)
         return frozen
     return manifest

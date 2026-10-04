@@ -313,3 +313,45 @@ def test_legacy_inventory_without_runtime_archive_rejected(tmp_path):
     with pytest.raises(ConfigError, match='runtime.json'):
         ranker_samples.prepare(fixture.directory, teacher, generator, output,
                                progress=lambda _: None)
+
+
+def _legacy_ready_inventory(monkeypatch, tmp_path):
+    """可放行的旧形态清单场景（单件 monolith），返回 (fixture, teacher, generator, output)。"""
+    fixture, teacher, generator, output = _inventory(tmp_path)
+    manifest = read_json(output / 'manifest.json')
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
+                              {'src/generator/few_shot.py': 'legacy few_shot\n'})
+    _to_legacy_manifest(output, str(legacy_key),
+                        sha256_file(archive / 'src/generator/few_shot.py'), archive)
+    return fixture, teacher, generator, output
+
+
+def test_legacy_inventory_rejects_changed_recipe(monkeypatch, tmp_path):
+    fixture, teacher, generator, output = _legacy_ready_inventory(monkeypatch, tmp_path)
+    manifest = read_json(output / 'manifest.json')
+    manifest['recipe'] = 'tampered_recipe_v9'
+    write_json(output / 'manifest.json', manifest)
+    with pytest.raises(ConfigError, match='不一致'):
+        ranker_samples.prepare(fixture.directory, teacher, generator, output,
+                               progress=lambda _: None)
+
+
+def test_legacy_inventory_rejects_changed_data_input_set(monkeypatch, tmp_path):
+    fixture, teacher, generator, output = _legacy_ready_inventory(monkeypatch, tmp_path)
+    manifest = read_json(output / 'manifest.json')
+    manifest['inputs'][str(tmp_path / 'extra_pool.jsonl')] = '0' * 64
+    write_json(output / 'manifest.json', manifest)
+    with pytest.raises(ConfigError, match='输入集合不一致'):
+        ranker_samples.prepare(fixture.directory, teacher, generator, output,
+                               progress=lambda _: None)
+
+
+def test_legacy_inventory_rejects_frozen_only_field(monkeypatch, tmp_path):
+    fixture, teacher, generator, output = _legacy_ready_inventory(monkeypatch, tmp_path)
+    manifest = read_json(output / 'manifest.json')
+    manifest['obsolete_field'] = {'anything': True}
+    write_json(output / 'manifest.json', manifest)
+    with pytest.raises(ConfigError, match='不存在的字段'):
+        ranker_samples.prepare(fixture.directory, teacher, generator, output,
+                               progress=lambda _: None)
