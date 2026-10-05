@@ -112,8 +112,12 @@ def test_configurable_five_per_thousand_boundary(dataset, pass_verdict, pairs):
 
 
 def test_new_protocol_freezes_configured_thresholds():
+    from pathlib import Path
+    import yaml
     from src.iteration.experiment import _protocol_snapshot
-    settings = load_settings()
+    # 显式读取入库的 v7 协议文件：不依赖本机 .env 指向（干净环境可复现）
+    settings = yaml.safe_load((Path(__file__).resolve().parents[1]
+                               / 'config' / 'settings-v7.yaml').read_text(encoding='utf-8'))
     snapshot = _protocol_snapshot(settings)
     assert snapshot['gate_schema'] == 3
     # settings-v7 现行口径：开发晋级为净胜严格大于零（0.0），固定准入/正式采用 ≥ +11/1000（单次判定）

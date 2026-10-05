@@ -269,6 +269,10 @@ def _fixed_rejected_under_old_threshold(priv, monkeypatch):
 
 def test_threshold_review_preserves_records_and_reuses_fixed_result(priv, monkeypatch):
     fixed = _fixed_rejected_under_old_threshold(priv, monkeypatch)
+    # 显式固定门槛复核所读的"当前配置"输入（v7 的 0.011），不依赖本机 .env
+    current = load_settings()
+    current['evaluation']['adoption']['formal_min_net_win_rate'] = .011
+    monkeypatch.setattr(promote, 'load_settings', lambda: current)
     before = {name: (fixed / name).read_bytes() for name in ('spec.json', 'state.json', 'cases.jsonl')}
     with pytest.raises(ConfigError, match='固定实验决定'):
         promote.promote_gen(fixed.name)
