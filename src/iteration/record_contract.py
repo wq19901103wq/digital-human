@@ -142,14 +142,18 @@ def validate_completion(target: Path, metrics: dict, *, complete=True):
     if 'failure_rate' in metrics and abs(metrics['failure_rate'] - failure_rate) > 0.0001:
         raise ConfigError('逐题失败数与失败率不一致')
     # Every differing case must carry the frozen independent vote sequence.
+    # flip_extra_rounds > 0（v6 及以前）：要求完整补验票；= 0（v7 单次判定）：
+    # 分歧题无补验，确认口径以初测票为准，允许单票结构或缺省补验字段。
     extra = int(spec.get('protocol', {}).get('flip_extra_rounds', 0))
-    if complete and extra and not spec.get('smoke'):
+    if complete and not spec.get('smoke'):
         for row in ok:
             if row[bkey] == row[ckey]:
                 continue
             votes = row if spec['kind'] == 'judge_eval' else row.get('flip_verified')
             if not isinstance(votes, dict) or not row.get('flip_verified'):
-                raise ConfigError('分歧题缺少独立补验，不能标记完成')
+                if extra:
+                    raise ConfigError('分歧题缺少独立补验，不能标记完成')
+                raise ConfigError('单次判定题缺少判定票结构，不能标记完成')
             for side, key in [('baseline', bkey), ('candidate', ckey)]:
                 values = votes.get(side + '_votes', [])
                 if (len(values) != extra + 1 or any(type(v) is not bool for v in values)

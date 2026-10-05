@@ -116,24 +116,24 @@ def test_new_protocol_freezes_configured_thresholds():
     settings = load_settings()
     snapshot = _protocol_snapshot(settings)
     assert snapshot['gate_schema'] == 3
-    # settings-v6 现行口径：开发晋级为净胜严格大于零（0.0），固定准入/正式采用 ≥ +5/1000
+    # settings-v7 现行口径：开发晋级为净胜严格大于零（0.0），固定准入/正式采用 ≥ +11/1000（单次判定）
     assert snapshot['dev_min_net_win_rate'] == 0.0
     for key in ('fixed_entry_min_net_win_rate', 'formal_min_net_win_rate'):
-        assert snapshot[key] == .005
+        assert snapshot[key] == .011
     settings['evaluation']['adoption']['dev_min_net_win_rate'] = .1
     assert snapshot['dev_min_net_win_rate'] == 0.0
 
 
 def test_decide_formal_requires_both_conditions():
     settings = load_settings()
-    # 双条件：识别数严格下降 且 确认净胜 ≥ formal_min_net_win（默认10）
-    assert protocol.decide(_metrics(10), "fixed_test", _protocol())["verdict"] == "adopt"
+    # 双条件：识别数严格下降 且 确认净胜 ≥ formal_min_net_win（v7 默认 11）
+    assert protocol.decide(_metrics(11), "fixed_test", _protocol())["verdict"] == "adopt"
     # 只少识别 1 题、净胜 1 → 拒绝（波动不算改善，SOP §8.2）
     m = _metrics(1)
     v = protocol.decide(m, "fixed_test", _protocol())
     assert v["verdict"] == "reject"
     assert "净胜" in v["reason"]
     # 净胜够但识别数未下降 → 拒绝
-    m = _metrics(10)
+    m = _metrics(11)
     m["identified_candidate"] = m["identified_baseline"]
     assert protocol.decide(m, "fixed_test", _protocol())["verdict"] == "reject"

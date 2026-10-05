@@ -190,8 +190,9 @@ def confirmed_metrics(directory: Path, rows: list[dict], spec: dict) -> dict:
     if failure_rate >= float(spec['protocol'].get('max_failure_rate', 0.01)):
         raise ConfigError('正式开发失败率达到冻结上限，不能晋级或进入固定轮')
     extra = int(spec['protocol']['flip_extra_rounds'])
-    if extra < 2:
+    if extra and extra < 2:
         raise ConfigError('缺少既定独立补验要求（每侧至少两轮）')
+    single_draw = extra == 0  # v7 单次判定：确认口径 = 初测票，无补验
     judge = spec['kind'] == 'judge_eval'
     wins = losses = contested = identified_b = identified_c = 0
     for cid in ids:
@@ -206,19 +207,22 @@ def confirmed_metrics(directory: Path, rows: list[dict], spec: dict) -> dict:
         identified_c += c
         if b == c:
             continue
-        verified = row if judge and row.get('flip_verified') is True else row.get('flip_verified')
-        if not isinstance(verified, dict):
-            raise ConfigError('初测分歧未完成独立补验')
-        final = []
-        for side, initial in (('baseline', b), ('candidate', c)):
-            votes = verified.get(side + '_votes', [])
-            if (len(votes) != extra + 1 or any(type(v) is not bool for v in votes)
-                    or votes[0] != initial):
-                raise ConfigError('独立补验票数不完整或初测不一致')
-            result = sum(votes) > len(votes) / 2
-            if verified.get(side + '_identified_final') is not result:
-                raise ConfigError('补验多数票与最终判定不一致')
-            final.append(result)
+        if single_draw:
+            final = [b, c]
+        else:
+            verified = row if judge and row.get('flip_verified') is True else row.get('flip_verified')
+            if not isinstance(verified, dict):
+                raise ConfigError('初测分歧未完成独立补验')
+            final = []
+            for side, initial in (('baseline', b), ('candidate', c)):
+                votes = verified.get(side + '_votes', [])
+                if (len(votes) != extra + 1 or any(type(v) is not bool for v in votes)
+                        or votes[0] != initial):
+                    raise ConfigError('独立补验票数不完整或初测不一致')
+                result = sum(votes) > len(votes) / 2
+                if verified.get(side + '_identified_final') is not result:
+                    raise ConfigError('补验多数票与最终判定不一致')
+                final.append(result)
         if final[0] == final[1]:
             contested += 1
         elif (final[1] if judge else final[0]):

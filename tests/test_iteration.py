@@ -194,11 +194,13 @@ def test_full_run_gates(priv):
 
 
 def _use_small_settings(monkeypatch):
-    """非冒烟实验的构成准入：把 settings 调到 fixture 的体量（6 题、3 群聊）。"""
+    """非冒烟实验的构成准入：把 settings 调到 fixture 的体量（6 题、3 群聊）。
+    调用计数类用例按旧两次判定协议（v6）钉死；v7 单次判定见 test_single_draw_judge.py。"""
     settings = load_settings()
     for ds in ("development", "fixed_test"):
         settings["evaluation"][ds]["total"] = 6
         settings["evaluation"][ds]["group_ratio"] = 0.5
+    settings["evaluation"]["flip_verification"]["extra_rounds_per_version"] = 2
     import src.iteration.experiment as exp_mod
     monkeypatch.setattr(exp_mod, "load_settings", lambda: settings)
 
@@ -257,6 +259,8 @@ def _fixed_rejected_under_old_threshold(priv, monkeypatch):
     for dataset in ('development', 'fixed_test'):
         old_settings['evaluation'][dataset].update(total=6, group_ratio=.5)
     old_settings['evaluation']['adoption']['formal_min_net_win_rate'] = .5
+    # 与开发证据同协议（旧两次判定，v6 口径），否则固定准入按 protocol 快照不匹配
+    old_settings['evaluation']['flip_verification']['extra_rounds_per_version'] = 2
     monkeypatch.setattr(experiment, 'load_settings', lambda: old_settings)
     fixed = experiment.create_gen_experiment('fixed_test', 'old threshold')
     finish_with_cases(fixed, 'reject', wins=1)
@@ -274,7 +278,7 @@ def test_threshold_review_preserves_records_and_reuses_fixed_result(priv, monkey
     receipt = promote.threshold_review(fixed)
     assert receipt['original_verdict'] == 'reject'
     assert receipt['decision']['verdict'] == 'adopt'
-    assert receipt['protocol']['formal_min_net_win_rate'] == .005
+    assert receipt['protocol']['formal_min_net_win_rate'] == .011  # v7 现行门槛（+11/1000）
     assert promote.promote_gen(fixed.name, threshold_reason=receipt['reason']) == result
     with pytest.raises(ConfigError, match='禁止覆盖'):
         promote.promote_gen(fixed.name, threshold_reason='another reason')
@@ -394,6 +398,10 @@ def test_judge_pack_generation_failure_uses_existing_failure_denominator(priv, m
                  'generation_error': {'type': 'LLMRefusal', 'message': 'stop_reason=refusal'},
                  'generation_trace_ref': 'refusal-trace'})
     _write(priv / 'judge_eval' / 'pack-refusal' / 'pack.json', {'c0_gen_version': 'g-0001', 'rows': rows})
+    # 本用例调用计数按旧两次判定协议（v6）钉死：1 题分歧 → 两轮补测
+    settings = load_settings()
+    settings['evaluation']['flip_verification']['extra_rounds_per_version'] = 2
+    monkeypatch.setattr(experiment, 'load_settings', lambda: settings)
     exp = experiment.create_judge_eval_experiment('development', 'pack-refusal',
         {'llm': {'model': 'm9'}}, change='test model', exp_id='judge-refusal')
     calls = []

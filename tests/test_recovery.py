@@ -85,6 +85,8 @@ def test_smoke_checks_both_branches_without_supplemental_calls(tmp_path, monkeyp
     data.mkdir()
     (data / 'dev_pool.jsonl').write_text(json.dumps({'case_id': 'case', 'context': [], 'human_reply': ['原回复']}) + '\n')
     settings = load_settings()
+    # 本用例按旧两次判定协议（v6）钉死：非冒烟分歧题必须触发两轮补测
+    settings['evaluation']['flip_verification']['extra_rounds_per_version'] = 2
     spec = {'id': 'check', 'kind': 'gen_ab', 'dataset': 'development', 'data_ref': 'data',
             'baseline_ref': 'base', 'candidate_ref': 'candidate', 'judge_ref': 'judge',
             'smoke': smoke, 'smoke_limit': 1, 'config_diff': ['model'],

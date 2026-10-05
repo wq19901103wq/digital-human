@@ -438,7 +438,7 @@ def plan_replay(instance_dir: Path, spec: dict, case_ids: list[str]) -> dict:
         if values[0] == values[1]:
             complete = True  # 初测一致：协议不产生补验轮
         else:
-            complete = all(verify_counts.get((source_exp, case_id, side_fp)) == extra
+            complete = all(verify_counts.get((source_exp, case_id, side_fp), 0) == extra
                            for side_fp in side_map)
         if complete and case_id not in eligible:
             eligible[case_id] = source_exp  # 先到的来源优先（最早回填序）

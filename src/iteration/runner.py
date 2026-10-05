@@ -120,19 +120,28 @@ def _run_gen_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path:
             )
             if spec.get('smoke'):
                 record['flip_verification_skipped'] = 'smoke'
-            if not spec.get('smoke') and record['identified_baseline'] != record['identified_candidate'] and extra_rounds:
-                b_votes = [record['identified_baseline']]
-                c_votes = [record['identified_candidate']]
-                for round_index in range(1, extra_rounds + 1):
-                    b_reply = progress.generate(baseline_gen, case, 'baseline', round=round_index)
-                    b_votes.append(progress.judge(judge, case, b_reply['replies'], 'baseline', round_index))
-                    c_reply = progress.generate(cand_gen, case, 'candidate', round=round_index)
-                    c_votes.append(progress.judge(judge, case, c_reply['replies'], 'candidate', round_index))
-                record['flip_verified'] = {
-                    'baseline_votes': b_votes, 'candidate_votes': c_votes,
-                    'baseline_identified_final': sum(b_votes) > len(b_votes) / 2,
-                    'candidate_identified_final': sum(c_votes) > len(c_votes) / 2,
-                }
+            if not spec.get('smoke') and record['identified_baseline'] != record['identified_candidate']:
+                if extra_rounds:
+                    b_votes = [record['identified_baseline']]
+                    c_votes = [record['identified_candidate']]
+                    for round_index in range(1, extra_rounds + 1):
+                        b_reply = progress.generate(baseline_gen, case, 'baseline', round=round_index)
+                        b_votes.append(progress.judge(judge, case, b_reply['replies'], 'baseline', round_index))
+                        c_reply = progress.generate(cand_gen, case, 'candidate', round=round_index)
+                        c_votes.append(progress.judge(judge, case, c_reply['replies'], 'candidate', round_index))
+                    record['flip_verified'] = {
+                        'baseline_votes': b_votes, 'candidate_votes': c_votes,
+                        'baseline_identified_final': sum(b_votes) > len(b_votes) / 2,
+                        'candidate_identified_final': sum(c_votes) > len(c_votes) / 2,
+                    }
+                else:
+                    # v7 单次判定：无补验轮，初测票即最终票（单票结构，下游公式零改动）
+                    record['flip_verified'] = {
+                        'baseline_votes': [record['identified_baseline']],
+                        'candidate_votes': [record['identified_candidate']],
+                        'baseline_identified_final': record['identified_baseline'],
+                        'candidate_identified_final': record['identified_candidate'],
+                    }
         except ConfigError:
             progress.trace.finish('interrupted')
             raise
@@ -359,14 +368,19 @@ def run_judge_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path
             c = bool(progress.judge(cand_scorer, row, row['ai_replies'], 'candidate'))
             record.update(baseline_correct=b, candidate_correct=c)
             extra = int((spec.get('protocol') or {}).get('flip_extra_rounds', 2))
-            if b != c and extra and not spec.get('smoke'):
-                b_votes, c_votes = [b], [c]
-                for round_index in range(1, extra + 1):
-                    b_votes.append(bool(progress.judge(base_scorer, row, row['ai_replies'], 'baseline', round_index)))
-                    c_votes.append(bool(progress.judge(cand_scorer, row, row['ai_replies'], 'candidate', round_index)))
-                record.update(flip_verified=True, baseline_votes=b_votes, candidate_votes=c_votes,
-                    baseline_identified_final=sum(b_votes) > len(b_votes) / 2,
-                    candidate_identified_final=sum(c_votes) > len(c_votes) / 2)
+            if b != c and not spec.get('smoke'):
+                if extra:
+                    b_votes, c_votes = [b], [c]
+                    for round_index in range(1, extra + 1):
+                        b_votes.append(bool(progress.judge(base_scorer, row, row['ai_replies'], 'baseline', round_index)))
+                        c_votes.append(bool(progress.judge(cand_scorer, row, row['ai_replies'], 'candidate', round_index)))
+                    record.update(flip_verified=True, baseline_votes=b_votes, candidate_votes=c_votes,
+                        baseline_identified_final=sum(b_votes) > len(b_votes) / 2,
+                        candidate_identified_final=sum(c_votes) > len(c_votes) / 2)
+                else:
+                    # v7 单次判定：无补验轮，初测票即最终票（单票结构）
+                    record.update(flip_verified=True, baseline_votes=[b], candidate_votes=[c],
+                        baseline_identified_final=b, candidate_identified_final=c)
         except ConfigError:
             progress.trace.finish('interrupted')
             raise

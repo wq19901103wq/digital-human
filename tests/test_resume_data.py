@@ -223,6 +223,10 @@ def _judge_run(priv, monkeypatch):
     path = priv / "judge_eval/pack-resume/pack.json"
     _write(path, {"c0_gen_version": "g-0001", "rows": [
         {**_case(f"d{i}", "private"), "ai_replies": ["AI"]} for i in range(4)]})
+    # 续跑/缺轮断言按旧两次判定协议（v6）钉死：分歧题每侧共 3 次判定
+    settings = experiment.load_settings()
+    settings["evaluation"]["flip_verification"]["extra_rounds_per_version"] = 2
+    monkeypatch.setattr(experiment, "load_settings", lambda: settings)
     exp = experiment.create_judge_eval_experiment("development", "pack-resume", {"llm": {"model": "m2"}},
                                                 change="test", exp_id="judge-resume")
     calls, control = [], {"interrupt": True}

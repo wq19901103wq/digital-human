@@ -77,6 +77,8 @@ def tree(tmp_path, monkeypatch):
     settings = load_settings()
     for ds in ("development", "fixed_test"):
         settings["evaluation"][ds].update(total=6, group_ratio=0.5)
+    # 夹具调用计数按旧两次判定协议（v6）钉死；v7 单次判定见 test_single_draw_judge.py
+    settings["evaluation"]["flip_verification"]["extra_rounds_per_version"] = 2
     monkeypatch.setattr(experiment, "load_settings", lambda: settings)
     monkeypatch.setattr(branches, "load_settings", lambda: settings)
     return root

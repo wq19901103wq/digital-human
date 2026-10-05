@@ -124,8 +124,8 @@ def _initial_summary(records):
 
 def comparison_records(rows, index, baseline_hits, hits, probability, extra):
     """Never substitute initial observations for missing independent rounds."""
-    if extra != 2:
-        raise ConfigError('Saved embedding comparison requires two independent extra rounds')
+    if extra not in (0, 2):
+        raise ConfigError('Saved embedding comparison requires zero (single-draw) or two extra rounds')
     records = []
     for case in rows:
         cid = case['case_id']

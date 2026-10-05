@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from src.iteration import experiment, measurements, runner, versions
+from src.config import load_settings
 from test_iteration import _write, _use_small_settings, priv, _case  # noqa: F401
 from leakage_support import isolated_legacy_provenance  # noqa: F401
 
@@ -179,3 +180,40 @@ def test_replay_copies_trace_files(priv, scorer_stub, monkeypatch):  # noqa: F81
         assert (exp_b / 'traces' / f'{ref}.json').is_file(), 'trace 未随迁'
         assert (exp_b / 'traces' / f'{ref}.json').read_bytes() == \
                (exp_a / 'traces' / f'{ref}.json').read_bytes(), 'trace 字节不一致'
+
+
+def _use_single_draw_settings(monkeypatch):
+    """v7 单次判定夹具：协议 extra=0，题量同小夹具。"""
+    settings = load_settings()
+    for ds in ("development", "fixed_test"):
+        settings["evaluation"][ds]["total"] = 6
+        settings["evaluation"][ds]["group_ratio"] = 0.5
+    settings["evaluation"]["flip_verification"]["extra_rounds_per_version"] = 0
+    import src.iteration.experiment as exp_mod
+    monkeypatch.setattr(exp_mod, "load_settings", lambda: settings)
+
+
+def test_single_draw_completed_disagreement_replays_zero_calls(priv, scorer_stub, monkeypatch):  # noqa: F811
+    """v7：初测分歧题完成后按零补验轮规划，同条件重放整题复用、不再执行。"""
+    _use_single_draw_settings(monkeypatch)
+    pack = _pack(priv)
+    calls_a = []
+    exp_a = experiment.create_judge_eval_experiment(
+        'development', pack, {'llm': {'model': 'm9'}}, change='换模型', exp_id='judge-v7a')
+    scorer_stub(calls_a)
+    runner.run_judge_experiment(exp_a, workers=1)
+    assert experiment.state_of(exp_a)['status'] == 'finished'
+    # 分歧题存在（确定性 scorer 有分歧设计）
+    spec_a = experiment.spec_of(exp_a)
+    plan = measurements.plan_replay(priv, spec_a, [f'c{i}' for i in range(4)])
+    assert plan['run'] == [] and set(plan['replay']) == {'c0', 'c1', 'c2', 'c3'}
+
+    exp_b = experiment.create_judge_eval_experiment(
+        'development', pack, {}, change='换模型', exp_id='judge-v7b',
+        candidate_ref=spec_a['candidate_ref'])
+    calls_b = []
+    scorer_stub(calls_b)
+    runner.run_judge_experiment(exp_b, workers=1)
+    assert calls_b == []  # 零调用复现（含分歧题）
+    assert experiment.state_of(exp_b)['metrics']['net_win_confirmed'] == \
+        experiment.state_of(exp_a)['metrics']['net_win_confirmed']

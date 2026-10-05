@@ -10,6 +10,11 @@
   (c) judge 抽样噪声：同一 (实验,题,侧) 的多轮补验票自身的一致性
       （相邻轮判定翻转率）。
 
+口径说明（协议 v7，2026-10-05 起）：新实验每题判官只判定一次
+（flip_extra_rounds=0），不再产生补验票；本脚本基于补验票的历史噪声分析
+（相邻轮翻转率 31.78%，16 实验/2698 题实测）仅作为 v6 及以前协议的档案
+保留，用于 v7 门槛换算（+5/1000 → +9/1000）的依据，不再描述现行协议。
+
 分组一律用指纹（借 measurements 公共库），不用裸 ref（评审 P2-7）。
 输出 JSON 到 instances/<名>/analysis/measure-stats-<日期>.json。
 用法: python scripts/measure_stats.py --instance <实例名>
