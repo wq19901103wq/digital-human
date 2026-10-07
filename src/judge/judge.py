@@ -35,6 +35,8 @@ def build_judge(settings: dict, info: dict):
     from . import normalize_mode
     from .corrected import MODE, CorrectedJudge
     if normalize_mode(info["config"].get("mode")) == MODE:
+        from .codex_transport import install
+        install()
         policy = info['config'].get('decision_policy')
         if policy == 'embedding_only':
             from .embedding_runtime import EmbeddingJudge

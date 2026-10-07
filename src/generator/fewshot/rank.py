@@ -418,47 +418,63 @@ def _row_situation_tags(
 # ---------------------------------------------------------------------------
 
 
-def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None) -> list[dict]:
+def _ranked_candidates(scored, key):
+    scored.sort(key=key)
+    return iter(scored)
+
+
+def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None,
+                     latest_profile_cache=None) -> list[dict]:
     query_terms = q.query_terms
     query = q.query
     exclude_ids = q.exclude_ids
     query_situations = q.query_situations
     query_profile = q.query_profile
     precise_situation = q.precise_situation
+    query_length = len(query)
+    query_term_count = max(1, sum(query_terms.values()))
+    query_response_move = query_profile.get("expected_response_move")
+    gap_move = (
+        pool.enable_information_gap_response_move
+        and query_response_move == "verify_or_request_detail"
+    )
+    use_plain_latest_profile = (
+        pool.enable_information_gap_response_move
+        and query_response_move != "verify_or_request_detail"
+    )
     scored = []
     below_threshold = []
     for row in candidates:
-        if exclude_ids and str(row["id"]) in exclude_ids:
+        row_id = str(row["id"])
+        if exclude_ids and row_id in exclude_ids:
             continue
         if indexed_features is None:
             sample_text = " ".join(row["context"])
-            sample_terms = pool._terms_by_id[str(row["id"])]
+            sample_terms = pool._terms_by_id[row_id]
             overlap = sum(min(count, sample_terms.get(term, 0)) for term, count in query_terms.items())
-            length_similarity = 1.0 / (1.0 + abs(len(query) - len(sample_text)) / 20.0)
+            length_similarity = 1.0 / (1.0 + abs(query_length - len(sample_text)) / 20.0)
         else:
-            overlap, context_length = indexed_features.get(str(row["id"]), (0, 0))
-            length_similarity = 1.0 / (1.0 + abs(len(query) - context_length) / 20.0)
+            overlap, context_length = indexed_features.get(row_id, (0, 0))
+            length_similarity = 1.0 / (1.0 + abs(query_length - context_length) / 20.0)
         same_chat = bool(q.current_chat_id and row.get("chat_id") == q.current_chat_id)
         same_relationship = bool(q.relationship and row.get("relationship") == q.relationship)
-        lexical_score = overlap / max(1, sum(query_terms.values()))
+        lexical_score = overlap / query_term_count
         if pool.prioritize_latest_turn:
-            row_situations = pool._latest_situations_by_id[str(row["id"])]
-            row_profile = pool._latest_profiles_by_id[str(row["id"])]
-            if (
-                pool.enable_information_gap_response_move
-                and query_profile.get("expected_response_move") != "verify_or_request_detail"
-            ):
-                row_messages = [str(value).strip() for value in row.get("context") or [] if str(value).strip()]
-                row_profile = _situation_profile(
-                    row_messages[-1] if row_messages else "",
-                    enable_clarification=pool.enable_clarification,
-                )
+            row_situations = pool._latest_situations_by_id[row_id]
+            row_profile = pool._latest_profiles_by_id[row_id]
+            if use_plain_latest_profile:
+                row_key = id(row)
+                row_profile = (latest_profile_cache.get(row_key)
+                               if latest_profile_cache is not None else None)
+                if row_profile is None:
+                    row_messages = [str(value).strip() for value in row.get("context") or [] if str(value).strip()]
+                    row_profile = _situation_profile(
+                        row_messages[-1] if row_messages else "",
+                        enable_clarification=pool.enable_clarification,
+                    )
+                    if latest_profile_cache is not None:
+                        latest_profile_cache[row_key] = row_profile
         else:
-            row_id = str(row["id"])
-            gap_move = (
-                pool.enable_information_gap_response_move
-                and query_profile.get("expected_response_move") == "verify_or_request_detail"
-            )
             if row_caches is None:
                 row_situations = _row_situation_tags(row, pool.enable_clarification)
                 row_profile = _row_situation_profile(row, pool.enable_clarification, gap_move)
@@ -475,7 +491,6 @@ def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None
                     profile_cache[profile_key] = row_profile
         situation_overlap = query_situations & row_situations
         profile_compatibility = _profile_compatibility(query_profile, row_profile)
-        query_response_move = query_profile.get("expected_response_move")
         row_response_move = row_profile.get("expected_response_move")
         response_move_rank = (
             0
@@ -484,7 +499,7 @@ def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None
             if query_response_move and row_response_move
             else 1
         )
-        row_latest_form = pool._latest_turn_forms_by_id.get(str(row["id"]), "")
+        row_latest_form = pool._latest_turn_forms_by_id.get(row_id, "")
         latest_turn_form_comparable = bool(q.query_latest_form and row_latest_form)
         latest_turn_form_match = bool(
             latest_turn_form_comparable and q.query_latest_form == row_latest_form
@@ -500,7 +515,7 @@ def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None
             if pool.prefer_latest_turn_form and not q.is_group and q.query_latest_form and row_latest_form:
                 score += 4.0 if q.query_latest_form == row_latest_form else -1.0
             if pool.prefer_group_participant_structure and q.is_group and q.current_context_messages:
-                row_group_profile = pool._group_participant_profiles_by_id.get(str(row["id"]))
+                row_group_profile = pool._group_participant_profiles_by_id.get(row_id)
                 if row_group_profile:
                     group_participant_match_count = sum(
                         int(query_value == row_value)
@@ -632,30 +647,32 @@ def score_and_select(pool, q, candidates, indexed_features=None, row_caches=None
             if trace is not None:
                 trace["production_semantic_gate_fallback_used"] = True
     best_profile_compatibility = max((item[3] for item in scored), default=0.0)
-    scored.sort(key=lambda item: (
-        item[6] if pool.prefer_response_move_before_relevance else 0,
-        0 if (
-            (
-                pool.prefer_same_chat_after_situation
-                and item[3] >= best_profile_compatibility
+
+    def sort_key(item):
+        return (
+            item[6] if pool.prefer_response_move_before_relevance else 0,
+            0 if (
+                (
+                    pool.prefer_same_chat_after_situation
+                    and item[3] >= best_profile_compatibility
+                )
+                or (
+                    pool.prefer_same_chat_after_exact_move
+                    and query_response_move
+                    and item[6] == 0
+                )
             )
-            or (
-                pool.prefer_same_chat_after_exact_move
-                and query_response_move
-                and item[6] == 0
-            )
+            and item[4]
+            and item[5]
+            else 1,
+            item[0],
+            item[1],
         )
-        and item[4]
-        and item[5]
-        else 1,
-        item[0],
-        item[1],
-    ))
     selected = []
     bucket_counts: Counter[str] = Counter()
     semantic_move_counts: Counter[tuple[str, str]] = Counter()
     diversity_skips = 0
-    for pre_diversity_rank, item in enumerate(scored, start=1):
+    for pre_diversity_rank, item in enumerate(_ranked_candidates(scored, sort_key), start=1):
         _, _, row, profile_compatibility, same_chat, situation_match, response_move_rank, trace = item
         bucket = str(row.get("reply_shape") or "default")
         profile = row.get("semantic_profile") or {}

@@ -600,11 +600,11 @@ def test_scheduler_launches_two_independent_jobs_and_bounds_retries(tree, monkey
     assert len(sched.tick()) == 2
     assert len(commands) == 2 and commands[0] != commands[1]
     assert all(command[command.index('--workers') + 1] == '3' for command in commands)
+    assert all(command[3].endswith('pack_transport.py') for command in commands)
+    assert all(command[command.index('--kind') + 1] == 'experiment' for command in commands)
+    assert all(Path(command[command.index('--snapshot') + 1]).is_dir() for command in commands)
     if timeout is not None:
-        assert all(command[3].endswith('pack_transport.py') for command in commands)
         assert all(command[command.index('--timeout-seconds') + 1] == '180.0' for command in commands)
-        assert all(command[command.index('--kind') + 1] == 'experiment' for command in commands)
-        assert all(Path(command[command.index('--snapshot') + 1]).is_dir() for command in commands)
     else:
         assert all('--timeout-seconds' not in command for command in commands)
     assert sched.tick() == []

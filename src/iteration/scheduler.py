@@ -138,17 +138,14 @@ class Scheduler:
                 metadata.update(job=job, status='needs_attention', reason='runtime_unavailable', error=str(exc))
                 write_json(jobs.metadata_path(job), metadata)
                 continue
-            command = [sys.executable, "-B", "-u", str(snapshot / "scripts" / "iterate_branches.py"),
-                       "--instance", versions.PRIVATE.name, "worker", "--kind", job["kind"],
-                       "--job", job["id"], "--workers", str(self.workers)]
+            from . import pack_transport
+            command = [sys.executable, '-B', '-u', str(pack_transport.__file__),
+                       '--snapshot', str(snapshot), '--instance', versions.PRIVATE.name,
+                       '--kind', job['kind'], '--job', job['id'], '--workers', str(self.workers)]
             if self.timeout_seconds is not None:
-                from . import pack_transport
-                command = [sys.executable, '-B', '-u', str(pack_transport.__file__),
-                           '--snapshot', str(snapshot), '--instance', versions.PRIVATE.name,
-                           '--kind', job['kind'], '--job', job['id'], '--workers', str(self.workers),
-                           '--timeout-seconds', str(self.timeout_seconds)]
-                if self.time_slice_seconds is not None and job['kind'] == 'experiment':
-                    command.extend(['--time-slice-seconds', str(self.time_slice_seconds)])
+                command.extend(['--timeout-seconds', str(self.timeout_seconds)])
+            if self.time_slice_seconds is not None and job['kind'] == 'experiment':
+                command.extend(['--time-slice-seconds', str(self.time_slice_seconds)])
             metadata.update(job=job, attempts=metadata.get("attempts", 0) + 1,
                             launched_at=time.time(), status="submitted")
             write_json(jobs.metadata_path(job), metadata)

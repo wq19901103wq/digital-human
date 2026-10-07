@@ -20,6 +20,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+
+def snapshot_imports(snapshot):
+    path = ROOT / 'src/iteration/pack_transport.py'
+    spec = importlib.util.spec_from_file_location('_promotion_transport', path)
+    transport = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), 'exec'), transport.__dict__)
+    return transport.authenticated_snapshot_imports(snapshot)
+
+
 def review_policy():
     """Use the revised policy with the experiment's verified evidence executor."""
     from src import iteration
@@ -54,7 +63,12 @@ def main(argv=None) -> None:
     if args.evidence_runtime:
         if args.threshold_reason is None:
             parser.error('冻结来源复核仅用于明确修订门槛')
-        sys.path.insert(0, str(Path(args.evidence_runtime).resolve()))
+        with snapshot_imports(Path(args.evidence_runtime).resolve()):
+            return execute(args)
+    return execute(args)
+
+
+def execute(args):
     from src.config import ConfigError
     from src.iteration import experiment, promote, runtime, versions
     if getattr(args, "instance", None):

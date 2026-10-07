@@ -199,6 +199,8 @@ class PreparedPool:
         self._mtime_ns = -1
         self._rows: list[dict[str, Any]] = []
         self._rows_by_group: dict[bool, list[dict[str, Any]]] = {}
+        self._row_ids_by_group: dict[bool, frozenset[str]] = {}
+        self._minimum_identity_length = 0
         self._rows_by_group_situation: dict[tuple[bool, str], list[dict[str, Any]]] = {}
         self._rows_by_group_precise_situation: dict[tuple[bool, str], list[dict[str, Any]]] = {}
         self._rows_by_group_latest_situation: dict[tuple[bool, str], list[dict[str, Any]]] = {}
@@ -240,6 +242,13 @@ class PreparedPool:
                 key: FrozenList(freeze_row(member) for member in members)
                 for key, members in mapping.items()
             }))
+        object.__setattr__(self, '_row_ids_by_group', MappingProxyType({
+            key: frozenset(str(row['id']) for row in members)
+            for key, members in self._rows_by_group.items()
+        }))
+        object.__setattr__(self, '_minimum_identity_length', min(
+            (len(identity) for identities in self._row_ids_by_group.values() for identity in identities),
+            default=0))
         for name in ('_latest_situations_by_id', '_latest_profiles_by_id', '_latest_turn_forms_by_id',
                      '_group_participant_profiles_by_id', '_terms_by_id'):
             mapping = getattr(self, name)

@@ -311,6 +311,72 @@ def test_recall_session_retrieve_parity(synthetic_pool, query, is_group, combo):
         assert again == expected
 
 
+def test_ranked_candidates_preserve_full_stable_order_and_compute_keys_once():
+    scored = [(-float((position * 37) % 31), f'id-{position % 7}', {'position': position})
+              for position in range(2048)]
+    expected = sorted(scored, key=lambda item: item[:2])
+    calls = Counter()
+
+    def key(item):
+        calls[item[2]['position']] += 1
+        return item[:2]
+
+    actual = list(rank._ranked_candidates(scored, key))
+    assert len(actual) == len(expected)
+    assert all(selected is original for selected, original in zip(actual, expected))
+    assert calls == Counter({position: 1 for position in range(len(scored))})
+
+
+def test_ranked_candidates_consume_prefix_in_stable_order():
+    scored = [(-float(position % 31), f'id-{position % 7}', {'position': position})
+              for position in range(2048)]
+    expected = sorted(scored, key=lambda item: item[:2])
+    ordered = rank._ranked_candidates(scored, lambda item: item[:2])
+    actual = [next(ordered) for unused in range(12)]
+    assert actual == expected[:12]
+    assert list(ordered) == expected[12:]
+
+
+@pytest.mark.parametrize('score', [float('nan'), float('inf'), -float('inf')])
+def test_ranked_candidates_keep_sort_semantics_for_nonfinite_scores(score):
+    scored = [(-float(position % 31), f'id-{position % 7}', {'position': position})
+              for position in range(256)]
+    scored[129] = (score, 'nonfinite', {'position': 129})
+    expected = sorted(scored, key=lambda item: item[:2])
+
+    actual = list(rank._ranked_candidates(scored, lambda item: item[:2]))
+    assert all(selected is original for selected, original in zip(actual, expected))
+
+
+@pytest.mark.parametrize('prefix,limit', [(None, 12), (0, 12), (2, 12), (None, 600)])
+@pytest.mark.parametrize('flags', [
+    {},
+    {'prioritize_latest_turn': True, 'prefer_same_chat_after_situation': True},
+    {'prefer_response_move_before_relevance': True, 'prefer_same_chat_after_exact_move': True},
+])
+def test_large_candidate_pool_stable_ranking_and_diversity_match_archive(tmp_path, prefix, limit, flags):
+    rows = [
+        _example(f'id-{position // 2:04}', ['这件事情你怎么看呢？'], [f'回复-{position}'],
+                 chat_id=rank._chat_id('某友') if position % 3 else 'chat-other',
+                 reply_shape='laugh' if position < 400 else 'single',
+                 semantic_profile={'incoming_act': 'question',
+                                   'response_move': 'answer' if position < 440 else f'move-{position // 8}'})
+        for position in range(512)
+    ]
+    pool_path = _write_jsonl(tmp_path / 'plain' / 'pool.jsonl', list(reversed(rows)))
+    old = _old_retriever(pool_path)
+    for name, value in flags.items():
+        setattr(old, name, value)
+    new = open_session(pool_path, flags=flags)
+    for query in ('这件事情你怎么看呢？', '今天周末一起出去吗？'):
+        request = dict(query=query, chat_name='某友', is_group=False, limit=limit,
+                       diversity_prefix_size=prefix, include_retrieval_features=True)
+        expected = old.retrieve(**request)
+        actual = new.retrieve(**request)
+        assert actual == expected
+        assert new.render_selected(actual) == old.render_selected(expected)
+
+
 def test_recall_session_is_approved_parity(tmp_path):
     rows = _synthetic_rows()
     pool = _write_jsonl(tmp_path / 'approved' / 'pool.jsonl', rows)
@@ -361,6 +427,317 @@ def test_recall_session_render_selected_parity(tmp_path):
 
 def _history_fixture(tmp_path):
     return historical(tmp_path / 'data')
+
+
+def _eligibility_engine(tmp_path, **limits):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from src.generator.disk_history import BoundedReader
+
+    source = tmp_path / 'eligibility.jsonl'
+    source.touch()
+    connection = sqlite3.connect(':memory:', check_same_thread=False)
+    connection.executescript('''
+        CREATE TABLE examples(position INTEGER PRIMARY KEY, id TEXT, chat TEXT,
+                              end_timestamp REAL, end_index INTEGER, order_verified INTEGER);
+        CREATE TABLE example_messages(message_id TEXT, position INTEGER,
+                                      PRIMARY KEY(message_id, position));
+        CREATE INDEX example_ids ON examples(id, position);
+        CREATE INDEX example_times ON examples(end_timestamp);
+        CREATE INDEX example_chats ON examples(chat);
+    ''')
+    rows = []
+    for position, (identity, chat, timestamp, end, verified) in enumerate([
+            ('duplicate', 'chat', 1, 1, True), ('duplicate', 'other', 4, 1, True),
+            ('future', 'other', 3, 1, True), ('equal', 'chat', 2, 2, True),
+            ('target', 'chat', 1, 1, True), ('after-index', 'chat', 2, 3, True),
+            ('other-chat', 'other', 2, 1, True), ('unverified', 'chat', 2, 1, False)]):
+        row = dict(id=identity, source_span=dict(chat_id=chat, end_timestamp=timestamp,
+                   end=end, order_verified=verified), annotation_scope='example_only',
+                   context_message_ids=['target' if identity == 'target' else f'context-{position}'],
+                   reply_message_ids=[f'reply-{position}'])
+        rows.append(row)
+        connection.execute('INSERT INTO examples VALUES (?,?,?,?,?,?)',
+                           (position, identity, chat, timestamp, end, int(verified)))
+        connection.executemany('INSERT INTO example_messages VALUES (?,?)',
+                               [(identity, position) for identity in
+                                row['context_message_ids'] + row['reply_message_ids']])
+    reader = BoundedReader(source, connection)
+    engine = SqliteIndexedRecallEngine(reader, **limits)
+    case = dict(input_cutoff=dict(timestamp=2, index=1, order_verified=True),
+                source_span=dict(chat_id='chat'), context_message_ids=['context'],
+                reply_message_ids=['target'])
+    return engine, SimpleNamespace(rows=rows, history_policy='complete_before_input_v1'), case
+
+
+def test_indexed_eligibility_cache_reuses_routes_without_caching_explicit_exclusions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path)
+    calls = []
+    original = engine._reader.excluded_ids
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or original(*args))
+    try:
+        first = engine.excluded_ids(pool, SimpleNamespace(history_case=case, exclude_ids={'first'}))
+        assert 'duplicate' not in first
+        first.add('pollution')
+        second = engine.excluded_ids(pool, SimpleNamespace(history_case=case, exclude_ids={'second'}))
+        assert second == InMemoryRecallEngine().excluded_ids(
+            pool, SimpleNamespace(history_case=case, exclude_ids={'second'}))
+        assert not {'first', 'pollution'} & second
+        assert len(calls) == 1
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize('changed', [
+    dict(input_cutoff=dict(timestamp=3, index=1, order_verified=True)),
+    dict(input_cutoff=dict(timestamp=2, index=2, order_verified=True)),
+    dict(input_cutoff=dict(timestamp=2, index=1, order_verified=False)),
+    dict(input_cutoff=dict(timestamp=2, index=1, order_verified=1)),
+    dict(source_span=dict(chat_id='other')),
+    dict(history_excluded_chat_ids=['chat']),
+    dict(reply_message_ids=['reply-0']),
+])
+def test_indexed_eligibility_cache_keys_every_sql_boundary(tmp_path, monkeypatch, changed):
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path)
+    calls = []
+    original = engine._reader.excluded_ids
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or original(*args))
+    try:
+        for boundary in (case, {**case, **changed}, {**case, **changed}):
+            query = SimpleNamespace(history_case=boundary, exclude_ids={'explicit'})
+            assert engine.excluded_ids(pool, query) == InMemoryRecallEngine().excluded_ids(pool, query)
+        assert len(calls) == 2
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_hit_still_validates_case_and_reader_lifetime(tmp_path):
+    from types import SimpleNamespace
+    from src.generator.history import HistoryError
+
+    engine, pool, case = _eligibility_engine(tmp_path)
+    query = SimpleNamespace(history_case=case, exclude_ids=None)
+    engine.excluded_ids(pool, query)
+    query.history_case = {**case, 'context_message_ids': []}
+    with pytest.raises(HistoryError):
+        engine.excluded_ids(pool, query)
+    query.history_case = case
+    engine._reader.close()
+    with pytest.raises(ValueError, match='closed'):
+        engine.excluded_ids(pool, query)
+    engine.close()
+    assert not engine._eligibility_cache and engine._eligibility_cache_bytes == 0
+
+
+@pytest.mark.parametrize('limits', [dict(eligibility_cache_entries=0),
+                                   dict(eligibility_cache_bytes=0),
+                                   dict(eligibility_cache_bytes=1)])
+def test_indexed_eligibility_cache_disabled_or_oversized_uses_original_sql(tmp_path, monkeypatch, limits):
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path, **limits)
+    calls = []
+    original = engine._reader.excluded_ids
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or original(*args))
+    try:
+        query = SimpleNamespace(history_case=case, exclude_ids=None)
+        expected = InMemoryRecallEngine().excluded_ids(pool, query)
+        assert engine.excluded_ids(pool, query) == engine.excluded_ids(pool, query) == expected
+        assert len(calls) == 2
+        assert not engine._eligibility_cache and engine._eligibility_cache_bytes == 0
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_remembers_budget_rejection_without_retaining_ids(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path)
+    query = SimpleNamespace(history_case=case, exclude_ids=None)
+    expected = engine.excluded_ids(pool, query)
+    key, (identities, size) = next(iter(engine._eligibility_cache.items()))
+    engine._eligibility_cache_limit = size - sys.getsizeof(identities) - sum(map(sys.getsizeof, identities))
+    engine._eligibility_cache.clear()
+    engine._eligibility_cache_bytes = 0
+    calls = []
+    original = engine._remember_eligibility
+    monkeypatch.setattr(engine, '_remember_eligibility',
+                        lambda *args: calls.append(args) or original(*args))
+    try:
+        assert engine.excluded_ids(pool, query) == engine.excluded_ids(pool, query) == expected
+        assert len(calls) == 1
+        assert engine._eligibility_cache[key] == (None, engine._eligibility_cache_limit)
+        assert engine._eligibility_cache_bytes <= engine._eligibility_cache_limit
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_rejects_large_sets_without_measuring_each_id(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    class UnmeasurableIdentity(str):
+        def __sizeof__(self):
+            raise AssertionError('oversized identity set should not be measured')
+
+    engine, pool, case = _eligibility_engine(tmp_path, eligibility_cache_bytes=1024)
+    query = SimpleNamespace(history_case=case, exclude_ids={'explicit'})
+    excluded = {UnmeasurableIdentity(f'identity-{position}') for position in range(128)}
+    calls = []
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or set(excluded))
+    try:
+        assert engine.excluded_ids(pool, query) == engine.excluded_ids(pool, query) == excluded | {'explicit'}
+        assert len(calls) == 2
+        assert len(engine._eligibility_cache) == 1
+        assert next(iter(engine._eligibility_cache.values()))[0] is None
+        assert engine._eligibility_cache_bytes <= engine._eligibility_cache_limit
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_stops_measuring_as_soon_as_budget_is_exceeded(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    measured = []
+    class LargeIdentity(str):
+        def __sizeof__(self):
+            measured.append(self)
+            return 2048
+
+    engine, pool, case = _eligibility_engine(tmp_path, eligibility_cache_bytes=1024)
+    query = SimpleNamespace(history_case=case, exclude_ids={'explicit'})
+    excluded = {LargeIdentity(f'identity-{position}') for position in range(4)}
+    calls = []
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or set(excluded))
+    try:
+        assert engine.excluded_ids(pool, query) == engine.excluded_ids(pool, query) == excluded | {'explicit'}
+        assert len(calls) == 2 and len(measured) == 1
+        assert next(iter(engine._eligibility_cache.values()))[0] is None
+        assert engine._eligibility_cache_bytes <= engine._eligibility_cache_limit
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_uses_prepared_length_to_reject_without_measuring_ids(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    class UnmeasurableIdentity(str):
+        def __sizeof__(self):
+            raise AssertionError('prepared length bound should reject before measuring IDs')
+
+    engine, pool, case = _eligibility_engine(tmp_path, eligibility_cache_bytes=1024)
+    pool._minimum_identity_length = 256
+    query = SimpleNamespace(history_case=case, exclude_ids={'explicit'})
+    excluded = {UnmeasurableIdentity(f'{position:0256x}') for position in range(4)}
+    assert len(excluded) * (sys.getsizeof('') + sys.getsizeof((None,)) - sys.getsizeof(())) < 1024
+    calls = []
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or set(excluded))
+    try:
+        assert engine.excluded_ids(pool, query) == engine.excluded_ids(pool, query) == excluded | {'explicit'}
+        assert len(calls) == 2
+        assert next(iter(engine._eligibility_cache.values()))[0] is None
+        assert engine._eligibility_cache_bytes <= engine._eligibility_cache_limit
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize('identities', [[], ['duplicate', 'duplicate', 7], ['中文', '😀', 'ascii']])
+def test_prepared_minimum_identity_length_is_normalized_and_read_only(tmp_path, identities):
+    rows = [_example(identity, ['普通陈述'], ['嗯'], group=position % 2 == 0)
+            for position, identity in enumerate(identities)]
+    session = _new_session(_write_jsonl(tmp_path / 'pool.jsonl', rows))
+    try:
+        assert session.pool._minimum_identity_length == min((len(str(identity)) for identity in identities), default=0)
+        with pytest.raises(TypeError, match='深只读'):
+            session.pool._minimum_identity_length = 100
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize('limits', [dict(eligibility_cache_entries=-1),
+                                   dict(eligibility_cache_bytes=-1),
+                                   dict(eligibility_cache_entries=0.5)])
+def test_indexed_eligibility_cache_rejects_invalid_limits(limits):
+    with pytest.raises(ValueError, match='nonnegative integers'):
+        SqliteIndexedRecallEngine(None, **limits)
+
+
+@pytest.mark.parametrize('limit', ['entries', 'bytes'])
+def test_indexed_eligibility_cache_enforces_lru_and_byte_budget(tmp_path, monkeypatch, limit):
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path, eligibility_cache_entries=2)
+    calls = []
+    original = engine._reader.excluded_ids
+    monkeypatch.setattr(engine._reader, 'excluded_ids',
+                        lambda *args: calls.append(args) or original(*args))
+    try:
+        boundaries = [case, {**case, 'source_span': dict(chat_id='other')},
+                      {**case, 'history_excluded_chat_ids': ['other']}]
+        for boundary in boundaries[:2]:
+            engine.excluded_ids(pool, SimpleNamespace(history_case=boundary, exclude_ids=None))
+        if limit == 'bytes':
+            engine._eligibility_cache_limit = engine._eligibility_cache_bytes
+            engine._eligibility_cache_entries = 8
+        for boundary in (boundaries[0], boundaries[2], boundaries[1]):
+            query = SimpleNamespace(history_case=boundary, exclude_ids=None)
+            assert engine.excluded_ids(pool, query) == InMemoryRecallEngine().excluded_ids(pool, query)
+            assert engine._eligibility_cache_bytes <= engine._eligibility_cache_limit
+            assert len(engine._eligibility_cache) <= engine._eligibility_cache_entries
+        assert len(calls) == 4
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_is_thread_safe_and_returns_independent_sets(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    engine, pool, case = _eligibility_engine(tmp_path)
+    def retrieve(position):
+        query = SimpleNamespace(history_case=case, exclude_ids={f'explicit-{position}'})
+        result = engine.excluded_ids(pool, query)
+        assert result == InMemoryRecallEngine().excluded_ids(pool, query)
+        result.add(f'pollution-{position}')
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(retrieve, range(32)))
+        query = SimpleNamespace(history_case=case, exclude_ids=None)
+        assert engine.excluded_ids(pool, query) == InMemoryRecallEngine().excluded_ids(pool, query)
+        assert len(engine._eligibility_cache) == 1
+        assert engine._eligibility_cache_bytes == next(iter(engine._eligibility_cache.values()))[1]
+    finally:
+        engine.close()
+
+
+def test_indexed_eligibility_cache_hit_does_not_bypass_session_source_validation(tmp_path, monkeypatch):
+    from src.generator.history import HistoryError
+
+    fixture = _history_fixture(tmp_path)
+    session = open_session(fixture.directory / 'fewshot_pool.jsonl', index_policy='build')
+    options = _history_kwargs(fixture.cases[-1], 3)
+    try:
+        session.retrieve(**options)
+        assert session._engine._eligibility_cache
+        def changed_source(*args):
+            raise HistoryError('changed source')
+        monkeypatch.setattr(session._pool.history_sources, 'validate', changed_source)
+        with pytest.raises(HistoryError, match='changed source'):
+            session.retrieve(**options)
+    finally:
+        session.close()
 
 
 def _visible_overlap_fixture(tmp_path):
@@ -602,6 +979,433 @@ def _duplicate_id_rows():
     ]
 
 
+@pytest.mark.parametrize('with_rows', [False, True])
+def test_prepared_group_ids_are_normalized_unique_and_read_only(tmp_path, with_rows):
+    rows = (_duplicate_id_rows() + [
+        _example(7, ['普通陈述'], ['嗯']),
+        _example('7', ['不同陈述'], ['好']),
+        _example('group-id', ['群聊陈述'], ['嗯'], group=True),
+    ]) if with_rows else []
+    pool = _new_session(_write_jsonl(tmp_path / 'pool.jsonl', rows)).pool
+    for is_group in (False, True):
+        expected = frozenset(str(row['id']) for row in pool._rows_by_group.get(is_group, []))
+        actual = pool._row_ids_by_group.get(is_group, frozenset())
+        assert actual == expected
+        assert isinstance(actual, frozenset)
+    with pytest.raises(TypeError):
+        pool._row_ids_by_group[False] = frozenset()
+    with pytest.raises(AttributeError):
+        pool._row_ids_by_group.get(False, frozenset()).add('injected')
+
+
+def test_retrieval_features_do_not_rescan_full_group_ids(tmp_path, monkeypatch):
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', _duplicate_id_rows())
+    old = _old_retriever(pool_path)
+    new = _new_session(pool_path)
+    group_rows = new.pool._rows_by_group[False]
+    full_group_scans = []
+
+    def track_iteration(rows):
+        if rows is group_rows:
+            full_group_scans.append(None)
+        return list.__iter__(rows)
+
+    monkeypatch.setattr(prepare.FrozenList, '__iter__', track_iteration)
+    for query in ('这是为什么啊', '到底怎么弄呢？'):
+        request = dict(query=query, chat_name='某友', is_group=False, limit=4,
+                       include_retrieval_features=True)
+        actual = new.retrieve(**request)
+        assert actual == old.retrieve(**request)
+        assert actual
+    assert full_group_scans == []
+
+
+@pytest.mark.parametrize('query', ['', '你今天怎么这么牛逼'])
+@pytest.mark.parametrize('indexed', [False, True])
+def test_score_counts_query_terms_once_without_changing_order(tmp_path, monkeypatch, query, indexed):
+    rows = [_example(identity, ['普通陈述'], ['嗯']) for identity in ('id-3', 'id-1', 'id-2')]
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', rows)
+    old = _old_retriever(pool_path)
+    new = _new_session(pool_path)
+    value_calls = []
+    original = rank.score_and_select
+
+    class CountingCounter(Counter):
+        def values(self):
+            value_calls.append(None)
+            return super().values()
+
+    def score(pool, context, candidates, indexed_features=None, row_caches=None,
+              latest_profile_cache=None):
+        context.query_terms = CountingCounter(context.query_terms)
+        return original(pool, context, candidates, indexed_features, row_caches,
+                        latest_profile_cache=latest_profile_cache)
+
+    def features(pool, query_terms):
+        return {str(row['id']): (
+            sum(min(count, pool._terms_by_id[str(row['id'])].get(term, 0))
+                for term, count in query_terms.items()),
+            len(' '.join(row['context'])),
+        ) for row in pool.rows}
+
+    monkeypatch.setattr(rank, 'score_and_select', score)
+    if indexed:
+        monkeypatch.setattr(new._engine, 'term_features', features)
+    request = dict(query=query, chat_name='某友', is_group=False, use_situation=False,
+                   include_retrieval_features=True)
+    assert new.retrieve(**request) == old.retrieve(**request)
+    assert value_calls == [None]
+
+
+def test_latest_profiles_cache_each_duplicate_row_and_preserve_gap_switch(tmp_path, monkeypatch):
+    rows = [
+        _example('duplicate', ['你今天太厉害了'], ['哪里哪里']),
+        _example('duplicate', ['这是为什么啊'], ['因为如此']),
+        _example('other', ['看这个 https://example.com'], ['收到']),
+    ]
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', rows)
+    old = _old_retriever(pool_path, prioritize_latest_turn=True)
+    old.is_approved()
+    new = _new_session(pool_path, prioritize_latest_turn=True)
+    original = rank._situation_profile
+    row_calls = []
+    query_calls = []
+
+    def profile(text, *args, **kwargs):
+        (query_calls if args else row_calls).append(text)
+        return original(text, *args, **kwargs)
+
+    gap_query = '听朋友说他技术不太行'
+    assert original(gap_query, enable_information_gap_response_move=True)[
+        'expected_response_move'] == 'verify_or_request_detail'
+    monkeypatch.setattr(rank, '_situation_profile', profile)
+    queries = ('普通输入一句', '另一段普通输入', gap_query, '普通输入一句')
+    try:
+        for index, query in enumerate(queries):
+            request = dict(query=query, chat_name='某友', is_group=False, limit=8,
+                           include_retrieval_features=True)
+            actual = new.retrieve(**request)
+            expected = old.retrieve(**request)
+            assert actual == expected
+            assert new.render_selected(actual) == old.render_selected(expected)
+            assert Counter(row_calls) == Counter(row['context'][-1] for row in rows)
+            assert len(query_calls) == index + 1
+        first, second = new.pool.rows[:2]
+        assert first['id'] == second['id']
+        assert new._row_latest_profile_cache[id(first)] != new._row_latest_profile_cache[id(second)]
+        assert len(new._row_latest_profile_cache) == len(rows)
+
+        independent = RecallSession(new.pool, InMemoryRecallEngine())
+        try:
+            assert independent._row_latest_profile_cache == {}
+            request = dict(query=queries[0], chat_name='某友', is_group=False, limit=8,
+                           include_retrieval_features=True)
+            assert independent.retrieve(**request) == new.retrieve(**request)
+            assert len(row_calls) == len(rows) * 2
+            assert independent._row_latest_profile_cache is not new._row_latest_profile_cache
+        finally:
+            independent.close()
+    finally:
+        new.close()
+
+
+@pytest.mark.parametrize('prioritize,gap_move', [(False, False), (False, True), (True, False)])
+def test_latest_profile_cache_is_unused_when_flags_disable_it(tmp_path, prioritize, gap_move):
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', _duplicate_id_rows())
+    old = _old_retriever(pool_path, prioritize_latest_turn=prioritize)
+    old.enable_information_gap_response_move = gap_move
+    new = open_session(pool_path, flags=dict(prioritize_latest_turn=prioritize,
+                                            enable_information_gap_response_move=gap_move))
+    try:
+        for query in ('普通输入一句', '听朋友说他技术不太行', '另一段普通输入'):
+            request = dict(query=query, chat_name='某友', is_group=False,
+                           include_retrieval_features=True)
+            assert new.retrieve(**request) == old.retrieve(**request)
+        assert new._row_latest_profile_cache == {}
+    finally:
+        new.close()
+
+
+@pytest.mark.parametrize('engine', ['memory', 'indexed', 'hydrated'])
+def test_latest_profile_cache_reuses_rows_in_each_history_engine(tmp_path, monkeypatch, engine):
+    fixture = _history_fixture(tmp_path)
+    pool_path = fixture.directory / 'fewshot_pool.jsonl'
+    flags = dict(prioritize_latest_turn=True)
+    if engine == 'hydrated':
+        open_session(pool_path, flags=flags, index_policy='build').close()
+    new = open_session(pool_path, flags=flags,
+                       index_policy='build' if engine == 'indexed' else 'use_if_present')
+    expected_engine = InMemoryRecallEngine if engine == 'memory' else SqliteIndexedRecallEngine
+    assert isinstance(new._engine, expected_engine)
+    old = _old_retriever(pool_path, prioritize_latest_turn=True)
+    old.is_approved()
+    original = rank._situation_profile
+    row_calls = []
+
+    def profile(text, *args, **kwargs):
+        if not args:
+            row_calls.append(text)
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(rank, '_situation_profile', profile)
+    try:
+        request = {**_history_kwargs(fixture.cases[-1], 1), 'use_situation': False,
+                   'include_retrieval_features': True}
+        first = new.retrieve(**request)
+        assert first == old.retrieve(**request)
+        assert first
+        initial_calls = list(row_calls)
+        assert initial_calls
+        assert len(new._row_latest_profile_cache) == len(initial_calls)
+        request['query'] = '另一段普通检索输入'
+        second = new.retrieve(**request)
+        expected = old.retrieve(**request)
+        assert second == expected
+        assert new.render_selected(second) == old.render_selected(expected)
+        assert row_calls == initial_calls
+    finally:
+        new.close()
+
+
+def _sparse_rows(*, group=False):
+    return [
+        _example('duplicate', ['嗯'], ['哈哈'], group=group),
+        _example('duplicate', ['嗯'], ['嗯'], group=group),
+        _example('bound', ['嗯'], ['这段回复需要上文'], group=group),
+        _example('concrete', ['这个具体情况还需要详细讨论'], ['哈哈'], group=group),
+        _example('empty', ['嗯'], [], group=group),
+    ]
+
+
+@pytest.mark.parametrize('queries', [('卧槽', '还行'), ('还行', '卧槽')])
+@pytest.mark.parametrize('group', [False, True])
+def test_sparse_cache_preserves_archive_output_and_short_circuit(tmp_path, monkeypatch, queries, group):
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', _sparse_rows(group=group))
+    old = _old_retriever(pool_path)
+    old.avoid_concrete_examples_for_sparse_query = True
+    new = open_session(pool_path, flags=dict(avoid_concrete_examples_for_sparse_query=True))
+    calls = {name: [] for name in ('concrete', 'bound', 'portable')}
+
+    def track(name, original):
+        def predicate(row):
+            calls[name].append(id(row))
+            return original(row)
+        return predicate
+
+    monkeypatch.setattr(rank, '_has_strong_concrete_payload', track('concrete', rank._has_strong_concrete_payload))
+    monkeypatch.setattr(rank, '_has_context_bound_reply', track('bound', rank._has_context_bound_reply))
+    monkeypatch.setattr(rank, '_has_portable_sparse_reply', track('portable', rank._has_portable_sparse_reply))
+    try:
+        assert new._row_sparse_eligibility_cache == {}
+        first, second, bound, concrete, empty = new.pool.rows
+        for index, query in enumerate(queries * 2):
+            request = dict(query=query, chat_name='某群' if group else '某友', is_group=group,
+                           limit=8, include_retrieval_features=True)
+            actual = new.retrieve(**request)
+            expected = old.retrieve(**request)
+            assert actual == expected
+            assert new.render_selected(actual) == old.render_selected(expected)
+            assert Counter(calls['concrete']) == Counter(id(row) for row in new.pool.rows)
+            if index == 0 and query == '卧槽':
+                assert calls['bound'] == calls['portable'] == []
+                assert new._row_sparse_eligibility_cache[id(first)] == (True, None)
+                assert new._row_sparse_eligibility_cache[id(concrete)] == (False, False)
+            else:
+                assert Counter(calls['bound']) == Counter(id(row) for row in (first, second, bound, empty))
+                assert Counter(calls['portable']) == Counter(id(row) for row in (first, second, empty))
+                assert first['id'] == second['id']
+                assert new._row_sparse_eligibility_cache[id(first)] == (True, True)
+                assert new._row_sparse_eligibility_cache[id(second)] == (True, False)
+                assert new._row_sparse_eligibility_cache[id(bound)] == (True, False)
+                assert new._row_sparse_eligibility_cache[id(empty)] == (True, False)
+    finally:
+        new.close()
+
+
+def test_sparse_cache_reuses_rejected_bucket_rows_in_fallback(tmp_path, monkeypatch):
+    rows = [
+        _example('concrete', ['在吗，这件具体事情需要详细讨论'], ['哈哈'],
+                 situation_tags=['calling_presence']),
+        _example('bound', ['在吗'], ['这段回复需要上文'], situation_tags=['calling_presence']),
+        _example('portable', ['嗯'], ['哈哈']),
+    ]
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', rows)
+    old = _old_retriever(pool_path)
+    old.avoid_concrete_examples_for_sparse_query = True
+    new = open_session(pool_path, flags=dict(avoid_concrete_examples_for_sparse_query=True))
+    calls = []
+    original = rank._has_strong_concrete_payload
+
+    def concrete(row):
+        calls.append(id(row))
+        return original(row)
+
+    monkeypatch.setattr(rank, '_has_strong_concrete_payload', concrete)
+    try:
+        assert [row['id'] for row in new._candidate_rows(False, {'calling_presence'})] == ['concrete', 'bound']
+        request = dict(query='在吗', chat_name='某友', is_group=False, limit=8,
+                       include_retrieval_features=True)
+        actual = new.retrieve(**request)
+        expected = old.retrieve(**request)
+        assert actual == expected
+        assert [row['id'] for row in actual] == ['portable']
+        assert new.render_selected(actual) == old.render_selected(expected)
+        assert Counter(calls) == Counter(id(row) for row in new.pool.rows)
+        request['query'] = '在吗！'
+        assert new.retrieve(**request) == old.retrieve(**request)
+        assert Counter(calls) == Counter(id(row) for row in new.pool.rows)
+    finally:
+        new.close()
+
+
+@pytest.mark.parametrize('enabled,query', [(False, '卧槽'), (False, '还行'), (True, '这是一段普通的完整输入')])
+def test_sparse_cache_is_unused_outside_sparse_filter(tmp_path, enabled, query):
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', _sparse_rows())
+    old = _old_retriever(pool_path)
+    old.avoid_concrete_examples_for_sparse_query = enabled
+    new = open_session(pool_path, flags=dict(avoid_concrete_examples_for_sparse_query=enabled))
+    try:
+        request = dict(query=query, chat_name='某友', is_group=False, include_retrieval_features=True)
+        assert new.retrieve(**request) == old.retrieve(**request)
+        assert new._row_sparse_eligibility_cache == {}
+    finally:
+        new.close()
+
+
+def test_sparse_cache_is_session_local(tmp_path, monkeypatch):
+    pool_path = _write_jsonl(tmp_path / 'pool.jsonl', _sparse_rows())
+    new = open_session(pool_path, flags=dict(avoid_concrete_examples_for_sparse_query=True))
+    independent = RecallSession(new.pool, InMemoryRecallEngine())
+    calls = []
+    original = rank._has_strong_concrete_payload
+
+    def concrete(row):
+        calls.append(id(row))
+        return original(row)
+
+    monkeypatch.setattr(rank, '_has_strong_concrete_payload', concrete)
+    try:
+        request = dict(query='还行', chat_name='某友', is_group=False, include_retrieval_features=True)
+        expected = new.retrieve(**request)
+        assert independent._row_sparse_eligibility_cache == {}
+        assert independent.retrieve(**request) == expected
+        assert Counter(calls) == Counter({id(row): 2 for row in new.pool.rows})
+        assert new._row_sparse_eligibility_cache == independent._row_sparse_eligibility_cache
+        assert new._row_sparse_eligibility_cache is not independent._row_sparse_eligibility_cache
+    finally:
+        independent.close()
+        new.close()
+
+
+@pytest.mark.parametrize('engine', ['memory', 'indexed', 'hydrated'])
+def test_sparse_cache_preserves_history_exclusion_in_each_engine(tmp_path, monkeypatch, engine):
+    fixture = _history_fixture(tmp_path)
+    pool_path = fixture.directory / 'fewshot_pool.jsonl'
+    flags = dict(avoid_concrete_examples_for_sparse_query=True, prioritize_latest_turn=True)
+    if engine == 'hydrated':
+        open_session(pool_path, flags=flags, index_policy='build').close()
+    new = open_session(pool_path, flags=flags,
+                       index_policy='build' if engine == 'indexed' else 'use_if_present')
+    expected_engine = InMemoryRecallEngine if engine == 'memory' else SqliteIndexedRecallEngine
+    assert isinstance(new._engine, expected_engine)
+    assert new._row_sparse_eligibility_cache == {}
+    old = _old_retriever(pool_path, prioritize_latest_turn=True)
+    old.avoid_concrete_examples_for_sparse_query = True
+    assert old.is_approved()
+    assert old.history_policy == new.history_policy == 'complete_before_input_v1'
+    calls = []
+    body_reads = []
+    original = rank._has_strong_concrete_payload
+    original_getitem = disk_history.Row.__getitem__
+
+    def concrete(row):
+        calls.append(str(row['id']))
+        return original(row)
+
+    def getitem(row, key):
+        if key in ('context', 'reply'):
+            body_reads.append(str(row.header['id']))
+        return original_getitem(row, key)
+
+    monkeypatch.setattr(rank, '_has_strong_concrete_payload', concrete)
+    monkeypatch.setattr(disk_history.Row, '__getitem__', getitem)
+    try:
+        allowed_ids = {str(row['id']) for row in fixture.examples[:-1]}
+        excluded_id = str(fixture.examples[-1]['id'])
+        for query in ('卧槽', '还行', '好吧'):
+            request = {**_history_kwargs(fixture.cases[-1], 1), 'query': query,
+                       'include_retrieval_features': True}
+            actual = new.retrieve(**request)
+            assert actual == old.retrieve(**request) == []
+            assert Counter(calls) == Counter(allowed_ids)
+            assert excluded_id not in body_reads
+            assert set(new._row_sparse_eligibility_cache) == {
+                id(row) for row in new.pool.rows if str(row['id']) in allowed_ids
+            }
+    finally:
+        new.close()
+
+
+@pytest.mark.parametrize('engine', ['memory', 'indexed', 'hydrated'])
+def test_sparse_cache_keeps_portable_rows_with_changing_history_boundary(tmp_path, monkeypatch, engine):
+    from src.bootstrap import history
+    from src.config import sha256_file
+    from src.iteration.storage import write_json
+
+    directory = tmp_path / 'data'
+    directory.mkdir()
+    write_json(directory / 'manifest.json', {'id': directory.name})
+    messages = []
+    for index, reply in enumerate(('哈哈', '嗯', '这段回复需要上文', '哈哈')):
+        for offset, self_, text in ((0, False, '嗯'), (60, True, reply)):
+            messages.append(dict(chat_id='chat-0', chat_type='private', source_chat_id='source-0',
+                                 chat_name='例子', sender='本人' if self_ else '朋友', is_self=self_,
+                                 text=text, timestamp=100000 + index * 10000 + offset))
+    examples = history.examples(messages)
+    cases = [history.as_case(row) for row in examples]
+    history.write_rows(directory / 'messages.jsonl', messages)
+    pool_path = directory / 'fewshot_pool.jsonl'
+    history.write_rows(pool_path, examples)
+    write_json(directory / 'purposes.json', dict(history_policy='complete_before_input_v1', roles={},
+               protocol=dict(development_start=150000, acceptance_start=160000, unseen_chat_ids=[])))
+    write_json(directory / 'report.json', dict(review_status='approved',
+               history_policy='complete_before_input_v1', examples_sha256=sha256_file(pool_path)))
+    flags = dict(avoid_concrete_examples_for_sparse_query=True, prioritize_latest_turn=True)
+    if engine == 'hydrated':
+        open_session(pool_path, flags=flags, index_policy='build').close()
+    new = open_session(pool_path, flags=flags,
+                       index_policy='build' if engine == 'indexed' else 'use_if_present')
+    old = _old_retriever(pool_path, prioritize_latest_turn=True)
+    old.avoid_concrete_examples_for_sparse_query = True
+    assert old.is_approved()
+    assert old.history_policy == new.history_policy == 'complete_before_input_v1'
+    body_reads = []
+    original_getitem = disk_history.Row.__getitem__
+
+    def getitem(row, key):
+        if key in ('context', 'reply'):
+            body_reads.append(str(row.header['id']))
+        return original_getitem(row, key)
+
+    monkeypatch.setattr(disk_history.Row, '__getitem__', getitem)
+    try:
+        for case, query, expected_count in ((cases[1], '卧槽', 1), (cases[-1], '卧槽', 3),
+                                           (cases[-1], '还行', 1), (cases[1], '卧槽', 1)):
+            body_reads.clear()
+            request = {**_history_kwargs(case, 1), 'query': query, 'include_retrieval_features': True}
+            actual = new.retrieve(**request)
+            expected = old.retrieve(**request)
+            assert actual == expected
+            assert len(actual) == expected_count
+            assert new.render_selected(actual) == old.render_selected(expected)
+            boundary = cases.index(case)
+            assert set(body_reads) <= {str(row['id']) for row in examples[:boundary]}
+        assert len(new._row_sparse_eligibility_cache) == 3
+        assert id(new.pool.rows[-1]) not in new._row_sparse_eligibility_cache
+    finally:
+        new.close()
+
+
 def test_duplicate_id_lazy_cache_matches_archive_second_row_bucket(tmp_path):
     """I4：情境桶只选中第二条同 ID 行时，惰性缓存（按“第一次进入循环的行”
     计算并驻留、跨查询）与归档旧类逐一相等；连续 retrieve 驻留生效后仍相等。"""
@@ -803,6 +1607,8 @@ def test_hydrated_pool_retrieve_matches_memory_pool(tmp_path):
         for path in saved.iterdir():
             path.rename(cache / path.name)
     try:
+        assert hydrated.pool._row_ids_by_group == memory_session.pool._row_ids_by_group
+        assert hydrated.pool._minimum_identity_length == memory_session.pool._minimum_identity_length
         for case in fixture.cases:
             for size in (3, 1):
                 kwargs = _history_kwargs(case, size)

@@ -8,7 +8,7 @@ from .. import cache, tracing
 from ..iteration import shares, versions
 from ..iteration.storage import read_json, write_json
 from . import background_features as features
-from .corrected import CodexJudgeClient
+from .codex_transport import client as CodexJudgeClient
 
 
 def saved_case(experiment: Path, case_id: str, branch: str, round_index: int) -> dict:

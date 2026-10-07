@@ -426,6 +426,8 @@ def test_history_cache_bounds_full_text_keys(monkeypatch):
     ('pack', 'unknown', True), ('training', 'unknown', True), ('features', 'gen_ab', False),
 ])
 def test_main_records_and_scopes_disk_storage(env, tmp_path, monkeypatch, kind, spec_kind, required):
+    monkeypatch.delenv('DH_ENV_FILE', raising=False)
+    monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
     import faulthandler
     import sys
     from src.config import sha256_file
@@ -446,6 +448,7 @@ def test_main_records_and_scopes_disk_storage(env, tmp_path, monkeypatch, kind, 
     # Dispatch reads the verified snapshot manifest: this fake snapshot is legacy.
     write_json(tmp_path / 'manifest.json', {'files': {'src/generator/few_shot.py': 'ab' * 32}})
     monkeypatch.setattr(runtime, 'verify', lambda path: tmp_path)
+    monkeypatch.setattr(pack_transport, 'authenticate_snapshot', lambda path: None)
     checked = []
     monkeypatch.setattr(runtime, 'require_current', lambda path: checked.append(path))
     monkeypatch.setattr(faulthandler, 'enable', lambda: None)

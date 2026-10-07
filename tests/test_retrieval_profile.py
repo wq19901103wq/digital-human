@@ -51,6 +51,100 @@ def test_profile_counts_bounded(value):
         retrieval_profile.positive(value)
 
 
+def test_ranking_profile_reports_alternating_samples_without_model_calls():
+    result = retrieval_profile.measure_ranking(sizes=(128,), repeats=2)
+    assert result['scope'] == 'synthetic_ranking_kernel_only'
+    assert result['equivalent'] and result['model_calls'] == 0
+    assert result['experiment_results_written'] is False
+    assert len(result['rank_sha256']) == 64
+    assert len(result['results']) == 6
+    for item in result['results']:
+        assert item['candidates'] == 128
+        assert item['consumed'] == (12 if item['consumption'] == 'prefix' else 128)
+        assert all(len(samples) == 2 for samples in item['seconds'].values())
+        assert all(value >= 0 for value in item['median_seconds'].values())
+
+
+@pytest.mark.parametrize('sizes', [(), (0,), (1000001,), (1.5,)])
+def test_ranking_profile_rejects_unbounded_sizes(sizes):
+    with pytest.raises(ValueError, match='sizes'):
+        retrieval_profile.measure_ranking(sizes=sizes)
+
+
+def test_ranking_profile_rejects_changed_selection(monkeypatch):
+    from src.generator.fewshot import rank
+
+    monkeypatch.setattr(rank, '_ranked_candidates', lambda *args: iter(()))
+    with pytest.raises(ValueError, match='stable selection order'):
+        retrieval_profile.measure_ranking(sizes=(128,), repeats=1)
+
+
+def test_check_code_ranking_profile_dispatch_stays_offline(monkeypatch, capsys):
+    monkeypatch.setattr(check, 'command', lambda argv: 'PASS')
+    monkeypatch.setattr(retrieval_profile, 'measure_ranking',
+                        lambda: dict(scope='synthetic_ranking_kernel_only', model_calls=0))
+    assert check.main(['code', '--ranking-profile']) == 0
+    result = json.loads(capsys.readouterr().out)
+    item = next(item for item in result['checks'] if item['name'] == 'ranking_kernel_profile')
+    assert item['detail']['model_calls'] == 0
+
+
+def test_eligibility_profile_reports_cold_and_warm_pairs_without_model_calls():
+    from statistics import median
+
+    result = retrieval_profile.measure_eligibility(sizes=(32,), repeats=2)
+    assert result['scope'] == 'synthetic_eligibility_kernel_only'
+    assert result['equivalent'] and result['model_calls'] == 0
+    assert result['experiment_results_written'] is False
+    assert result['recall_routes_per_case'] == 2
+    assert result['prepared_minimum_identity_length'] == result['synthetic_id_length']
+    assert len(result['recall_engines_sha256']) == 64
+    assert len(result['results']) == 6
+    for item in result['results']:
+        assert item['rows'] == 33 and item['cache_admitted']
+        assert item['temperature'] in ('cold_pair', 'warm_pair')
+        assert item['route_order'] == [('uncached', 'cached'), ('cached', 'uncached')]
+        assert item['sql_query_counts']['uncached'] == [2, 2]
+        assert item['sql_query_counts']['cached'] == ([1, 1] if item['temperature'] == 'cold_pair' else [0, 0])
+        assert item['paired_speedups'] == [uncached / cached
+                                          for uncached, cached in zip(item['seconds']['uncached'],
+                                                                     item['seconds']['cached'])]
+        assert item['median_paired_speedup'] == median(item['paired_speedups'])
+        for route in ('uncached', 'cached'):
+            assert len(item['seconds'][route]) == 2
+            for total, first, second in zip(item['seconds'][route], item['first_seconds'][route],
+                                             item['second_seconds'][route]):
+                assert total == first + second and first >= 0 and second >= 0
+        assert all(0 < value <= result['eligibility_cache_budget_bytes']
+                   for value in item['estimated_cache_payload_bytes'])
+
+
+@pytest.mark.parametrize('sizes', [(), (0,), (7,), (1000001,), (8.5,)])
+def test_eligibility_profile_rejects_unbounded_sizes(sizes):
+    with pytest.raises(ValueError, match='sizes'):
+        retrieval_profile.measure_eligibility(sizes=sizes)
+
+
+def test_eligibility_profile_rejects_changed_exclusions(monkeypatch):
+    from src.generator.fewshot.recall_engines import SqliteIndexedRecallEngine
+
+    monkeypatch.setattr(SqliteIndexedRecallEngine, 'excluded_ids', lambda *args: set())
+    with pytest.raises(ValueError, match='changed exclusion IDs'):
+        retrieval_profile.measure_eligibility(sizes=(32,), repeats=1)
+
+
+def test_check_code_eligibility_profile_dispatch_stays_offline(monkeypatch, capsys):
+    monkeypatch.setattr(check, 'command', lambda argv: 'PASS')
+    calls = []
+    monkeypatch.setattr(retrieval_profile, 'measure_eligibility', lambda **options:
+                        calls.append(options) or dict(scope='synthetic_eligibility_kernel_only', model_calls=0))
+    assert check.main(['code', '--eligibility-profile', '--eligibility-repeats', '9']) == 0
+    assert calls == [dict(repeats=9)]
+    result = json.loads(capsys.readouterr().out)
+    item = next(item for item in result['checks'] if item['name'] == 'eligibility_kernel_profile')
+    assert item['detail']['model_calls'] == 0
+
+
 def test_check_retrieval_dispatch_is_offline(tmp_path, monkeypatch, capsys):
     pointer = tmp_path / 'pointers.json'
     pointer.write_text('{}')
@@ -96,6 +190,9 @@ def test_modern_micro_snapshot_passes_check_retrieval_entry(tmp_path, monkeypatc
         target.write_bytes(source.read_bytes())
         files[name] = sha256_file(source)
     write_json(snapshot / 'manifest.json', {'files': files})
+    authenticated = snapshot.with_name(runtime.digest({'files': files}))
+    snapshot.rename(authenticated)
+    snapshot = authenticated
 
     instance = tmp_path / 'instance'
     directory = instance / 'experiments' / 'frozen'
@@ -156,6 +253,9 @@ def test_modern_snapshot_identity_mismatch_is_rejected(tmp_path, monkeypatch):
         target.write_bytes(path.read_bytes())
         files[f'src/generator/fewshot/{path.name}'] = sha256_file(path)
     write_json(snapshot / 'manifest.json', {'files': files})
+    authenticated = snapshot.with_name(runtime.digest({'files': files}))
+    snapshot.rename(authenticated)
+    snapshot = authenticated
     tampered = next(snapshot.glob('src/generator/fewshot/*.py'))
     tampered.write_text('# tampered\n')
 
@@ -169,7 +269,7 @@ def test_modern_snapshot_identity_mismatch_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, 'require_current', lambda path: None)
     args = argparse.Namespace(snapshot=snapshot, instance='demo', experiment='frozen',
                               cases=1, repeats=1, materials=False)
-    with pytest.raises(RuntimeError, match='identity mismatch'):
+    with pytest.raises(ValueError, match='source changed'):
         retrieval_profile.frozen(args)
     from src.iteration import runtime
     monkeypatch.setattr(versions, 'PRIVATE', tmp_path / 'instances' / 'demo')
@@ -276,6 +376,7 @@ def test_frozen_legacy_full_call_does_not_raise_name_error(tmp_path, monkeypatch
     # 假 transport：记录接收方，分代判定为旧代，归档/磁盘上下文全部直通。
     loaded = []
     transport = SimpleNamespace(
+        authenticated_snapshot_imports=lambda snap: nullcontext(),
         snapshot_generation=lambda snap, rt: 'few_shot',
         archived_runtime_paths=lambda rt: nullcontext(),
         archived_gbdt_paths=lambda ge, rt: nullcontext(),

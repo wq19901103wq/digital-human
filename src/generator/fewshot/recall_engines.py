@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
+import sys
+from threading import RLock
 from typing import Mapping, Protocol
 
 
@@ -75,19 +77,91 @@ class _IndexedTermFeatures(Mapping):
 
 
 class SqliteIndexedRecallEngine:
-    """磁盘索引引擎：直接委托 disk_history.BoundedReader（只读使用，不复制 SQL）。"""
+    """委托只读索引；同一历史边界的资格结果按容量和字节预算复用。"""
 
-    def __init__(self, reader):
+    def __init__(self, reader, *, eligibility_cache_entries=8, eligibility_cache_bytes=4 * 1024 * 1024):
+        if any(not isinstance(value, int) or value < 0
+               for value in (eligibility_cache_entries, eligibility_cache_bytes)):
+            raise ValueError('eligibility cache limits must be nonnegative integers')
         self._reader = reader
+        self._eligibility_cache = OrderedDict()
+        self._eligibility_lock = RLock()
+        self._eligibility_cache_entries = eligibility_cache_entries
+        self._eligibility_cache_limit = eligibility_cache_bytes
+        self._eligibility_cache_bytes = 0
+
+    @staticmethod
+    def _eligibility_key(case):
+        from ..history import validate_case
+
+        cutoff = validate_case(case)
+        ordered = cutoff.get('order_verified') is True
+        return (cutoff['timestamp'], ordered, cutoff['index'] + 1 if ordered else 0,
+                case['source_span']['chat_id'],
+                tuple(case.get('history_excluded_chat_ids', ())), tuple(case['reply_message_ids']))
+
+    def _remember_eligibility(self, key, excluded, minimum_identity_length=0):
+        key_size = sys.getsizeof(key)
+        for item in key:
+            key_size += sys.getsizeof(item)
+            if isinstance(item, tuple):
+                for value in item:
+                    key_size += sys.getsizeof(value)
+                    if key_size > self._eligibility_cache_limit:
+                        return
+            if key_size > self._eligibility_cache_limit:
+                return
+        identity_count = len(excluded)
+        tuple_size = sys.getsizeof(()) + identity_count * (sys.getsizeof((None,)) - sys.getsizeof(()))
+        minimum_size = key_size + tuple_size + identity_count * (sys.getsizeof('') + minimum_identity_length)
+        identities, size = None, key_size
+        if minimum_size <= self._eligibility_cache_limit:
+            measured_size = key_size + tuple_size
+            for identity in excluded:
+                measured_size += sys.getsizeof(identity)
+                if measured_size > self._eligibility_cache_limit:
+                    break
+            else:
+                identities, size = tuple(excluded), measured_size
+        with self._eligibility_lock:
+            if key in self._eligibility_cache:
+                self._eligibility_cache.move_to_end(key)
+                return
+            while self._eligibility_cache and (
+                    len(self._eligibility_cache) >= self._eligibility_cache_entries
+                    or self._eligibility_cache_bytes + size > self._eligibility_cache_limit):
+                _, (_, removed_size) = self._eligibility_cache.popitem(last=False)
+                self._eligibility_cache_bytes -= removed_size
+            self._eligibility_cache[key] = (identities, size)
+            self._eligibility_cache_bytes += size
 
     def excluded_ids(self, pool, q) -> set[str]:
-        return self._reader.excluded_ids(q.history_case, q.exclude_ids)
+        if not self._eligibility_cache_entries or not self._eligibility_cache_limit:
+            return self._reader.excluded_ids(q.history_case, q.exclude_ids)
+        with self._reader.reading():
+            key = self._eligibility_key(q.history_case)
+            with self._eligibility_lock:
+                cached = self._eligibility_cache.get(key)
+                if cached is not None:
+                    self._eligibility_cache.move_to_end(key)
+            if cached is None:
+                excluded = self._reader.excluded_ids(q.history_case)
+                self._remember_eligibility(key, excluded, getattr(pool, '_minimum_identity_length', 0))
+            elif cached[0] is None:
+                excluded = self._reader.excluded_ids(q.history_case)
+            else:
+                excluded = set(cached[0])
+            excluded.update(q.exclude_ids or ())
+            return excluded
 
     def term_features(self, pool, query_terms: Counter) -> Mapping[str, tuple[int, int]]:
         return _IndexedTermFeatures(self._reader, self._reader.term_overlaps(query_terms))
 
     def close(self) -> None:
         self._reader.close()
+        with self._eligibility_lock:
+            self._eligibility_cache.clear()
+            self._eligibility_cache_bytes = 0
 
 
 def _buckets_by_row(pool):

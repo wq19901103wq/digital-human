@@ -14,6 +14,166 @@ from types import MethodType
 from unittest.mock import patch
 
 
+def measure_ranking(*, sizes=(512, 8192, 65536), repeats=5):
+    from itertools import islice
+    from random import Random
+    from statistics import median
+    from src.config import sha256_file
+    from src.generator.fewshot import rank
+
+    repeats = positive(repeats)
+    if not sizes or any(not isinstance(size, int) or not 1 <= size <= 1000000 for size in sizes):
+        raise ValueError('ranking profile sizes must be within [1, 1000000]')
+    results = []
+    for size in sizes:
+        for order in ('mixed', 'ordered', 'tied'):
+            random = Random(0)
+            scored = [(-random.random() if order != 'tied' else 0.0,
+                       f'id-{position % 17}' if order != 'tied' else 'same-id',
+                       {'position': position}) for position in range(size)]
+
+            def sort_key(item):
+                return (0, 1, item[0], item[1])
+
+            if order == 'ordered':
+                scored.sort(key=sort_key)
+            for consumption, consumed in (('prefix', min(12, size)), ('all', size)):
+                expected = sorted(scored, key=sort_key)[:consumed]
+                warmup = list(islice(rank._ranked_candidates(list(scored), sort_key), consumed))
+                if warmup != expected:
+                    raise ValueError('ranking profile changed stable selection order')
+                timings = {'stable_sort': [], 'current_ranking': []}
+                for repeat in range(repeats):
+                    routes = ('stable_sort', 'current_ranking') if repeat % 2 == 0 else \
+                        ('current_ranking', 'stable_sort')
+                    for route in routes:
+                        working = list(scored)
+                        started = time.perf_counter()
+                        if route == 'stable_sort':
+                            working.sort(key=sort_key)
+                            selected = working[:consumed]
+                        else:
+                            selected = list(islice(rank._ranked_candidates(working, sort_key), consumed))
+                        timings[route].append(time.perf_counter() - started)
+                        if selected != expected:
+                            raise ValueError('ranking profile changed stable selection order')
+                medians = {name: median(values) for name, values in timings.items()}
+                results.append(dict(candidates=size, input_order=order, consumption=consumption,
+                                    consumed=consumed, seconds=timings, median_seconds=medians,
+                                    kernel_speedup=medians['stable_sort'] / medians['current_ranking']
+                                    if medians['current_ranking'] else None))
+    return dict(schema=1, scope='synthetic_ranking_kernel_only', equivalent=True,
+                model_calls=0, experiment_results_written=False, repeats=repeats,
+                rank_sha256=sha256_file(Path(rank.__file__)), results=results)
+
+
+def measure_eligibility(*, sizes=(512, 8192, 100000), repeats=5):
+    import sqlite3
+    from statistics import median
+    from tempfile import TemporaryDirectory
+    from types import SimpleNamespace
+
+    from src.config import sha256_file
+    from src.generator import disk_history
+    from src.generator.fewshot import recall_engines
+
+    repeats = positive(repeats)
+    if not sizes or any(not isinstance(size, int) or not 8 <= size <= 1000000 for size in sizes):
+        raise ValueError('eligibility profile sizes must be within [8, 1000000]')
+    results = []
+    pool = SimpleNamespace(_minimum_identity_length=24)
+    with TemporaryDirectory(prefix='dh-eligibility-profile-') as temporary:
+        source = Path(temporary) / 'source.jsonl'
+        source.touch()
+        for size in sizes:
+            connection = sqlite3.connect(':memory:')
+            query_count = 0
+            def count_query(statement):
+                nonlocal query_count
+                if statement.lstrip().upper().startswith('SELECT '):
+                    query_count += 1
+            connection.set_trace_callback(count_query)
+            connection.executescript('''
+                CREATE TABLE examples(position INTEGER PRIMARY KEY, id TEXT, chat TEXT,
+                                      end_timestamp REAL, end_index INTEGER, order_verified INTEGER);
+                CREATE TABLE example_messages(message_id TEXT, position INTEGER,
+                                              PRIMARY KEY(message_id, position));
+                CREATE INDEX example_ids ON examples(id, position);
+                CREATE INDEX example_times ON examples(end_timestamp);
+                CREATE INDEX example_chats ON examples(chat);
+            ''')
+            connection.executemany('INSERT INTO examples VALUES (?,?,?,?,?,?)',
+                ((position, f'{position:024x}', f'chat-{position % 4}', position, position, 1)
+                 for position in range(size)))
+            connection.execute('INSERT INTO examples VALUES (?,?,?,?,?,?)',
+                               (size, f'{size - 2:024x}', 'chat-0', 0, 0, 1))
+            connection.execute('INSERT INTO example_messages VALUES (?,?)', ('target', 0))
+            reader = disk_history.BoundedReader(source, connection)
+            try:
+                for fraction in (0.1, 0.5, 0.9):
+                    boundary = int(size * fraction)
+                    case = dict(input_cutoff=dict(timestamp=boundary, index=boundary, order_verified=True),
+                                source_span=dict(chat_id=f'chat-{boundary % 4}'),
+                                context_message_ids=['context'], reply_message_ids=['target'],
+                                history_excluded_chat_ids=['chat-3'])
+                    query = SimpleNamespace(history_case=case, exclude_ids={'explicit'})
+                    expected = reader.excluded_ids(case, query.exclude_ids)
+                    for temperature in ('cold_pair', 'warm_pair'):
+                        timings = {name: [] for name in ('uncached', 'cached')}
+                        first_seconds = {name: [] for name in timings}
+                        second_seconds = {name: [] for name in timings}
+                        sql_query_counts = {name: [] for name in timings}
+                        route_order = []
+                        cached_bytes = []
+                        admissions = []
+                        for repeat in range(repeats):
+                            routes = ('uncached', 'cached') if repeat % 2 == 0 else ('cached', 'uncached')
+                            route_order.append(routes)
+                            for route in routes:
+                                engine = recall_engines.SqliteIndexedRecallEngine(reader,
+                                    **dict(eligibility_cache_entries=0) if route == 'uncached' else {})
+                                if temperature == 'warm_pair':
+                                    if engine.excluded_ids(pool, query) != expected:
+                                        raise ValueError('eligibility profile changed exclusion IDs')
+                                query_count = 0
+                                started = time.perf_counter()
+                                first = engine.excluded_ids(pool, query)
+                                split = time.perf_counter()
+                                second = engine.excluded_ids(pool, query)
+                                ended = time.perf_counter()
+                                if first != expected or second != expected:
+                                    raise ValueError('eligibility profile changed exclusion IDs')
+                                first_seconds[route].append(split - started)
+                                second_seconds[route].append(ended - split)
+                                timings[route].append(ended - started)
+                                sql_query_counts[route].append(query_count)
+                                if route == 'cached':
+                                    cached_bytes.append(engine._eligibility_cache_bytes)
+                                    admissions.append(any(value[0] is not None
+                                                          for value in engine._eligibility_cache.values()))
+                        medians = {name: median(values) for name, values in timings.items()}
+                        paired_speedups = [uncached / cached if cached else None
+                                           for uncached, cached in zip(timings['uncached'], timings['cached'])]
+                        results.append(dict(rows=size + 1, cutoff_fraction=fraction,
+                            temperature=temperature, excluded_ids=len(expected) - 1,
+                            seconds=timings, first_seconds=first_seconds, second_seconds=second_seconds,
+                            sql_query_counts=sql_query_counts, route_order=route_order,
+                            paired_speedups=paired_speedups,
+                            median_paired_speedup=median(value for value in paired_speedups if value is not None)
+                            if any(value is not None for value in paired_speedups) else None,
+                            median_seconds=medians, estimated_cache_payload_bytes=cached_bytes,
+                            cache_admitted=all(admissions),
+                            pair_speedup=medians['uncached'] / medians['cached'] if medians['cached'] else None))
+            finally:
+                reader.close()
+    return dict(schema=1, scope='synthetic_eligibility_kernel_only', equivalent=True,
+                model_calls=0, experiment_results_written=False, repeats=repeats,
+                recall_routes_per_case=2, eligibility_cache_entries=8,
+                eligibility_cache_budget_bytes=4 * 1024 * 1024, synthetic_id_length=24,
+                prepared_minimum_identity_length=pool._minimum_identity_length,
+                recall_engines_sha256=sha256_file(Path(recall_engines.__file__)), results=results)
+
+
 def positive(value):
     value = int(value)
     if not 1 <= value <= 50:
@@ -100,13 +260,17 @@ def _load_transport():
     transport_path = Path(__file__).with_name('pack_transport.py')
     spec = importlib.util.spec_from_file_location('_retrieval_profile_transport', transport_path)
     transport = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(transport)
+    exec(compile(transport_path.read_bytes(), str(transport_path), 'exec'), transport.__dict__)
     return transport
 
 
 def frozen(args):
     transport = _load_transport()
-    sys.path.insert(0, str(args.snapshot))
+    with transport.authenticated_snapshot_imports(args.snapshot):
+        return _frozen_authenticated(args, transport)
+
+
+def _frozen_authenticated(args, transport):
     from src.iteration import runtime, versions
     versions.switch_instance(args.instance)
     directory = versions.PRIVATE / 'experiments' / args.experiment

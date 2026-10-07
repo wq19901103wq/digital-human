@@ -1,7 +1,11 @@
 import json
+import importlib
+import importlib.util
 import multiprocessing
 import os
+import py_compile
 import subprocess
+import sys
 
 import pytest
 
@@ -26,6 +30,169 @@ def test_runtime_snapshot_survives_source_changes_and_rejects_tampering(env, tmp
     (saved / 'src/module.py').write_text('value = 3\n')
     with pytest.raises(ConfigError, match='source changed'):
         runtime.verify(job / 'runtime.json')
+
+
+def test_preimport_authentication_rejects_unlisted_executable(env, tmp_path):
+    from src.iteration.runtime_auth import authenticate
+    source = tmp_path / 'framework'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src/module.py').write_text('value = 1\n')
+    saved = runtime.freeze(env.root / 'jobs/frozen', root=source)
+    authenticate(saved)
+    (saved / 'src/extra.py').write_text('raise RuntimeError("not authenticated")\n')
+    with pytest.raises(ValueError, match='inventory changed'):
+        authenticate(saved)
+
+
+def test_preimport_authentication_rejects_unlisted_symlink_directory(env, tmp_path):
+    from src.iteration.runtime_auth import authenticate
+    source = tmp_path / 'framework'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src/module.py').write_text('value = 1\n')
+    saved = runtime.freeze(env.root / 'jobs/frozen', root=source)
+    (saved / 'src/injected').symlink_to(source / 'src', target_is_directory=True)
+    with pytest.raises(ValueError, match='symlinks'):
+        authenticate(saved)
+
+
+@pytest.mark.parametrize('relative', ['unlisted.py', 'unlisted.pyc', 'unlisted.pyo',
+                                     'src/unlisted.pyc', 'src/unlisted.pyo',
+                                     'src/__pycache__/unlisted.py'])
+def test_preimport_authentication_rejects_sourceless_executables(env, tmp_path, relative):
+    from src.iteration.runtime_auth import authenticate
+    source = tmp_path / 'framework'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src/module.py').write_text('value = 1\n')
+    saved = runtime.freeze(env.root / 'jobs/frozen', root=source)
+    extra = saved / relative
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b'unbound executable')
+    with pytest.raises(ValueError, match='inventory changed'):
+        authenticate(saved)
+
+
+def poison_source_cache(path):
+    path.write_text('value = 9\n')
+    bytecode = py_compile.compile(str(path), doraise=True)
+    cached_stat = path.stat()
+    path.write_text('value = 1\n')
+    os.utime(path, ns=(cached_stat.st_atime_ns, cached_stat.st_mtime_ns))
+    return bytecode
+
+
+@pytest.mark.parametrize('entrypoint', ['worker', 'baseline', 'profile', 'promotion'])
+@pytest.mark.parametrize('changed', ['unchanged', 'source', 'root_source', 'root_bytecode',
+                                   'root_symlink'])
+def test_snapshot_entrypoints_authenticate_before_source_execution(env, tmp_path, monkeypatch,
+                                                                 entrypoint, changed):
+    from types import SimpleNamespace
+    from scripts import promote as cli
+    from src.iteration import jobs, pack_transport, retrieval_compare, retrieval_profile
+    source = tmp_path / 'framework'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src/source_only_fixture.py').write_text('value = 1\n')
+    directory = env.root / 'experiments/source-only'
+    snapshot = runtime.freeze(directory, root=source)
+    path = snapshot / 'src/source_only_fixture.py'
+    bytecode = runtime.Path(poison_source_cache(path))
+    original_cache = bytecode.read_bytes()
+    if changed == 'source':
+        path.write_text('value = 2\n')
+    elif changed != 'unchanged':
+        injected = tmp_path / 'yaml.py'
+        injected.write_text('raise RuntimeError("unlisted root code executed")\n')
+        if changed == 'root_source':
+            (snapshot / 'yaml.py').write_bytes(injected.read_bytes())
+        elif changed == 'root_bytecode':
+            py_compile.compile(str(injected), cfile=str(snapshot / 'yaml.pyc'), doraise=True)
+        else:
+            (snapshot / 'yaml.py').symlink_to(injected)
+    previous = sys.path.copy(), sys.pycache_prefix, sys.dont_write_bytecode
+    events = []
+
+    def execute_source(*args):
+        events.append('executed')
+        assert sys.path[0] == str(snapshot)
+        assert sys.pycache_prefix is not None and sys.dont_write_bytecode
+        spec = importlib.util.spec_from_file_location('entrypoint_fixture', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.value == 1
+        if entrypoint == 'worker':
+            assert args[0].timeout_seconds == 0
+        return 'source-result'
+
+    if entrypoint == 'worker':
+        monkeypatch.setattr(jobs, 'directory', lambda job: directory)
+        monkeypatch.setattr(runtime, 'verify', lambda descriptor: snapshot)
+        monkeypatch.setattr(runtime, 'require_current', lambda directory: None)
+        monkeypatch.setattr(pack_transport, 'snapshot_generation', lambda *args: 'fewshot')
+        monkeypatch.setattr(pack_transport, 'dispatch_worker', execute_source)
+        monkeypatch.setattr(sys, 'argv', ['pack_transport', '--snapshot', str(snapshot),
+            '--instance', env.root.name, '--job', 'source-only', '--kind', 'experiment', '--workers', '1'])
+        invoke = pack_transport.main
+    elif entrypoint == 'baseline':
+        monkeypatch.setattr(retrieval_compare, '_authenticated_baseline', execute_source)
+        invoke = lambda: retrieval_compare._worker_baseline(SimpleNamespace(archive=snapshot))
+    elif entrypoint == 'profile':
+        monkeypatch.setattr(retrieval_profile, '_frozen_authenticated', execute_source)
+        invoke = lambda: retrieval_profile.frozen(SimpleNamespace(snapshot=snapshot))
+    else:
+        monkeypatch.setattr(cli, 'execute', execute_source)
+        invoke = lambda: cli.main(['judge', '--exp', 'source-only',
+            '--threshold-reason', 'explicit revised threshold', '--evidence-runtime', str(snapshot)])
+    if changed != 'unchanged':
+        reason = ('source changed' if changed == 'source' else
+                  'symlinks' if changed == 'root_symlink' else 'inventory changed')
+        with pytest.raises(ValueError, match=reason):
+            invoke()
+        assert events == []
+    else:
+        invoke()
+        assert events == ['executed']
+    assert (sys.path, sys.pycache_prefix, sys.dont_write_bytecode) == previous
+    assert bytecode.read_bytes() == original_cache
+
+
+@pytest.mark.parametrize('loader', ['import', 'spec'])
+def test_snapshot_source_imports_never_execute_historical_bytecode(env, tmp_path, monkeypatch, loader):
+    from src.iteration.runtime_auth import authenticate, source_only_imports
+    source = tmp_path / 'framework'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src/source_only_fixture.py').write_text('value = 1\n')
+    saved = runtime.freeze(env.root / 'jobs/frozen', root=source)
+    path = saved / 'src/source_only_fixture.py'
+    bytecode = poison_source_cache(path)
+    cached_bytes = runtime.Path(bytecode).read_bytes()
+    authenticate(saved)
+    spec = importlib.util.spec_from_file_location('poisoned_fixture', path)
+    poisoned = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(poisoned)
+    assert poisoned.value == 9
+    monkeypatch.syspath_prepend(str(path.parent))
+    previous = sys.pycache_prefix, sys.dont_write_bytecode
+    try:
+        with source_only_imports():
+            assert sys.dont_write_bytecode
+            if loader == 'import':
+                module = importlib.import_module('source_only_fixture')
+            else:
+                spec = importlib.util.spec_from_file_location('source_only_fixture', path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            assert module.value == 1
+        assert (sys.pycache_prefix, sys.dont_write_bytecode) == previous
+        assert runtime.Path(bytecode).read_bytes() == cached_bytes
+    finally:
+        sys.modules.pop('source_only_fixture', None)
+
+
+def test_external_runtime_driver_executes_source_not_matching_bytecode(tmp_path):
+    from src.iteration.pack_transport import load_external_module
+    path = tmp_path / 'driver.py'
+    path.write_text('value = 1\n')
+    poison_source_cache(path)
+    assert load_external_module('authenticated_driver_fixture', path).value == 1
 
 
 def test_archived_code_does_not_bless_changed_data_or_missing_evidence(env, tmp_path):
@@ -104,6 +271,7 @@ def test_threshold_cli_uses_verified_frozen_executor(env, monkeypatch):
 
 
 def test_threshold_cli_rejects_wrong_executor_and_changed_snapshot(env, monkeypatch):
+    from contextlib import nullcontext
     from scripts import promote as cli
     directory = env.root / 'experiments/completed'
     directory.mkdir(parents=True)
@@ -112,6 +280,7 @@ def test_threshold_cli_rejects_wrong_executor_and_changed_snapshot(env, monkeypa
     monkeypatch.setattr(runtime, 'verify', lambda path: env.root / 'runtimes/original')
     monkeypatch.setattr(cli, 'review_policy', lambda: pytest.fail('must not load new policy'))
     monkeypatch.setattr(cli.sys, 'path', list(cli.sys.path))
+    monkeypatch.setattr(cli, 'snapshot_imports', lambda path: nullcontext())
     args = ['judge', '--exp', 'completed', '--threshold-reason', '用户修改为5']
     with pytest.raises(ConfigError, match='原冻结执行器'):
         cli.main([*args, '--evidence-runtime', str(env.root / 'wrong')])

@@ -74,18 +74,13 @@ def verify_archive(root, *, check_environment=True):
     archives before any import; environment pinning stays opt-in.
     """
     root = Path(root)
-    value = json.loads((root / 'manifest.json').read_text())
-    if digest(value) != root.name:
-        raise ConfigError('runtime content identifier changed')
+    from .runtime_auth import authenticate
+    try:
+        value = authenticate(root)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise ConfigError(str(exc)) from exc
     if check_environment and environment() != value['environment']:
         raise ConfigError('runtime interpreter or dependency versions changed; use the pinned environment')
-    if value.get('settings_sha256') is not None and \
-            sha256_file(root / 'settings.snapshot.yaml') != value['settings_sha256']:
-        raise ConfigError('frozen instance settings changed')
-    for name, expected in value['files'].items():
-        p = root / name
-        if Path(name).is_absolute() or '..' in Path(name).parts or p.is_symlink() or sha256_file(p) != expected:
-            raise ConfigError('runtime source changed')
     return root
 
 

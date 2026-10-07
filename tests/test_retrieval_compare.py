@@ -45,18 +45,19 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def make_fake_archive(root: Path) -> Path:
+def make_fake_archive(root: Path, *, source='legacy = True\n') -> Path:
     """假归档：manifest 摘要 == 目录名、含旧代 few_shot.py、真实文件字节哈希。"""
     staging = root / '.staging-archive'
     (staging / 'src' / 'generator').mkdir(parents=True)
     (staging / 'scripts').mkdir()
     (staging / 'src' / '__init__.py').write_text('')
     (staging / 'src' / 'generator' / '__init__.py').write_text('')
-    (staging / 'src' / 'generator' / 'few_shot.py').write_text('legacy = True\n')
+    (staging / 'src' / 'generator' / 'few_shot.py').write_text(source)
     (staging / 'scripts' / 'run.py').write_text('legacy = True\n')
     (staging / 'settings.snapshot.yaml').write_text('evaluation: {}\n')
-    value = {'files': {'src/generator/few_shot.py': _sha256(staging / 'src/generator/few_shot.py'),
-                       'scripts/run.py': _sha256(staging / 'scripts/run.py')},
+    value = {'files': {str(path.relative_to(staging)): _sha256(path)
+                       for folder in ('src', 'scripts')
+                       for path in (staging / folder).rglob('*') if path.is_file()},
              'settings_sha256': _sha256(staging / 'settings.snapshot.yaml')}
     archive = root / digest(value)
     staging.rename(archive)
@@ -174,8 +175,7 @@ class PersonaFewShotRetriever:
 
 def test_worker_baseline_loads_archived_few_shot_in_isolated_process(tmp_path):
     """真子进程：归档 cwd + sys.path 首位加载假归档自己的 few_shot.py。"""
-    archive = make_fake_archive(tmp_path)
-    (archive / 'src' / 'generator' / 'few_shot.py').write_text(ARCHIVED_FEW_SHOT)
+    archive = make_fake_archive(tmp_path, source=ARCHIVED_FEW_SHOT)
     make_cases(tmp_path / 'cases.jsonl', count=1)
     command = retrieval_compare.worker_command('baseline', pool=tmp_path / 'pool.jsonl',
                                                cases_file=tmp_path / 'cases.jsonl', count=1,

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -112,7 +113,15 @@ def _load_worker_cases(path: Path, count: int) -> list[dict]:
 def _worker_baseline(args) -> list:
     """旧基准：归档 cwd + sys.path 首位加载归档自己的 few_shot（纯内存）。"""
     archive = Path(args.archive).resolve()
-    sys.path.insert(0, str(archive))
+    path = Path(__file__).with_name('pack_transport.py')
+    spec = importlib.util.spec_from_file_location('_retrieval_compare_transport', path)
+    transport = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), 'exec'), transport.__dict__)
+    with transport.authenticated_snapshot_imports(archive):
+        return _authenticated_baseline(args, archive)
+
+
+def _authenticated_baseline(args, archive):
     from src.generator import few_shot  # noqa: F401  归档副本，非活树
     if Path(few_shot.__file__).resolve().is_relative_to(archive) is False:
         raise RuntimeError(f'baseline worker must load archived few_shot, got {few_shot.__file__}')

@@ -65,6 +65,12 @@ def check_code(args, report):
     if args.full or args.tests:
         report.run('regression', lambda: command(['-m', 'pytest', '-q', '-p', 'no:cacheprovider',
                                                   *(args.tests or [])]))
+    if getattr(args, 'ranking_profile', False):
+        from src.iteration.retrieval_profile import measure_ranking
+        report.run('ranking_kernel_profile', measure_ranking)
+    if getattr(args, 'eligibility_profile', False):
+        from src.iteration.retrieval_profile import measure_eligibility
+        report.run('eligibility_kernel_profile', lambda: measure_eligibility(repeats=args.eligibility_repeats))
     if args.demo_output:
         report.run('offline_demo', lambda: command(['scripts/offline_demo.py', '--output', args.demo_output]))
 
@@ -150,6 +156,16 @@ def check_experiment(args, report):
         report.run('registered_results', registry)
         return
     directory = experiment.load_experiment(args.exp)
+    fixed_report = (getattr(args, 'reply_model_report', False) and args.gate == 'development'
+        and experiment.spec_of(directory).get('dataset') == 'fixed_test')
+    def completion():
+        state = experiment.state_of(directory)
+        if state.get('status') != 'finished':
+            raise ConfigError('固定实验尚未完成；当前报告仅为进度')
+        metrics = state.get('metrics', {})
+        record_contract.validate_completion(directory, metrics)
+        report.value['metrics'] = metrics
+        return {'completion_passed': True, 'note': '只复核固定题单及逐题汇总，不执行开发晋级或生产采用'}
     def evidence():
         spec, metrics = gates.evidence(directory)
         record_contract.validate_completion(directory, experiment.state_of(directory).get('metrics', {}))
@@ -163,7 +179,8 @@ def check_experiment(args, report):
         if decision['verdict'] != 'merge_to_iteration_baseline':
             raise ConfigError(decision['reason'])
         return {'evidence_passed': True, 'note': '只核验开发证据；实际晋级仍由 promote 重新核验当前指针'}
-    report.run(args.gate, evidence)
+    report.run('fixed_completion' if fixed_report else args.gate,
+        completion if fixed_report else evidence)
     if getattr(args, 'reply_model_report', False):
         from src.iteration.reply_model_report import summarize
         report.run('reply_model_comparison', lambda: summarize(directory,
@@ -254,6 +271,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', help='可选 JSON 报告路径（不可覆盖既有文件）')
     sub = parser.add_subparsers(dest='mode', required=True)
+    transport = sub.add_parser('codex-transport', help='HTTP Judge 传输检查；仅 --live 发公共探针')
+    transport.add_argument('--live', action='store_true')
+    transport.add_argument('--model', default='gpt-5.6-luna')
+    transport.add_argument('--timeout-seconds', type=float, default=180)
+    generation = sub.add_parser('llm-transport', help='生成连接诊断；HEAD 不带密钥，--live 每模型/路径仅发一次公共探针')
+    generation.add_argument('--instance', required=True)
+    generation.add_argument('--exp', required=True)
+    generation.add_argument('--route', choices=['configured', 'direct', 'both'], default='configured')
+    generation.add_argument('--live', action='store_true')
+    generation.add_argument('--timeout-seconds', type=float, default=15)
     code = sub.add_parser('code', help='改框架后：规则、文档及所选回归；公开发布检查按需启用')
     scope = code.add_mutually_exclusive_group()
     scope.add_argument('--staged', action='store_true')
@@ -263,6 +290,12 @@ def main(argv=None):
     tests.add_argument('--tests', nargs='+', help='相关测试文件；省略不运行 pytest')
     tests.add_argument('--full', action='store_true', help='运行全部离线回归')
     code.add_argument('--demo-output', help='另运行合成演示；输出目录须为空')
+    code.add_argument('--ranking-profile', action='store_true',
+                      help='离线比较参考稳定排序与当前排序内核；合成输入，不代表实验整体速度')
+    code.add_argument('--eligibility-profile', action='store_true',
+                      help='离线交替比较 SQLite 资格缓存的冷/热两路耗时；不代表实验整体速度')
+    code.add_argument('--eligibility-repeats', type=int, default=5,
+                      help='每组资格缓存对照的重复次数（默认 5）；仅用于离线微基准')
     wiki = sub.add_parser('wiki', help='核对 Wiki 批次产物及已知转发称呼归属问题；不生成事实')
     wiki.add_argument('--batch', action='append', required=True, type=Path)
     wiki.add_argument('--require-complete', action='store_true', help='批次仍有未完成任务时检查失败')
@@ -322,6 +355,22 @@ def main(argv=None):
             report.run('wiki_artifacts', lambda: require_valid(args.batch,
                 require_complete=args.require_complete, catalog=args.catalog))
         report.value.update(evaluation_started=False, model_requests_prohibited=True)
+    elif args.mode == 'codex-transport':
+        from src.judge import codex_transport
+        report.run('codex_http_transport', lambda: codex_transport.probe(args.model,
+            timeout_seconds=args.timeout_seconds) if args.live else
+            codex_transport.provider_config({'layers': []}))
+        report.value.update(evaluation_started=False, model_requests_prohibited=not args.live,
+                            project_case_count=0)
+    elif args.mode == 'llm-transport':
+        from src.iteration import generation_transport
+        if report.run('generation_connection', lambda: generation_transport.probe_experiment(
+                args.instance, args.exp, route=args.route, live=args.live,
+                timeout_seconds=args.timeout_seconds)):
+            if not report.value['checks'][-1]['detail']['healthy']:
+                report.failure('generation_connection_health', RuntimeError('生成连接探针失败；禁止盲目续跑'))
+        report.value.update(evaluation_started=False, model_requests_prohibited=not args.live,
+                            project_case_count=0)
     else:
         from src.iteration import versions
         from src.config import ConfigError

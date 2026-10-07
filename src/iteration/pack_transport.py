@@ -35,7 +35,7 @@ def live_transport_profile():
 
 
 def live_retrieval_cache():
-    path = Path(__file__).resolve().parents[1] / 'generator' / 'retrieval_cache.py'
+    path = Path(__file__).resolve().parents[1] / 'generator' / 'recall_reuse.py'
     spec = importlib.util.spec_from_file_location('_digital_human_retrieval_cache', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -320,6 +320,10 @@ def timeout_floor(client_type, seconds):
         client_type.__init__ = original
 
 
+def worker_timeout_floor(client_type, seconds):
+    return nullcontext() if seconds == 0 else timeout_floor(client_type, seconds)
+
+
 @contextmanager
 def feature_response_cache_validation():
     """Reject cached responses using the frozen extractor's own evidence rules."""
@@ -440,6 +444,7 @@ def fewshot_profile_instrument(profile, fewshot):
     Legacy snapshots keep using transport_profile.instrument, which patches the
     old PersonaFewShotRetriever; modern archives do not contain that class.
     """
+    from src import tracing
     originals = []
 
     def replace(owner, name, wrapper):
@@ -456,13 +461,41 @@ def fewshot_profile_instrument(profile, fewshot):
             return call
         return wrap
 
+    def approval(original):
+        @wraps(original)
+        def call(session, *args, **kwargs):
+            result = original(session, *args, **kwargs)
+            engine = getattr(session, '_engine', None)
+            if engine is not None:
+                profile.record('recall_engine_' + type(engine).__name__, 0.0)
+            return result
+        return call
+
+    def model_step(original):
+        @wraps(original)
+        @contextmanager
+        def call(kind, request):
+            span = profile.span('model_' + kind) if kind in {'llm', 'codex'} else nullcontext()
+            with span, original(kind, request) as value:
+                yield value
+        return call
+
     try:
         replace(fewshot.RecallSession, 'is_approved', measured('history_pool_approval'))
+        replace(fewshot.RecallSession, 'is_approved', approval)
         replace(fewshot.RecallSession, 'retrieve', measured('retrieval_compute'))
+        replace(fewshot.RecallSession, '_candidate_rows', measured('retrieval_candidate_selection'))
+        if hasattr(fewshot.RecallSession, '_sparse_candidates'):
+            replace(fewshot.RecallSession, '_sparse_candidates', measured('retrieval_sparse_selection'))
+        for engine in (fewshot.InMemoryRecallEngine, fewshot.SqliteIndexedRecallEngine):
+            replace(engine, 'excluded_ids', measured('retrieval_excluded_ids'))
+            replace(engine, 'term_features', measured('retrieval_term_features'))
+        replace(fewshot.rank, 'score_and_select', measured('retrieval_rank'))
         replace(fewshot.RecallSession, 'render_selected', measured('retrieval_render'))
+        replace(tracing, 'step', model_step)
         yield
     finally:
-        for owner, name, original in originals:
+        for owner, name, original in reversed(originals):
             setattr(owner, name, original)
 
 
@@ -470,16 +503,10 @@ def launch(directory, *, instance, job, workers, seconds, kind='pack', feature_o
     from . import runtime, versions
     seconds = timeout_value(seconds)
     snapshot = runtime.verify(Path(directory) / 'runtime.json')
-    # Fresh interpreter imports only the verified original executor. No snapshot
-    # file, model version, request body or checkpoint is rewritten.
     transport = Path(__file__).resolve()
     if snapshot_generation(snapshot, runtime) == 'fewshot':
-        # Modern snapshots are self-contained: their own transport assembles the
-        # archived new packages, so the live tree is never imported. The frozen
-        # entry ships at its recorded source path (same layout as a5118947-style
-        # archives keep src/iteration/pack_transport.py).
-        transport = snapshot / 'src' / 'iteration' / 'pack_transport.py'
-        if not transport.is_file():
+        archived_transport = snapshot / 'src' / 'iteration' / 'pack_transport.py'
+        if not archived_transport.is_file():
             raise runtime.ConfigError('modern snapshot is missing src/iteration/pack_transport.py')
     command = [sys.executable, '-B', '-u', str(transport),
                '--snapshot', str(snapshot), '--instance', instance, '--job', job,
@@ -615,6 +642,110 @@ def promote_saved(directory):
     return pointers
 
 
+def load_external_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(Path(path).read_bytes(), str(path), 'exec'), module.__dict__)
+    return module
+
+
+def authenticate_snapshot(snapshot):
+    module = load_external_module('_digital_human_runtime_auth',
+                                  Path(__file__).with_name('runtime_auth.py'))
+    return module.authenticate(snapshot)
+
+
+def snapshot_source_imports():
+    module = load_external_module('_digital_human_runtime_source_imports',
+                                  Path(__file__).with_name('runtime_auth.py'))
+    return module.source_only_imports()
+
+
+@contextmanager
+def authenticated_snapshot_imports(snapshot):
+    authenticate_snapshot(snapshot)
+    previous_path = sys.path.copy()
+    with snapshot_source_imports():
+        sys.path.insert(0, str(snapshot))
+        try:
+            yield
+        finally:
+            sys.path[:] = previous_path
+
+
+def install_judge_transport(snapshot, directory, driver):
+    from src.judge import corrected
+    adapter = load_external_module('_digital_human_codex_transport',
+        Path(__file__).resolve().parents[1] / 'judge' / 'codex_transport.py')
+    authentication = load_external_module('_digital_human_runtime_auth_receipt',
+                                         Path(__file__).with_name('runtime_auth.py'))
+    adapter.install(corrected, expected_root=snapshot,
+        receipt_directory=directory / 'codex_transport_overrides', provenance={
+            'bootstrap_sha256': authentication.file_digest(__file__),
+            'archive_driver_sha256': authentication.file_digest(driver.__file__),
+            'snapshot_bytecode_policy': 'empty_external_cache_prefix_v1',
+            'runtime_ref': snapshot.name})
+
+
+def install_modern_recall_transport(snapshot, directory, driver):
+    from src.config import ConfigError
+    from src.generator import fewshot, shared_history
+    from src.iteration.storage import write_once_json
+    if any(not Path(module.__file__).resolve().is_relative_to(snapshot.resolve())
+           for module in (fewshot, shared_history)):
+        raise ConfigError('modern recall transport requires authenticated archive modules')
+    reuse = live_retrieval_cache()
+    authentication = load_external_module('_digital_human_recall_auth',
+                                         Path(__file__).with_name('runtime_auth.py'))
+    receipt = dict(schema=1, kind='modern_exact_recall_transport', runtime_ref=snapshot.name,
+        bootstrap_sha256=authentication.file_digest(__file__),
+        archive_driver_sha256=authentication.file_digest(driver.__file__),
+        recall_reuse_sha256=authentication.file_digest(reuse.__file__),
+        recall_reuse_mode=reuse.MODE, capacity=reuse.CAPACITY, max_bytes=reuse.MAX_BYTES,
+        source_guards='pool_and_history_before_and_after_including_hits_v1',
+        model_timing='recorded_transport_attempts_v1', created_at=time.time(), pid=os.getpid())
+    write_once_json(directory / 'recall_transport_overrides' / (uuid.uuid4().hex + '.json'), receipt)
+
+    @contextmanager
+    def instrument(profile, package):
+        with fewshot_profile_instrument(profile, package), \
+                reuse.exact_retrieval_calls(shared_history, profile=profile):
+            yield
+
+    driver.fewshot_profile_instrument = instrument
+
+
+@contextmanager
+def generation_routes(snapshot, directory, driver):
+    if not os.environ.get('DH_LLM_DIRECT_HOSTS'):
+        yield
+        return
+    adapter = load_external_module('_digital_human_generation_transport',
+                                   Path(__file__).with_name('generation_transport.py'))
+    authentication = load_external_module('_digital_human_generation_auth',
+                                         Path(__file__).with_name('runtime_auth.py'))
+    with adapter.worker_routes(snapshot, directory, provenance={
+            'bootstrap_sha256': authentication.file_digest(__file__),
+            'archive_driver_sha256': authentication.file_digest(driver.__file__),
+            'generation_transport_sha256': authentication.file_digest(adapter.__file__)}):
+        yield
+
+
+def dispatch_worker(args, snapshot, directory, generation):
+    if generation == 'fewshot':
+        driver = load_external_module('_digital_human_authenticated_transport',
+                                     snapshot / 'src/iteration/pack_transport.py')
+        if args.timeout_seconds == 0:
+            driver.timeout_floor = worker_timeout_floor
+        install_judge_transport(snapshot, directory, driver)
+        install_modern_recall_transport(snapshot, directory, driver)
+        with generation_routes(snapshot, directory, driver):
+            return driver._run_modern(args, snapshot, directory)
+    if os.environ.get('DH_LLM_DIRECT_HOSTS'):
+        raise ValueError('generation direct routes require the authenticated modern worker')
+    return _run_legacy(args, snapshot, directory)
+
+
 def main():
     # A long-running parent may have imported an older launch function. Resolve
     # the default here too, before frozen load_settings() looks under its ROOT.
@@ -631,7 +762,8 @@ def main():
     parser.add_argument('--kind', choices=['pack', 'experiment', 'training', 'promotion', 'features'], default='pack')
     parser.add_argument('--feature-output', type=Path)
     parser.add_argument('--workers', type=int, required=True)
-    parser.add_argument('--timeout-seconds', type=timeout_value, required=True)
+    parser.add_argument('--timeout-seconds', type=timeout_value, default=0,
+                        help='Optional wait floor; omitted preserves frozen client timeouts')
     parser.add_argument('--time-slice-seconds', type=time_slice_value)
     parser.add_argument('--unattempted-first', action='store_true',
                         help='Run untouched experiment cases before failed retries within a time slice')
@@ -643,23 +775,18 @@ def main():
     if args.time_slice_seconds is not None and args.kind != 'experiment':
         parser.error('time slices require an experiment worker')
     snapshot = Path(args.snapshot).resolve()
-    sys.path.insert(0, str(snapshot))
-    from src.config import valid_name
-    from src.iteration import runtime, versions
-    versions.switch_instance(valid_name(args.instance))
-    from src.iteration import jobs
-    directory = jobs.directory({'kind': 'experiment' if args.kind in {'promotion', 'features'} else args.kind,
-                                'id': valid_name(args.job)})
-    verified = runtime.verify(directory / 'runtime.json')
-    if verified.resolve() != snapshot:
-        raise RuntimeError('timeout worker must use the recorded frozen runtime')
-    runtime.require_current(directory)
-    # Authenticated dispatch (design §2.3a): decide the snapshot generation from
-    # the verified manifest before any import that could reach few_shot.
-    if snapshot_generation(verified, runtime) == 'fewshot':
-        _run_modern(args, snapshot, directory)
-        return
-    _run_legacy(args, snapshot, directory)
+    with authenticated_snapshot_imports(snapshot):
+        from src.config import valid_name
+        from src.iteration import runtime, versions
+        versions.switch_instance(valid_name(args.instance))
+        from src.iteration import jobs
+        directory = jobs.directory({'kind': 'experiment' if args.kind in {'promotion', 'features'} else args.kind,
+                                    'id': valid_name(args.job)})
+        verified = runtime.verify(directory / 'runtime.json')
+        if verified.resolve() != snapshot:
+            raise RuntimeError('timeout worker must use the recorded frozen runtime')
+        runtime.require_current(directory)
+        dispatch_worker(args, snapshot, directory, snapshot_generation(verified, runtime))
 
 
 def _run_legacy(args, snapshot, directory):
@@ -739,7 +866,7 @@ def _run_legacy(args, snapshot, directory):
                                                                      disk_rows=disk_history)
         feature_response_reuse = feature_response_cache_validation() if feature_validation else nullcontext()
         with profile, profile.admission(history_memory_lane(directory, required=needs_history), 'history_lane_wait'), \
-                timeout_floor(ChatClient, args.timeout_seconds), \
+                worker_timeout_floor(ChatClient, args.timeout_seconds), \
                 archived_runtime_paths(runtime), archived_gbdt_paths(gbdt_evidence, runtime), \
                 history_feature_cache(few_shot), history_storage, source_read_reuse, retrieval_reuse, \
                 feature_response_reuse, material_validation_reuse, \
@@ -808,7 +935,7 @@ def _run_modern(args, snapshot, directory):
         material_validation_reuse = validation.verified_materials(profile=profile)
         feature_response_reuse = feature_response_cache_validation() if feature_validation else nullcontext()
         with profile, profile.admission(history_memory_lane(directory, required=needs_history), 'history_lane_wait'), \
-                timeout_floor(ChatClient, args.timeout_seconds), \
+                worker_timeout_floor(ChatClient, args.timeout_seconds), \
                 archived_runtime_paths(runtime), archived_gbdt_paths(gbdt_evidence, runtime), \
                 history_feature_cache(fewshot.rank), feature_response_reuse, material_validation_reuse, \
                 fewshot_profile_instrument(profile, fewshot), \

@@ -14,6 +14,45 @@ from src.generator import disk_history, disk_source_reads, few_shot, retrieval_c
 from src.iteration import pack_transport, transport_profile
 
 
+def test_legacy_adapter_reexports_formal_recall_reuse():
+    from src.generator import recall_reuse
+    assert retrieval_cache.exact_retrieval_calls is recall_reuse.exact_retrieval_calls
+    assert retrieval_cache.CallCache is recall_reuse.CallCache
+
+
+@pytest.mark.parametrize('index_policy', ['use_if_present', 'build'])
+def test_modern_recall_session_reuses_exact_calls_with_guards(tmp_path, monkeypatch, index_policy):
+    from src.generator import fewshot, recall_reuse
+    source = historical(tmp_path / 'data')
+    pool = source.directory / 'fewshot_pool.jsonl'
+    inputs = {str(path.resolve()): sha256_file(path) for path in (pool, pool.with_name('report.json'))}
+    session = shared_history.PinnedRetriever(
+        lambda path: fewshot.open_session(path, index_policy=index_policy), pool, inputs)
+    request = next(queries(source))
+    expected = session.retrieve(**request)
+    calls = []
+    original = fewshot.RecallSession.retrieve
+
+    def retrieve(instance, **kwargs):
+        calls.append(kwargs)
+        return original(instance, **kwargs)
+
+    monkeypatch.setattr(fewshot.RecallSession, 'retrieve', retrieve)
+    try:
+        with recall_reuse.exact_retrieval_calls(shared_history):
+            actual = session.retrieve(**request)
+            assert actual == expected
+            actual[0]['id'] = 'mutated'
+            assert session.retrieve(**request) == expected
+            assert len(calls) == 1
+            with pool.open('a') as stream:
+                stream.write('\n')
+            with pytest.raises(ConfigError, match='文件发生变化'):
+                session.retrieve(**request)
+    finally:
+        session._original.close()
+
+
 class Guard:
     def __init__(self):
         self.changed = False

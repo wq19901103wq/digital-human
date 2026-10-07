@@ -40,6 +40,8 @@ class RecallSession:
         # 无需旧实现的 mtime 失效分支）。
         self._row_situation_tag_cache: dict[str, set[str]] = {}
         self._row_situation_profile_cache: dict[tuple[str, bool], dict[str, str]] = {}
+        self._row_latest_profile_cache: dict[int, dict[str, str]] = {}
+        self._row_sparse_eligibility_cache: dict[int, tuple[bool, bool | None]] = {}
         # 受控 identity 属性（适配器层 retrieval_cache 键扫描兼容，见模块文档）。
         # 属性在构造时从 PreparedPool 快照；与旧 PersonaFewShotRetriever 一样
         # 逐题路径不重读这些值。
@@ -148,12 +150,9 @@ class RecallSession:
         candidates = (self._candidate_rows(is_group, q.query_situations, resolved_exclude_ids if pool.history_policy else None)
                       if use_situation else available(pool._rows_by_group.get(is_group, [])))
         if include_retrieval_features:
-            base_candidate_ids = {
-                str(row["id"]) for row in pool._rows_by_group.get(is_group, [])
-            }
             q.candidate_pool_situation_filtered = {
                 str(row["id"]) for row in candidates
-            } != base_candidate_ids
+            } != pool._row_ids_by_group.get(is_group, frozenset())
         if q.precise_situation:
             precise_candidates = available(pool._rows_by_group_precise_situation.get((is_group, q.precise_situation), []))
             if precise_candidates:
@@ -167,38 +166,54 @@ class RecallSession:
             q.candidate_pool_exhaustion_fallback = True
         if pool.avoid_concrete_examples_for_sparse_query and rank._is_sparse_turn(q.situation_query):
             is_brief_exclamation = "brief_exclamation" in q.query_situations
-            safe_candidates = [
-                row
-                for row in candidates
-                if not rank._has_strong_concrete_payload(row)
-                and (
-                    is_brief_exclamation
-                    or (
-                        not rank._has_context_bound_reply(row)
-                        and rank._has_portable_sparse_reply(row)
-                    )
-                )
-            ]
-            if not is_brief_exclamation and len(safe_candidates) < limit:
-                safe_ids = {str(row["id"]) for row in safe_candidates}
-                safe_candidates.extend(
-                    row
-                    for row in available(pool._rows_by_group.get(is_group, []))
-                    if str(row["id"]) not in safe_ids
-                    and not rank._has_strong_concrete_payload(row)
-                    and not rank._has_context_bound_reply(row)
-                    and rank._has_portable_sparse_reply(row)
-                )
-            candidates = safe_candidates
+            candidates = self._sparse_candidates(
+                candidates, is_group, limit, is_brief_exclamation,
+                resolved_exclude_ids if pool.history_policy else None,
+            )
             q.candidate_pool_sparse_portable = True
         indexed_features = self._engine.term_features(pool, q.query_terms)
         selected = rank.score_and_select(
             pool, q, candidates, indexed_features,
             (self._row_situation_tag_cache, self._row_situation_profile_cache),
+            latest_profile_cache=self._row_latest_profile_cache,
         )
         # 设计 §4 返回边界：先递归解冻（I10 冻结值不可 deepcopy）为独立普通
         # list/dict 容器，与池内部零共享；嵌套修改不污染池内状态。
         return [thaw_value(dict(row)) for row in selected]
+
+    def _sparse_candidates(self, candidates: list[dict[str, Any]], is_group: bool,
+                           limit: int, is_brief_exclamation: bool,
+                           excluded: set[str] | None = None) -> list[dict[str, Any]]:
+        safe_candidates = [
+            row for row in candidates if self._sparse_eligible(row, is_brief_exclamation)
+        ]
+        if not is_brief_exclamation and len(safe_candidates) < limit:
+            safe_ids = {str(row['id']) for row in safe_candidates}
+            safe_candidates.extend(
+                row for row in self._pool._rows_by_group.get(is_group, [])
+                if (excluded is None or str(row['id']) not in excluded)
+                and str(row['id']) not in safe_ids
+                and self._sparse_eligible(row, False)
+            )
+        return safe_candidates
+
+    def _sparse_eligible(self, row, is_brief_exclamation: bool) -> bool:
+        row_key = id(row)
+        cached = self._row_sparse_eligibility_cache.get(row_key)
+        if cached is None:
+            brief_eligible = not rank._has_strong_concrete_payload(row)
+            cached = (brief_eligible, None if brief_eligible else False)
+            self._row_sparse_eligibility_cache[row_key] = cached
+        brief_eligible, portable_eligible = cached
+        if is_brief_exclamation or not brief_eligible:
+            return brief_eligible
+        if portable_eligible is None:
+            portable_eligible = (
+                not rank._has_context_bound_reply(row)
+                and rank._has_portable_sparse_reply(row)
+            )
+            self._row_sparse_eligibility_cache[row_key] = (brief_eligible, portable_eligible)
+        return portable_eligible
 
     def _candidate_rows(self, is_group: bool, situations: set[str], excluded=None) -> list[dict[str, Any]]:
         pool = self._pool
