@@ -121,6 +121,28 @@ def test_local_direct_access_needs_no_credentials(private_server, method, header
         assert response.headers.get('WWW-Authenticate') is None
 
 
+def test_local_link_navigation_from_another_app_needs_no_credentials(private_server):
+    base, _, credentials = private_server
+    credentials.unlink()
+    with urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml', headers={
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Dest': 'document'})) as response:
+        assert response.status == 200
+        assert response.headers.get('WWW-Authenticate') is None
+
+
+def test_forwarded_link_navigation_still_requires_auth(private_server):
+    base, _, _ = private_server
+    with pytest.raises(HTTPError) as caught:
+        urlopen(Request(base + '/instances/demo/share/s-0005/content/wiki.xml', headers={
+            'X-Forwarded-For': '127.0.0.1',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Dest': 'document'}))
+    assert caught.value.code == 401
+
+
 @pytest.mark.parametrize('headers', [
     {'Host': 'public.example'}, {'Host': 'localhost.evil.example'},
     {'Forwarded': 'for=127.0.0.1'}, {'X-Forwarded-Proto': 'https'},

@@ -74,7 +74,12 @@ class _AuditGuardHandler(http.server.SimpleHTTPRequestHandler):
         if len(hosts) != 1 or hosts[0].lower() not in allowed:
             return False
         if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
-            return False
+            # Opening a local link from another app is a cross-site document
+            # navigation. Keep cross-site subresource/API requests protected.
+            if not (self.command == 'GET'
+                    and self.headers.get('Sec-Fetch-Mode', '').lower() == 'navigate'
+                    and self.headers.get('Sec-Fetch-Dest', '').lower() == 'document'):
+                return False
         origins = self.headers.get_all('Origin', [])
         return not origins or origins == [f'http://{hosts[0]}']
 
