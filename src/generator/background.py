@@ -9,7 +9,7 @@ import json
 
 from .. import cache, tracing
 from ..config import ConfigError
-from ..bootstrap import wiki_prompt
+from ..bootstrap.wiki import wiki_prompt
 from ..judge.memory_dense import configured
 from ..judge.memory_search import SearchMemory, parse_plan
 from ..judge.wiki_lookup import diagnostic_projection

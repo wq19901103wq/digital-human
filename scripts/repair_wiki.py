@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap.wiki_repair import repair  # noqa: E402
+from src.bootstrap.wiki.wiki_repair import repair  # noqa: E402
 from src.config import load_settings  # noqa: E402
 
 

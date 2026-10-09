@@ -156,7 +156,7 @@ def check_experiment(args, report):
         report.run('registered_results', registry)
         return
     directory = experiment.load_experiment(args.exp)
-    fixed_report = (getattr(args, 'reply_model_report', False) and args.gate == 'development'
+    fixed_report = ((getattr(args, 'reply_model_report', False) or getattr(args, 'metrics_report', False)) and args.gate == 'development'
         and experiment.spec_of(directory).get('dataset') == 'fixed_test')
     def completion():
         state = experiment.state_of(directory)
@@ -184,6 +184,10 @@ def check_experiment(args, report):
     if getattr(args, 'reply_model_report', False):
         from src.iteration.reply_model_report import summarize
         report.run('reply_model_comparison', lambda: summarize(directory,
+            verified_metrics=report.value.get('metrics')))
+    if getattr(args, 'metrics_report', False):
+        from src.iteration.metrics import summarize
+        report.run('experiment_metrics', lambda: summarize(directory,
             verified_metrics=report.value.get('metrics')))
 
 
@@ -312,6 +316,8 @@ def main(argv=None):
     exp.add_argument('--gate', choices=['development', 'fixed-entry'], default='development')
     exp.add_argument('--reply-model-report', action='store_true',
                      help='附加群/私回复模型质量和耗时汇总；区分真实调用与缓存历史，不改变晋级门槛')
+    exp.add_argument('--metrics-report', action='store_true',
+                     help='附加通用逐题 Gen/Judge 耗时、缓存前证据、群/私质量和失败损耗；仅读保存记录')
     data = sub.add_parser('data', help='只读检查数据来源、会话切分及用途隔离；只输出聚合统计')
     data.add_argument('--instance', required=True)
     data.add_argument('--data', nargs='+', required=True)
@@ -350,7 +356,7 @@ def main(argv=None):
     if args.mode == 'code':
         check_code(args, report)
     elif args.mode == 'wiki':
-        from src.bootstrap.wiki_delivery import require_valid
+        from src.bootstrap.wiki.wiki_delivery import require_valid
         with offline():
             report.run('wiki_artifacts', lambda: require_valid(args.batch,
                 require_complete=args.require_complete, catalog=args.catalog))

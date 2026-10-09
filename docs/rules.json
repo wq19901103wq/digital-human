@@ -6,42 +6,42 @@
       "rule": "首页请求只渲染一次，不写静态副本；同次渲染复用实验列表、评估包和版本资产读取，缓存不跨请求或线程，下一次请求可见记录及资产变化。",
       "enforcement": "code",
       "code": ["src/dashboard/server.py", "src/dashboard/read_scope.py::scope", "src/dashboard/read_scope.py::once"],
-      "tests": ["tests/test_dashboard_performance.py::test_history_reads_each_spec_once_and_refreshes_changed_records", "tests/test_dashboard_performance.py::test_http_home_renders_once_without_writing_static_reports", "tests/test_dashboard_performance.py::test_shared_packs_and_assets_read_once_but_changes_are_not_hidden", "tests/test_dashboard_performance.py::test_read_scopes_are_concurrent_and_exceptions_do_not_leak_cached_values"]
+      "tests": ["tests/dashboard/test_dashboard_performance.py::test_history_reads_each_spec_once_and_refreshes_changed_records", "tests/dashboard/test_dashboard_performance.py::test_http_home_renders_once_without_writing_static_reports", "tests/dashboard/test_dashboard_performance.py::test_shared_packs_and_assets_read_once_but_changes_are_not_hidden", "tests/dashboard/test_dashboard_performance.py::test_read_scopes_are_concurrent_and_exceptions_do_not_leak_cached_values"]
     },
     {
       "id": "generator-case-concurrency",
       "rule": "生成器与 Judge 执行器均使用传入的 1–16 题并发；每线程独立生成及评分组件，完整历史索引在冻结输入保护下每进程仅加载一次；每题独立实录和补验轮次，主线程写入成功断点；续跑先核验冻结输入，仅跳过成功题。",
       "enforcement": "code",
       "code": ["src/iteration/runner.py::run_gen_experiment", "src/iteration/progress.py::ParallelCaseProgress", "scripts/iterate_branches.py::work"],
-      "tests": ["tests/test_resume_data.py::test_generator_rejects_invalid_workers_before_requests", "tests/test_resume_data.py::test_generator_parallelism_is_bounded_and_rounds_remain_isolated", "tests/test_resume_data.py::test_generator_workers_share_one_pinned_history_index", "tests/test_history_shared_retriever.py", "tests/test_resume_data.py::test_changed_case_cannot_be_skipped_on_resume", "tests/test_branches.py::test_worker_forwards_case_concurrency_to_both_runners"]
+      "tests": ["tests/iteration/test_resume_data.py::test_generator_rejects_invalid_workers_before_requests", "tests/iteration/test_resume_data.py::test_generator_parallelism_is_bounded_and_rounds_remain_isolated", "tests/iteration/test_resume_data.py::test_generator_workers_share_one_pinned_history_index", "tests/generator/test_history_shared_retriever.py", "tests/iteration/test_resume_data.py::test_changed_case_cannot_be_skipped_on_resume", "tests/iteration/test_branches.py::test_worker_forwards_case_concurrency_to_both_runners"]
     },
     {
       "id": "fewshot-model-reranking",
       "rule": "模型重排只使用经过历史时间与来源过滤的候选；当前输入不含目标答案。序号须唯一且属于召回候选；无效结果不缓存、不静默回退，缓存命中也检查来源。",
       "enforcement": "code",
       "code": ["src/generator/reranker.py::FewShotReranker", "src/generator/generator.py::ReplyGenerator"],
-      "tests": ["tests/test_fewshot_reranker.py::test_real_history_filtered_answers_hidden_and_cache_reused", "tests/test_fewshot_reranker.py::test_invalid_selections_never_cached_or_silently_fallback", "tests/test_fewshot_reranker.py::test_changed_sources_rejected_including_cache_hits"]
+      "tests": ["tests/generator/test_fewshot_reranker.py::test_real_history_filtered_answers_hidden_and_cache_reused", "tests/generator/test_fewshot_reranker.py::test_invalid_selections_never_cached_or_silently_fallback", "tests/generator/test_fewshot_reranker.py::test_changed_sources_rejected_including_cache_hits"]
     },
     {
       "id": "branch-accepted-development-fork",
       "rule": "并行新方向可显式继承同条件的已采用开发版；绑定来源分支及正式实验，核对材料、数据和完整补验净胜。拒绝未采用、过期或不一致的来源，不重签旧证据、不改变生产指针；新实验仍执行当前来源保护。",
       "enforcement": "code",
       "code": ["src/iteration/branches.py::_accepted_source", "src/iteration/branches.py::submit"],
-      "tests": ["tests/test_branches.py::test_fork_accepted_development_uses_common_control", "tests/test_branches.py::test_fork_rejects_invalid_development_receipt"]
+      "tests": ["tests/iteration/test_branches.py::test_fork_accepted_development_uses_common_control", "tests/iteration/test_branches.py::test_fork_rejects_invalid_development_receipt"]
     },
     {
       "id": "branch-development-stage-limit",
       "rule": "仅开发比较的分支通过原开发门槛后保留开发版，停止在固定准入与固定轮之前，不更改生产指针；后续同分支提案继承有收益的开发版。",
       "enforcement": "code",
       "code": ["src/iteration/branches.py::advance", "src/iteration/branches.py::set_stage_limit", "src/iteration/branches.py::promote_experiment"],
-      "tests": ["tests/test_branches.py::test_development_stage_limit_retains_winner_without_fixed_or_production", "tests/test_branches.py::test_direct_development_promotion_recovers_blocked_round"]
+      "tests": ["tests/iteration/test_branches.py::test_development_stage_limit_retains_winner_without_fixed_or_production", "tests/iteration/test_branches.py::test_direct_development_promotion_recovers_blocked_round"]
     },
     {
       "id": "development-frozen-failure-limit",
       "rule": "开发晋级与固定准入沿用冻结失败率上限；所有题目必须有最终记录，失败题单独计数并排除出有效对数，达到上限拒绝，成功分歧仍须完整独立补验，不改写已完成证据",
       "enforcement": "code",
       "code": ["src/iteration/gates.py::confirmed_metrics"],
-      "tests": ["tests/test_record_contract.py::test_development_gate_uses_frozen_failure_limit"]
+      "tests": ["tests/iteration/test_record_contract.py::test_development_gate_uses_frozen_failure_limit"]
     },
     {
       "id": "embedding-adoption-and-supplement",
@@ -54,12 +54,12 @@
         "src/iteration/draw_replay.py::SavedDrawReplay"
       ],
       "tests": [
-        "tests/test_embedding_adoption.py::test_resigned_weights_rejected",
-        "tests/test_embedding_adoption.py::test_nontraining_or_changed_inputs_rejected",
-        "tests/test_embedding_adoption.py::test_identical_encoded_inputs_tie_exactly",
-        "tests/test_embedding_adoption.py::test_distinct_encoded_inputs_keep_network_probability",
-        "tests/test_draw_replay.py::test_supplement_missing_rounds_is_paired_independent_and_opt_in",
-        "tests/test_draw_replay.py::test_supplement_cannot_replace_corrupt_evidence_or_initial"
+        "tests/iteration/test_embedding_adoption.py::test_resigned_weights_rejected",
+        "tests/iteration/test_embedding_adoption.py::test_nontraining_or_changed_inputs_rejected",
+        "tests/iteration/test_embedding_adoption.py::test_identical_encoded_inputs_tie_exactly",
+        "tests/iteration/test_embedding_adoption.py::test_distinct_encoded_inputs_keep_network_probability",
+        "tests/iteration/test_draw_replay.py::test_supplement_missing_rounds_is_paired_independent_and_opt_in",
+        "tests/iteration/test_draw_replay.py::test_supplement_cannot_replace_corrupt_evidence_or_initial"
       ]
     },
     {
@@ -75,11 +75,11 @@
         "src/iteration/embedding_tuning.py::formal_comparisons"
       ],
       "tests": [
-        "tests/test_embedding_judge.py::test_all_fields_embed_and_unknown_does_not_learn",
-        "tests/test_embedding_judge.py::test_shared_preparation_preserves_existing_learning_guards",
-        "tests/test_embedding_judge.py::test_shared_scores_swap_serialization_and_bn_eval",
-        "tests/test_embedding_judge.py::test_changed_batch_and_checkpoint_rejected_and_resume_reused",
-        "tests/test_embedding_judge.py::test_missing_independent_rounds_do_not_count_as_confirmation"
+        "tests/judge/test_embedding_judge.py::test_all_fields_embed_and_unknown_does_not_learn",
+        "tests/judge/test_embedding_judge.py::test_shared_preparation_preserves_existing_learning_guards",
+        "tests/judge/test_embedding_judge.py::test_shared_scores_swap_serialization_and_bn_eval",
+        "tests/judge/test_embedding_judge.py::test_changed_batch_and_checkpoint_rejected_and_resume_reused",
+        "tests/judge/test_embedding_judge.py::test_missing_independent_rounds_do_not_count_as_confirmation"
       ]
     },
     {
@@ -91,9 +91,9 @@
         "src/iteration/branch_packs.py::recover_terminal_failures"
       ],
       "tests": [
-        "tests/test_architecture_contracts.py::test_pack_nonterminal_errors_still_stop",
-        "tests/test_architecture_contracts.py::test_pack_terminal_format_failure_is_counted",
-        "tests/test_architecture_contracts.py::test_recover_legacy_terminal_failure_preserves_frozen_runtime"
+        "tests/dashboard/test_architecture_contracts.py::test_pack_nonterminal_errors_still_stop",
+        "tests/dashboard/test_architecture_contracts.py::test_pack_terminal_format_failure_is_counted",
+        "tests/dashboard/test_architecture_contracts.py::test_recover_legacy_terminal_failure_preserves_frozen_runtime"
       ]
     },
     {
@@ -109,16 +109,16 @@
         "src/iteration/branches.py::_fixed_job"
       ],
       "tests": [
-        "tests/test_check.py::test_failed_check_does_not_hide_other_failures",
-        "tests/test_check.py::test_offline_check_forbids_each_model_entrypoint",
-        "tests/test_check.py::test_changed_observations_rejected",
-        "tests/test_check.py::test_judge_aggregates_data_and_source_failures",
-        "tests/test_check.py::test_real_material_guard_rejects_forged_assets",
-        "tests/test_check.py::test_experiment_missing_independent_votes_rejected",
-        "tests/test_check.py::test_changed_pointers_are_reported",
-        "tests/test_branches.py::test_fixed_polling_does_not_repeat_source_or_entry_audit",
-        "tests/test_branches.py::test_judge_branch_builds_validation_only_after_development_entry",
-        "tests/test_branches.py::test_changed_pack_is_rejected_before_any_scoring",
+        "tests/iteration/test_check.py::test_failed_check_does_not_hide_other_failures",
+        "tests/iteration/test_check.py::test_offline_check_forbids_each_model_entrypoint",
+        "tests/iteration/test_check.py::test_changed_observations_rejected",
+        "tests/iteration/test_check.py::test_judge_aggregates_data_and_source_failures",
+        "tests/iteration/test_check.py::test_real_material_guard_rejects_forged_assets",
+        "tests/iteration/test_check.py::test_experiment_missing_independent_votes_rejected",
+        "tests/iteration/test_check.py::test_changed_pointers_are_reported",
+        "tests/iteration/test_branches.py::test_fixed_polling_does_not_repeat_source_or_entry_audit",
+        "tests/iteration/test_branches.py::test_judge_branch_builds_validation_only_after_development_entry",
+        "tests/iteration/test_branches.py::test_changed_pack_is_rejected_before_any_scoring",
         "tests/test_leakage_guards.py::test_unchanged_ids_cannot_reuse_changed_sources"
       ]
     },
@@ -136,17 +136,17 @@
         "src/iteration/draw_replay.py::source_info"
       ],
       "tests": [
-        "tests/test_draw_replay.py::test_registered_replay_completes_all_votes_without_requests",
-        "tests/test_draw_replay.py::test_branch_replay_promotes_development_without_requests_or_shared_pointer_change",
-        "tests/test_draw_replay.py::test_branch_replay_blocks_changed_binding_without_live_fallback",
-        "tests/test_draw_replay.py::test_successful_operation_in_failed_case_is_reusable",
-        "tests/test_draw_replay.py::test_forged_observation_rejected_even_with_updated_trace_hash",
-        "tests/test_draw_replay.py::test_changed_inputs_and_cache_entries_are_rejected",
-        "tests/test_draw_replay.py::test_missing_independent_round_has_no_live_fallback",
-        "tests/test_draw_replay.py::test_cross_condition_replay_rejected",
-        "tests/test_draw_replay.py::test_rebased_pure_scorers_reuse_source_rounds_without_requests",
-        "tests/test_draw_replay.py::test_rebased_replay_rejects_changed_source_or_baseline",
-        "tests/test_draw_replay.py::test_rebased_replay_rejects_source_change_after_loading"
+        "tests/iteration/test_draw_replay.py::test_registered_replay_completes_all_votes_without_requests",
+        "tests/iteration/test_draw_replay.py::test_branch_replay_promotes_development_without_requests_or_shared_pointer_change",
+        "tests/iteration/test_draw_replay.py::test_branch_replay_blocks_changed_binding_without_live_fallback",
+        "tests/iteration/test_draw_replay.py::test_successful_operation_in_failed_case_is_reusable",
+        "tests/iteration/test_draw_replay.py::test_forged_observation_rejected_even_with_updated_trace_hash",
+        "tests/iteration/test_draw_replay.py::test_changed_inputs_and_cache_entries_are_rejected",
+        "tests/iteration/test_draw_replay.py::test_missing_independent_round_has_no_live_fallback",
+        "tests/iteration/test_draw_replay.py::test_cross_condition_replay_rejected",
+        "tests/iteration/test_draw_replay.py::test_rebased_pure_scorers_reuse_source_rounds_without_requests",
+        "tests/iteration/test_draw_replay.py::test_rebased_replay_rejects_changed_source_or_baseline",
+        "tests/iteration/test_draw_replay.py::test_rebased_replay_rejects_source_change_after_loading"
       ]
     },
     {
@@ -173,14 +173,14 @@
         "src/judge/gbdt.py::GBDTJudge"
       ],
       "tests": [
-        "tests/test_gbdt_judge.py::test_nonlinear_options_scored_before_difference",
-        "tests/test_gbdt_judge.py::test_dispatch_and_frozen_feature_order",
-        "tests/test_gbdt_judge.py::test_replay_preserves_rounds_without_llm_requests",
-        "tests/test_gbdt_judge.py::test_asset_tampering_rejected_before_request",
-        "tests/test_gbdt_judge.py::test_unbound_model_rejected",
-        "tests/test_gbdt_judge.py::test_invalid_model_rejected",
-        "tests/test_gbdt_judge.py::test_booster_objective_cannot_be_relabelled",
-        "tests/test_gbdt_judge.py::test_booster_dependency_change_rejected"
+        "tests/judge/test_gbdt_judge.py::test_nonlinear_options_scored_before_difference",
+        "tests/judge/test_gbdt_judge.py::test_dispatch_and_frozen_feature_order",
+        "tests/judge/test_gbdt_judge.py::test_replay_preserves_rounds_without_llm_requests",
+        "tests/judge/test_gbdt_judge.py::test_asset_tampering_rejected_before_request",
+        "tests/judge/test_gbdt_judge.py::test_unbound_model_rejected",
+        "tests/judge/test_gbdt_judge.py::test_invalid_model_rejected",
+        "tests/judge/test_gbdt_judge.py::test_booster_objective_cannot_be_relabelled",
+        "tests/judge/test_gbdt_judge.py::test_booster_dependency_change_rejected"
       ]
     },
     {
@@ -193,8 +193,8 @@
         "src/iteration/experiment.py::finish"
       ],
       "tests": [
-        "tests/test_record_contract.py::test_output_cannot_escape_experiments",
-        "tests/test_record_contract.py::test_completion_checks_all_cases_metrics_and_votes"
+        "tests/iteration/test_record_contract.py::test_output_cannot_escape_experiments",
+        "tests/iteration/test_record_contract.py::test_completion_checks_all_cases_metrics_and_votes"
       ]
     },
     {
@@ -207,8 +207,8 @@
         "src/iteration/gates.py::require_promotable"
       ],
       "tests": [
-        "tests/test_record_contract.py::test_comparison_blocks_ordinary_execution_and_promotion",
-        "tests/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
+        "tests/iteration/test_record_contract.py::test_comparison_blocks_ordinary_execution_and_promotion",
+        "tests/iteration/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
       ]
     },
     {
@@ -220,7 +220,7 @@
         "src/iteration/materials/validation.py::verify"
       ],
       "tests": [
-        "tests/test_architecture_contracts.py::test_frozen_json_retry_is_idempotent_and_never_replaces_evidence",
+        "tests/dashboard/test_architecture_contracts.py::test_frozen_json_retry_is_idempotent_and_never_replaces_evidence",
         "tests/test_leakage_guards.py::test_unchanged_ids_cannot_reuse_changed_sources"
       ]
     },
@@ -237,7 +237,7 @@
         "tests/test_leakage_guards.py::test_verified_flag_cannot_certify_arbitrary_assets",
         "tests/test_leakage_guards.py::test_conversation_recipe_cannot_be_resigned_with_answers",
         "tests/test_leakage_guards.py::test_unknown_or_judge_prompt_recipe_rejected",
-        "tests/test_data_boundaries.py::test_other_chat_future_unknown_source_and_same_second"
+        "tests/bootstrap/test_data_boundaries.py::test_other_chat_future_unknown_source_and_same_second"
       ]
     },
     {
@@ -250,8 +250,8 @@
         "src/iteration/branches.py::promote_experiment"
       ],
       "tests": [
-        "tests/test_iteration.py::test_judge_comparator_changes_only_after_development_promotion",
-        "tests/test_architecture_contracts.py::test_bootstrap_cannot_reinitialize_an_existing_baseline"
+        "tests/iteration/test_iteration.py::test_judge_comparator_changes_only_after_development_promotion",
+        "tests/dashboard/test_architecture_contracts.py::test_bootstrap_cannot_reinitialize_an_existing_baseline"
       ]
     },
     {
@@ -263,8 +263,8 @@
         "src/iteration/gates.py::require_fixed_entry"
       ],
       "tests": [
-        "tests/test_runtime_controls.py::test_fixed_batches_are_reusable_with_immutable_bindings",
-        "tests/test_protocol.py::test_decide_formal_requires_both_conditions"
+        "tests/iteration/test_runtime_controls.py::test_fixed_batches_are_reusable_with_immutable_bindings",
+        "tests/iteration/test_protocol.py::test_decide_formal_requires_both_conditions"
       ]
     },
     {
@@ -278,11 +278,11 @@
         "scripts/promote.py::review_policy"
       ],
       "tests": [
-        "tests/test_protocol.py::test_configurable_five_per_thousand_boundary",
-        "tests/test_iteration.py::test_threshold_review_cannot_bypass_existing_guards",
-        "tests/test_iteration.py::test_threshold_review_preserves_records_and_reuses_fixed_result",
-        "tests/test_report.py::test_threshold_review_display_keeps_original_decision",
-        "tests/test_runtime_controls.py::test_threshold_cli_rejects_wrong_executor_and_changed_snapshot"
+        "tests/iteration/test_protocol.py::test_configurable_five_per_thousand_boundary",
+        "tests/iteration/test_iteration.py::test_threshold_review_cannot_bypass_existing_guards",
+        "tests/iteration/test_iteration.py::test_threshold_review_preserves_records_and_reuses_fixed_result",
+        "tests/dashboard/test_report.py::test_threshold_review_display_keeps_original_decision",
+        "tests/iteration/test_runtime_controls.py::test_threshold_cli_rejects_wrong_executor_and_changed_snapshot"
       ],
       "human_step": "SOP §3：负责人明确修订采用门槛，晋级命令记录理由；不得将修订后达标描述为原协议通过"
     },
@@ -295,9 +295,9 @@
         "src/iteration/record_contract.py::writer"
       ],
       "tests": [
-        "tests/test_record_contract.py::test_successful_checkpoint_cannot_be_replaced",
-        "tests/test_framework_followups.py::test_recovery_preserves_completed_records_and_exact_failed_tail",
-        "tests/test_framework_followups.py::test_corrupt_middle_is_never_recovered"
+        "tests/iteration/test_record_contract.py::test_successful_checkpoint_cannot_be_replaced",
+        "tests/iteration/test_framework_followups.py::test_recovery_preserves_completed_records_and_exact_failed_tail",
+        "tests/iteration/test_framework_followups.py::test_corrupt_middle_is_never_recovered"
       ]
     },
     {
@@ -309,9 +309,9 @@
         "src/iteration/control.py::request"
       ],
       "tests": [
-        "tests/test_runtime_controls.py::test_runtime_snapshot_survives_source_changes_and_rejects_tampering",
-        "tests/test_runtime_controls.py::test_request_quota_is_atomic_across_processes",
-        "tests/test_runtime_controls.py::test_cancel_blocks_cache_hit_and_deadline_blocks_request"
+        "tests/iteration/test_runtime_controls.py::test_runtime_snapshot_survives_source_changes_and_rejects_tampering",
+        "tests/iteration/test_runtime_controls.py::test_request_quota_is_atomic_across_processes",
+        "tests/iteration/test_runtime_controls.py::test_cancel_blocks_cache_hit_and_deadline_blocks_request"
       ]
     },
     {
@@ -323,10 +323,10 @@
         "src/dashboard/server.py::_AuditGuardHandler"
       ],
       "tests": [
-        "tests/test_report.py::test_fixed_answers_never_enter_html_even_in_collapsed_sections",
-        "tests/test_report.py::test_history_reads_branch_development_adoption_without_changing_shared_pointers",
-        "tests/test_workflow_dashboard.py::test_live_workflow_updates_training_without_regenerating_html",
-        "tests/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
+        "tests/dashboard/test_report.py::test_fixed_answers_never_enter_html_even_in_collapsed_sections",
+        "tests/dashboard/test_report.py::test_history_reads_branch_development_adoption_without_changing_shared_pointers",
+        "tests/dashboard/test_workflow_dashboard.py::test_live_workflow_updates_training_without_regenerating_html",
+        "tests/iteration/test_record_contract.py::test_comparison_visible_in_history_with_real_parameters"
       ]
     },
     {
@@ -363,7 +363,7 @@
         "scripts/check_public.py::check"
       ],
       "tests": [
-        "tests/test_runtime_controls.py::test_public_gate_checks_history_even_after_file_is_removed"
+        "tests/iteration/test_runtime_controls.py::test_public_gate_checks_history_even_after_file_is_removed"
       ],
       "human_step": "SOP §10.3：所有者审核公开内容、许可证和发布目标"
     },
@@ -408,9 +408,9 @@
         "src/iteration/pack_transport.py::timeout_floor"
       ],
       "tests": [
-        "tests/test_pack_transport.py::test_invalid_timeout_is_rejected",
-        "tests/test_pack_transport.py::test_timeout_changes_transport_only",
-        "tests/test_pack_transport.py::test_frozen_launch_keeps_checkpoint_and_rejects_tampering"
+        "tests/iteration/test_pack_transport.py::test_invalid_timeout_is_rejected",
+        "tests/iteration/test_pack_transport.py::test_timeout_changes_transport_only",
+        "tests/iteration/test_pack_transport.py::test_frozen_launch_keeps_checkpoint_and_rejects_tampering"
       ]
     },
     {
@@ -422,10 +422,10 @@
         "src/judge/fusion.py::FusionScorer"
       ],
       "tests": [
-        "tests/test_fusion.py::test_option_score_fusion_and_swap",
-        "tests/test_fusion.py::test_resigned_fusion_forgery_rejected",
-        "tests/test_fusion.py::test_nontraining_normalization_rejected",
-        "tests/test_draw_replay.py::test_fusion_reuses_registered_draws_without_requests"
+        "tests/judge/test_fusion.py::test_option_score_fusion_and_swap",
+        "tests/judge/test_fusion.py::test_resigned_fusion_forgery_rejected",
+        "tests/judge/test_fusion.py::test_nontraining_normalization_rejected",
+        "tests/iteration/test_draw_replay.py::test_fusion_reuses_registered_draws_without_requests"
       ]
     }
   ]

@@ -211,7 +211,7 @@ class LabelBatch:
             * (ROOT / 'src/judge').glob('*.py'),
             *[ROOT / 'src' / p for p in ('config.py', 'cache.py', 'tracing.py', 'llm.py',
                 'iteration/learning_guard.py', 'iteration/storage.py', 'iteration/parallel.py',
-                'iteration/control.py', 'iteration/quota.py')]]
+                'iteration/control.py')]]
         runtime = [p for p in runtime if p.exists()]
         assets = [p for directory in (self.teacher, self.generator) for p in directory.rglob('*') if p.is_file()]
         watched = [*map(Path, original['inputs']), *files, *runtime, *assets, settings_path()]
