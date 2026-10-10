@@ -171,10 +171,10 @@ def test_modern_micro_snapshot_passes_check_retrieval_entry(tmp_path, monkeypatc
     import argparse
     import sys
     from pathlib import Path
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import fewshot as fewshot_package
     from src.iteration import pack_transport, runtime, retrieval_compare
-    from src.iteration.storage import write_json
+    from src.infrastructure.storage import write_json
 
     # 新代微快照：真实 fewshot 包字节 + 认证清单（含冻结 transport 条目）。
     snapshot = tmp_path / 'snapshot'
@@ -239,10 +239,10 @@ def test_modern_snapshot_identity_mismatch_is_rejected(tmp_path, monkeypatch):
     """新代快照 fewshot 包字节与认证清单不符 → 身份核验拒绝（fail-closed）。"""
     import argparse
     from pathlib import Path
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import fewshot as fewshot_package
     from src.iteration import runtime, versions
-    from src.iteration.storage import write_json
+    from src.infrastructure.storage import write_json
 
     snapshot = tmp_path / 'snapshot'
     package_dir = Path(fewshot_package.__file__).parent
@@ -346,7 +346,7 @@ def test_frozen_legacy_full_call_does_not_raise_name_error(tmp_path, monkeypatch
     from contextlib import nullcontext
     from src.iteration import runtime, versions
     from src.iteration import datasets
-    from src.iteration.storage import write_json
+    from src.infrastructure.storage import write_json
 
     # 假旧代快照：manifest 只含 few_shot.py → 分代判定为旧代。
     snapshot = tmp_path / 'snapshot'

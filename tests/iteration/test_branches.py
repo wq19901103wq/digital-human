@@ -12,11 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.config import ConfigError, load_settings
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.dashboard import report
 from src.iteration import branch_packs, branches, experiment, promote, runner, scheduler, versions
 from src.iteration.progress import track_run
-from src.iteration.storage import LockBusy, file_lock, write_json
+from src.infrastructure.storage import LockBusy
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import write_json
 from gate_support import finish_with_cases
 from leakage_support import isolated_legacy_provenance as _legacy_fixture
 
@@ -27,7 +30,8 @@ pytestmark = pytest.mark.usefixtures('isolated_legacy_provenance')
 
 
 @pytest.mark.parametrize('configured', [None, '3'])
-def test_scheduler_entrypoint_bounds_openmp_before_imports(monkeypatch, configured):
+@pytest.mark.parametrize('entrypoint', ['iterate_branches.py', 'evaluate_judge.py'])
+def test_iteration_entrypoint_bounds_openmp_before_imports(monkeypatch, configured, entrypoint):
     if configured is None:
         monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
     else:
@@ -42,7 +46,7 @@ def test_scheduler_entrypoint_bounds_openmp_before_imports(monkeypatch, configur
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, '__import__', checked_import)
-    runpy.run_path(str(Path(__file__).resolve().parents[2] / 'scripts/iterate_branches.py'))
+    runpy.run_path(str(Path(__file__).resolve().parents[2] / 'scripts' / entrypoint))
     assert observed == [configured or '1']
 
 
@@ -308,10 +312,10 @@ def test_active_old_round_is_not_rewritten_on_new_production(tree, monkeypatch):
     ptr = versions.load_pointers()
     ptr["production_gen"] = new
     versions.save_pointers(ptr)
-    monkeypatch.setattr("src.iteration.storage.locked", lambda path: True)
+    monkeypatch.setattr("src.infrastructure.storage.locked", lambda path: True)
     assert branches.advance() == []
     assert branches.round_of("a/r-0001") == original
-    monkeypatch.setattr("src.iteration.storage.locked", lambda path: False)
+    monkeypatch.setattr("src.infrastructure.storage.locked", lambda path: False)
     finish(smoke)
     assert branches.advance()[0]["id"].endswith("r-0002-smoke")
 
@@ -502,7 +506,8 @@ def test_case_drain_resume_preserves_successful_requests_and_rounds(tree, monkey
     import signal
     from collections import Counter
     from threading import Condition, Event
-    from src import cache, llm
+    from src.infrastructure import cache
+    from src import llm
     from src.iteration import control, parallel, pack_transport
     submit_gen('drain', {'llm': {'model': 'mA'}})
     finish(branches.advance('drain')[0], 'observe')
@@ -679,6 +684,8 @@ def test_pack_rebuild_preserves_original_sample_and_resumes(tree, monkeypatch):
 
 
 def test_judge_pipeline_runs_real_scoring_and_reports_before_promotion(tree, monkeypatch):
+    from types import SimpleNamespace
+    from scripts import iterate_branches
     submit_judge("judge-a", {"llm": {"model": "jA"}})
     calls = []
 
@@ -695,7 +702,7 @@ def test_judge_pipeline_runs_real_scoring_and_reports_before_promotion(tree, mon
         job = branches.advance()[0]
         assert job["id"].endswith(stage)
         directory = experiment.load_experiment(job["id"])
-        runner.run_judge_experiment(directory, workers=2)
+        iterate_branches.work(SimpleNamespace(kind="experiment", job=job["id"], workers=2))
         spec, state = experiment.spec_of(directory), experiment.state_of(directory)
         assert spec["created"]
         assert state["metrics"]["pairs"] == total
@@ -767,7 +774,7 @@ def test_two_processes_cannot_promote_over_each_other(tree):
     code = """
 import sys, time
 from pathlib import Path
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import promote, versions
 from src.iteration.materials import validation
 # Same isolated legacy fixture as the parent test: this child tests the
@@ -933,7 +940,7 @@ def test_fork_accepted_development_uses_common_control(tree):
 @pytest.mark.parametrize('invalid', [None, 'missing', 'implementation', 'source',
                                     'data', 'data_implementation', 'missing_data_implementation'])
 def test_historical_receipt_after_executor_migration(tree, monkeypatch, invalid, reuse):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import data_guard, gates, runtime
     original_snapshot = data_guard.generation_snapshot
     executor = {'generator/generator.py': sha256_file(Path(__file__).parents[2] / 'src/generator/generator.py')}

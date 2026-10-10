@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.generator.ranker_samples import prepare
+from src.generator.fewshot.training.samples import prepare
 
 
 def main():
@@ -23,9 +23,9 @@ def main():
     if args.observations is not None:
         if not args.reuse_inventory:
             parser.error('--observations requires --reuse-inventory')
-        from src.generator.ranker_expansion import prepare as expand
+        from src.generator.fewshot.training.expansion import prepare as expand
         if args.reuse_preparation:
-            from src.generator.ranker_preparation import seed_checkpoints
+            from src.generator.fewshot.training.checkpoint_reuse import seed_checkpoints
             seed_checkpoints(args.reuse_preparation, args.output,
                              observations=args.observations, reuse_inventory=args.reuse_inventory)
         result = expand(args.data, args.teacher, args.generator, args.output,

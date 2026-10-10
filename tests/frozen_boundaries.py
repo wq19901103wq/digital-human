@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from src.generator.fewshot.runtime_layout import LEGACY_PREFIX, RELOCATED
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,7 +27,10 @@ SERVING_RUNTIME_SHA256 = {
 def frozen_violations() -> list[str]:
     problems = []
     for name, expected in SERVING_RUNTIME_SHA256.items():
-        path = ROOT / 'src' / 'generator' / 'fewshot_ranker' / (name + '.py')
+        path = ROOT / RELOCATED[LEGACY_PREFIX + name + '.py']
+        if not path.is_file():
+            problems.append(f'{name}.py 冻结实现缺失')
+            continue
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
             problems.append(f'{name}.py 字节变化：{actual[:12]}… ≠ pin {expected[:12]}…')

@@ -9,10 +9,10 @@ import sys
 
 import pytest
 
-from src import cache
-from src.config import ConfigError
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
 from src.iteration import acceptance, control, runtime, versions
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from test_leakage_guards import env as env
 from quota_worker import consume as _consume
 

@@ -5,10 +5,10 @@ import json
 import pytest
 
 from scripts import check, evaluate_judge
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import experiment, runner, versions
 from src.iteration.materials import validation as learning_guard
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from src.judge.corrected import CodexJudgeClient
 from src.llm import ChatClient
 from test_draw_replay import saved
@@ -111,8 +111,8 @@ def test_legal_pack_passes_development_pack_check(env, monkeypatch, capsys):
     """合法回复包（带生成证明）经统一 judge 入口时 development_pack 必须通过：
     verify_pack 指向 materials.validation 正式实现（历史上误指 materials.seals，
     该模块无此函数，合法包也 AttributeError）。"""
-    from src.config import sha256_file
-    from src.history.sources import load
+    from src.infrastructure.config import sha256_file
+    from src.data.history.sources import load
     from src.iteration.materials import validation as materials_validation
 
     monkeypatch.setattr(versions, 'switch_instance', lambda name: env.root)
@@ -233,7 +233,7 @@ def test_material_diagnostic_separates_chat_exposure_from_answers_and_time():
 
 
 def test_material_sources_are_bound_and_use_full_source_chat_id(tmp_path):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import material_compatibility as materials
     directory = tmp_path / 'generator'
     inventory = tmp_path / 'inventory'
@@ -289,7 +289,7 @@ def test_material_conflicts_are_reported_without_changing_pointers(priv, monkeyp
 
 @pytest.mark.parametrize('conflict', ['none', 'answer', 'future', 'changed_source'])
 def test_changed_data_allows_familiar_history_but_rejects_leaks(tmp_path, monkeypatch, conflict):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import material_compatibility as materials
     case = dict(case_id='target', source_span=dict(chat_id='familiar'),
                 input_cutoff=dict(timestamp=100), reply_message_ids=['answer'])
@@ -318,6 +318,7 @@ def test_retrieval_subcommand_fails_on_inequivalence(monkeypatch, capsys, tmp_pa
     """I8：三方对比 equivalent=False 时，retrieval 子命令整体失败并记录差异。"""
     from src.iteration import retrieval_compare
     monkeypatch.setattr(versions, 'switch_instance', lambda name: tmp_path)
+    monkeypatch.setattr(versions, 'POINTERS_PATH', tmp_path / 'pointers.json')
     write_json(tmp_path / 'pointers.json', {})
 
     def inequivalent(*args, **kwargs):

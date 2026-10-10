@@ -31,13 +31,16 @@ graph TD
         RUN[runner：断点续跑 / 并行 / 补验]
         GATE[gates：晋升门槛]
         BR[branches：多分支并行调度]
-        GUARD[learning_guard：学习来源护栏]
+        GUARD[materials：学习来源护栏]
     end
     subgraph Versions["版本层（创建后只读）"]
         DATA[data d-XXXX：切分 + few-shot 池]
+        SHARE[share s-XXXX：共享知识材料]
         GEN[generator g-XXXX：行为配置 + persona 快照]
         JUDGE[judge j-XXXX：判别配置 + 提示词]
         PTR[pointers.json：当前用哪一版]
+        GEN -->|冻结绑定| SHARE
+        JUDGE -->|冻结绑定| SHARE
     end
     subgraph Evidence["证据层（唯一权威）"]
         SPEC[spec：创建时冻结的输入快照]
@@ -49,15 +52,16 @@ graph TD
     Evidence -->|引用版本资产| Versions
 ```
 
-- **版本层**保存全部资产：数据切分、生成器配置、Judge 配置。创建后只读，改动等于新建版本——任何历史状态都留得下、回得去。
+- **版本层**保存全部资产：数据切分、共享知识材料、生成器配置、Judge 配置。创建后只读，改动等于新建版本——任何历史状态都留得下、回得去。
 - **证据层**记录每次实验的原始输入、逐题判定与每次大模型调用的完整实录，是唯一权威数据源；任何晋升决定都从原始判定重新核算，与汇总值对不上就拒绝执行。
-- **迭代引擎**负责跑实验、算指标、决定指针切给谁，learning_guard 守住学习来源边界。`pointers.json` 只有五个指针（数据 / 生产生成器 / 迭代生成器 / 生产 Judge / 迭代 Judge），晋升不是拷贝文件，只是切指针——系统里没有第二份需要互相同步的状态。
+- **迭代引擎**负责跑实验、算指标、决定指针切给谁，materials 守住学习来源边界。`pointers.json` 只有五个指针（数据 / 生产生成器 / 迭代生成器 / 生产 Judge / 迭代 Judge），Share 由 Gen / Judge 各自冻结绑定，不增加隐式共享指针；晋升不是拷贝文件，只是切指针——系统里没有第二份需要互相同步的状态。
 
-### 版本层里有什么：data / generator / judge 三类资产
+### 版本层里有什么：data / share / generator / judge 四类资产
 
 框架里所有会被迭代的东西都建模成版本——一个目录，创建后只读，改动等于新建版本：
 
 - **数据版本 `d-XXXX`**：从原始聊天记录构建。导入时保留引用消息等实质内容，按全局时间窗口切出学习 / 开发 / 验收三个用途，整聊天留出保证验收能考"没见过的人"。切分规则和随机种子写死在版本里，任何人拿到同一份原始导出都能重建出同一个数据版本。
+- **共享材料版本 `s-XXXX`**：有来源的 Wiki、称呼、关系与背景快照。Gen / Judge 分别绑定 `share_ref` 与 `share_sha256`，可使用不同版本；更新共享材料不会隐式改变旧模型。
 - **生成器版本 `g-XXXX`**：行为配置 + persona / 场景快照 + few-shot 召回配置。召回策略本身冻结，学习的是"从池里选哪几个示例"；用到学习到的模型时，权重一并登记为版本资产，保证这个版本在任何机器上行为一致、可回退。
 - **Judge 版本 `j-XXXX`**：判别配置 + 盲测提示词，与生成器一样按版本交替迭代——调整判别逻辑、优化提示词都是新建一个 Judge 版本。
 
@@ -99,16 +103,20 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
 
 ## 项目结构
 
+详细架构与目录职责见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 | 路径 | 职责 |
 |---|---|
-| `src/iteration/` | 迭代引擎：runner / gates / promote / branches / learning_guard |
-| `src/judge/` | 盲测裁判与校正模型 |
-| `src/generator/` | 人格与场景配置、示例召回、学习示例选择 |
-| `src/bootstrap/` | 数据构建：导入、切分、池、时间窗口 |
+| `src/data/` | 原始记录导入、会话与质量、切分、示例池/测试集、历史来源核验 |
+| `src/share/` | 共享材料版本、Wiki 管线、称呼关系与记忆检索 |
+| `src/generator/` | 回复生成；`context/` 提示材料；`fewshot/` 召回与排序，ranker 训练收在其下 |
+| `src/judge/` | 盲测裁判；`features/` 特征、`scoring/` 在线评分、`diagnostics/` 诊断；冻结入口保留 |
+| `src/iteration/` | 跨业务域的实验、训练任务、协议、结果、晋级、归档和调度 |
 | `src/dashboard/` | 工作台：基线、分支、逐题证据、实时进度 |
-| `scripts/` | 命令入口 |
+| `src/infrastructure/` | 配置、缓存、追踪、文件存储与通用 schema；旧路径仅兼容 |
+| `scripts/` | 命令入口（`scripts/legacy/` 历史脚本不入 git） |
 | `docs/` | SOP、架构、数据契约、设计文档 |
-| `tests/` | 回归测试 |
+| `tests/` | 回归测试（conftest + 按 6 个业务域分组，根留通用测试与支撑） |
 
 ## 检索与实验性能：完整技术说明
 
@@ -142,7 +150,7 @@ HTTP Basic 登录；远程访问必须通过 HTTPS 反向代理或隧道。首�
   → 保存逐题记录、调用 trace 与可复用测量
 ```
 
-入口在 [`src/generator/generator.py`](src/generator/generator.py)，学习选择策略名为 `pairwise_xgb_v1`，具体编排在 [`src/generator/learned_selection.py`](src/generator/learned_selection.py)。
+入口在 [`src/generator/generator.py`](src/generator/generator.py)，学习选择策略名为 `pairwise_xgb_v1`，具体编排在 [`src/generator/fewshot/learned_selection.py`](src/generator/fewshot/learned_selection.py)。冻结入口仍经 `learned_selection` 兼容别名调用同一实现。
 
 这条链路中至少有三类不同的模型用途：**提取检索特征、生成回复、Judge 评判**。替换回复模型并不会自动替换另外两类模型，也不会消除本地扫描和校验耗时。基础召回本身不请求大模型。
 
@@ -204,7 +212,7 @@ length  = 1 / (1 + abs(query_length - context_length) / 20)
 
 - 目标上下文提取一份特征；每个示例的上下文、历史回复各提取一份。若候选数为 `K`，共有最多 `1 + 2K` 个基础特征对象，而不是同样多的新模型请求。
 - 提取目标特征时不提供该题真人答案；示例的历史回复是允许使用的学习材料。
-- 请求按 prompt、schema、client identity 等内容寻址。`fewshot_ranker/extraction.py` 的 `extract_one` 先按请求 key 加去重文件锁、读缓存并核对 payload 摘要，只有缺失才调用模型；相同特征可以跨题复用。
+- 请求按 prompt、schema、client identity 等内容寻址。`fewshot/extraction.py` 的 `extract_one` 先按请求 key 加去重文件锁、读缓存并核对 payload 摘要，只有缺失才调用模型；相同特征可以跨题复用。
 - 当前在线 `LearnedSelector.select` 是逐个处理特征任务；训练/补提取配置里的 workers 或 passes **不等于单题在线特征提取有同等并行度**。
 - `g-0036` 另提取目标与示例的 self-concern 特征，即自身关注点等，最多增加 `1 + K` 个特征对象；这不是更换回复模型。
 
@@ -219,11 +227,11 @@ length  = 1 / (1 + abs(query_length - context_length) / 20)
 | 本地统计 | 人数、发言人切换、回复气泡数、字长、历史年龄、词法相关性分桶等 |
 | 本地交叉 | 目标/示例语义相等，需求 × 回复动作，情绪/称呼/群私 × 回复属性，needs 交集与 Jaccard，pending 匹配、等级差、聊天身份交叉等 |
 
-定义分别在 `fewshot_ranker/schema.py`、`features.py`、`crosses.py`、`identity_crosses.py`；self-concern 扩展在 `concern.py`。分类字符串最终编码为**稀疏 one-hot**，不是大规模密集向量 embedding。
+定义分别在 `fewshot/schema.py`、`features.py`、`crosses.py`、`identity_crosses.py`；self-concern 扩展在 `concern.py`。分类字符串最终编码为**稀疏 one-hot**，不是大规模密集向量 embedding。
 
 ### 5. 精排与最终预算：不是再让 LLM 逐对比较
 
-[`src/generator/fewshot_ranker/boosting.py`](src/generator/fewshot_ranker/boosting.py) 的 `score_document` 使用冻结 vocabulary 构建 `DictVectorizer`，加载 XGBoost Booster，把最多 24 条候选转换为稀疏 `DMatrix`，调用 `predict(output_margin=True)` 输出分数。预测限制为单线程；当前函数每次都会构建 vectorizer、加载 Booster，并非长期驻留的模型服务。
+[`src/generator/fewshot/boosting.py`](src/generator/fewshot/boosting.py) 的 `score_document` 使用冻结 vocabulary 构建 `DictVectorizer`，加载 XGBoost Booster，把最多 24 条候选转换为稀疏 `DMatrix`，调用 `predict(output_margin=True)` 输出分数。预测限制为单线程；当前函数每次都会构建 vectorizer、加载 Booster，并非长期驻留的模型服务。
 
 历史配置对照如下，`data_version` 是对应学习配置的来源版本，**不表示当前评测 Data 被切回那个版本**：
 
@@ -398,13 +406,13 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 |---|---|
 | [`generator.py`](src/generator/generator.py) | 回复提示词与示例选择入口 |
 | [`fewshot/session.py`](src/generator/fewshot/session.py) + [`fewshot/rank.py`](src/generator/fewshot/rank.py) | `retrieve`、候选桶、粗排与多样性规则（词项入口 `rank._terms`） |
-| [`learned_selection.py`](src/generator/learned_selection.py) | `recall`、`feature_rows`、`tasks`、`select`、`choose` |
-| [`history.py`](src/generator/history.py) / [`src/history/sources.py`](src/history/sources.py) | 逐题资格与源记录对应 |
-| [`extraction.py`](src/generator/fewshot_ranker/extraction.py) / [`schema.py`](src/generator/fewshot_ranker/schema.py) | 内容寻址特征提取与字段定义 |
-| [`features.py`](src/generator/fewshot_ranker/features.py) / [`crosses.py`](src/generator/fewshot_ranker/crosses.py) | 本地统计与语义交叉 |
-| [`boosting.py`](src/generator/fewshot_ranker/boosting.py) | 稀疏编码、训练与本地预测 |
+| [`fewshot/learned_selection.py`](src/generator/fewshot/learned_selection.py) | `recall`、`feature_rows`、`tasks`、`select`、`choose` |
+| [`history.py`](src/generator/history.py) / [`data/history/sources.py`](src/data/history/sources.py) | 逐题资格与源记录对应 |
+| [`extraction.py`](src/generator/fewshot/extraction.py) / [`schema.py`](src/generator/fewshot/schema.py) | 内容寻址特征提取与字段定义 |
+| [`features.py`](src/generator/fewshot/features.py) / [`crosses.py`](src/generator/fewshot/crosses.py) | 本地统计与语义交叉 |
+| [`boosting.py`](src/generator/fewshot/boosting.py) | 稀疏编码、训练与本地预测 |
 | [`learning_guard.py`](src/iteration/learning_guard.py) | 学习材料与来源护栏 |
-| [`bootstrap/history.py`](src/bootstrap/history.py) | Data 建版质量审计与 finalize |
+| [`data/history_build.py`](src/data/history_build.py) | Data 建版质量审计与 finalize |
 
 配套实现位置：[`disk_history.py`](src/generator/disk_history.py)（磁盘存储）、[`disk_source_reads.py`](src/generator/disk_source_reads.py)（独立读取连接）、[`retrieval_cache.py`](src/generator/retrieval_cache.py)（完整召回缓存）、[`material_reuse.py`](src/iteration/material_reuse.py)（材料证明复用）、[`transport_profile.py`](src/iteration/transport_profile.py)（耗时采集）。
 
@@ -416,7 +424,7 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 
 #### 12.1 Data 建版：全量质量审计属于这里
 
-入口：[`src/bootstrap/history.py`](src/bootstrap/history.py) 的 `publish`。输入是新 Data 的池与来源材料，输出是 `data_quality.json` 和已 finalize 的版本。新建时必须通过审计，失败不能发布版本：
+入口：[`src/data/history_build.py`](src/data/history_build.py) 的 `publish`。输入是新 Data 的池与来源材料，输出是 `data_quality.json` 和已 finalize 的版本。新建时必须通过审计，失败不能发布版本：
 
 ```python
         from .data_quality import audit, require_passed
@@ -464,7 +472,7 @@ Wiki 是独立的批处理路径：按聊天对象生成/修订正文、保存�
 
 #### 12.4 两路 query：每题最多召回 24 个候选
 
-入口：[`learned_selection.py`](src/generator/learned_selection.py) 的 `recall`。最近 3 条和最近 1 条上下文各走一次基础召回；`options` 中的 `limit=12` 限制每路**最终返回**条数：
+入口：[`fewshot/learned_selection.py`](src/generator/fewshot/learned_selection.py) 的 `recall`。最近 3 条和最近 1 条上下文各走一次基础召回；`options` 中的 `limit=12` 限制每路**最终返回**条数：
 
 ```python
     for size in (3, 1):
@@ -609,7 +617,7 @@ SQLite 有 `example_ids(id, position)` 索引，它加速**已知 ID 的特征�
 
 #### 12.10 语义特征：内容寻址缓存，缺失才调用特征模型
 
-入口：[`fewshot_ranker/extraction.py`](src/generator/fewshot_ranker/extraction.py) 的 `prepare`。这里的输入已经是最多 24 条合并候选，不再是全池：
+入口：[`fewshot/extraction.py`](src/generator/fewshot/extraction.py) 的 `prepare`。这里的输入已经是最多 24 条合并候选，不再是全池：
 
 ```python
     for group in groups:
@@ -661,9 +669,9 @@ SQLite 有 `example_ids(id, position)` 索引，它加速**已知 ID 的特征�
         row['id_cross.chat_id'] = identity_crosses.pair(row, 'target.chat_id', 'example_context.chat_id')
 ```
 
-[`features.py`](src/generator/fewshot_ranker/features.py) 负责上下文/回复本地统计与合并；[`crosses.py`](src/generator/fewshot_ranker/crosses.py) 对指定类别组合及相同上下文字段做交叉，不是把所有字段任意两两组合。冻结 transform 可再加 reply-action/self-concern 交叉，不能在续跑中改变。这一阶段输出的是特征字典，不请求模型。
+[`features.py`](src/generator/fewshot/features.py) 负责上下文/回复本地统计与合并；[`crosses.py`](src/generator/fewshot/crosses.py) 对指定类别组合及相同上下文字段做交叉，不是把所有字段任意两两组合。冻结 transform 可再加 reply-action/self-concern 交叉，不能在续跑中改变。这一阶段输出的是特征字典，不请求模型。
 
-[`boosting.py`](src/generator/fewshot_ranker/boosting.py) 的 `score_document` 用训练时冻结的词汇表做稀疏编码，加载 Booster，输出每个候选的 margin：
+[`boosting.py`](src/generator/fewshot/boosting.py) 的 `score_document` 用训练时冻结的词汇表做稀疏编码，加载 Booster，输出每个候选的 margin：
 
 ```python
     vectorizer = DictVectorizer(sparse=True, sort=True)
@@ -754,7 +762,7 @@ worker 数影响并行题数，不消除单题内顺序步骤。完成后按最�
                 raise ConfigError('实际学习资产与来源证据不符')
 ```
 
-若资产包含 ranker provenance，再调用 [`learned_sources.py`](src/generator/learned_sources.py) 的 `verify`：读取来源声明，`reconstruct` 核对原研究的完成材料、来源证据、模型摘要、信息截止点，并与已绑定证明比较。它不拟合新 ranker、不调用 LLM；冷启动扫描/哈希大量证据仍可很慢。这里有进程内已验证重建缓存，但不是完整的跨重启证明复用。
+若资产包含 ranker provenance，再调用 [`fewshot/provenance.py`](src/generator/fewshot/provenance.py) 的 `verify`：读取来源声明，`reconstruct` 核对原研究的完成材料、来源证据、模型摘要、信息截止点，并与已绑定证明比较。它不拟合新 ranker、不调用 LLM；冷启动扫描/哈希大量证据仍可很慢。这里有进程内已验证重建缓存，但不是完整的跨重启证明复用。
 
 [`material_reuse.py`](src/iteration/material_reuse.py) 的 `verified_materials` 将首次全量结论存在本次上下文内，后续复用时检查 seal 和 evidence stamps：
 

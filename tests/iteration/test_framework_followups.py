@@ -9,12 +9,12 @@ import pytest
 from leakage_support import historical
 from test_leakage_guards import env as _env_fixture
 
-from src.bootstrap import history
-from src.config import ConfigError, sha256_file
-from src.history.sources import load
+from src.data import history_build as history
+from src.infrastructure.config import ConfigError, sha256_file
+from src.data.history.sources import load
 from src.iteration import baseline, branches, datasets, journal, protocol, task_state, training_evidence, versions
 from src.iteration.materials import validation
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 
 env = _env_fixture
 

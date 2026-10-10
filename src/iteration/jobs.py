@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import time
 
-from ..config import ConfigError, valid_name
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import valid_name
 from . import task_state, versions
-from .storage import locked, read_json
+from src.infrastructure.storage import locked
+from src.infrastructure.storage import read_json
 
 FOLDERS = {'experiment': 'experiments', 'pack': 'judge_eval', 'training': 'judge_training'}
 START_GRACE_SECONDS = 15

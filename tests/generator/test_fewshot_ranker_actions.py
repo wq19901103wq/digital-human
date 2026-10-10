@@ -7,12 +7,17 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError, sha256_file
-from src.generator import learned_sources, ranker_report
-from src.generator.fewshot_ranker import action_comparison as comparison, action_crosses, boosting
-from src.generator.fewshot_ranker.architecture_comparison import feature_rows
-from src.history.sources import digest
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot import provenance as learned_sources
+from src.generator.fewshot.training import report as ranker_report
+from src.generator.fewshot.training import action_comparison as comparison
+from src.generator.fewshot import action_crosses
+from src.generator.fewshot import boosting
+from src.generator.fewshot.training.architecture_comparison import feature_rows
+from src.data.history.sources import digest
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.generator.test_fewshot_ranker_training import synthetic
 
@@ -135,7 +140,7 @@ def test_archived_training_code_keeps_old_proof_and_action_serving_is_strict(tmp
     monkeypatch.setattr(learned_sources, 'ROOT', tmp_path/'repo')
     monkeypatch.setattr(versions, 'PRIVATE', tmp_path/'private')
     names = [*learned_sources.SERVING_RUNTIME, 'scripts/train_fewshot_ranker.py',
-             'src/generator/fewshot_ranker/action_crosses.py']
+             'src/generator/fewshot/action_crosses.py']
     bound = {}
     for name in names:
         path = learned_sources.ROOT/name
@@ -155,7 +160,7 @@ def test_archived_training_code_keeps_old_proof_and_action_serving_is_strict(tmp
     assert learned_sources.serving_runtime(manifest) == {k: bound[k] for k in learned_sources.SERVING_RUNTIME}
     manifest['feature_transform'] = action_crosses.TRANSFORM
     assert len(learned_sources.serving_runtime(manifest)) == len(learned_sources.SERVING_RUNTIME)+1
-    (learned_sources.ROOT/'src/generator/fewshot_ranker/action_crosses.py').write_text('changed serving')
+    (learned_sources.ROOT/'src/generator/fewshot/action_crosses.py').write_text('changed serving')
     with pytest.raises(ConfigError, match='feature/scoring runtime changed'):
         learned_sources.serving_runtime(manifest)
 

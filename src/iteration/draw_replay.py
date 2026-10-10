@@ -148,6 +148,8 @@ def source_info(value):
 
 def manifest(path, pack, baseline, candidate):
     """Bind the full same-condition observation index before writing a spec."""
+    require(not any(info['config'].get('feature_channel') for info in (baseline, candidate)),
+            '联合特征禁止重放旧特征通道')
     path = Path(path).resolve()
     value = json.loads(path.read_text())
     require(value.get('schema') == 1 and value.get('dataset') == 'development'
@@ -276,6 +278,8 @@ class HybridReplayJudge(CorrectedJudge):
 
 
 def scorers(frozen, pack, baseline, candidate, *, supplement_missing=False):
+    require(not any(info['config'].get('feature_channel') for info in (baseline, candidate)),
+            '联合特征禁止重放旧特征通道')
     from ..judge.gbdt import GBDTJudge
     from ..judge.fusion import FusionJudge
     from ..judge.lr_retrain import LRJudge

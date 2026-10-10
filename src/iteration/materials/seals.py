@@ -5,7 +5,7 @@
 import json
 from pathlib import Path
 
-from ...config import ConfigError
+from src.infrastructure.config import ConfigError
 
 
 def _require(value, message):
@@ -18,7 +18,7 @@ class MaterialSeal:
     """Cheap per-request check after a full provenance check at construction."""
     def __init__(self, directory):
         self.directory = Path(directory)
-        from ...history.sources import stamp
+        from src.data.history.sources import stamp
         record = self.directory / 'learning.json'
         before = stamp(record) if record.exists() else None
         try:
@@ -33,7 +33,7 @@ class MaterialSeal:
         _require(before == (stamp(record) if record.exists() else None), '读取期间学习来源发生变化')
 
     def _stamps(self):
-        from ...history.sources import stamp
+        from src.data.history.sources import stamp
         return {str(p.relative_to(self.directory)): stamp(p)
                 for p in self.directory.rglob('*') if p.is_file()
                 and p.relative_to(self.directory) != Path('meta.json')}
@@ -41,7 +41,7 @@ class MaterialSeal:
     def check(self):
         from ..control import check
         check()
-        from ...history.sources import stamp
+        from src.data.history.sources import stamp
         _require(self.stamps == self._stamps(), '运行中学习材料变化；禁止继续请求或复用缓存')
         _require(all(stamp(p) == value for p, value in self.evidence.items()),
                  '运行中学习证据变化；禁止继续请求或复用缓存')
@@ -54,14 +54,14 @@ class RunSeal:
     executors may reuse its receipt only for identical inventories and dependencies.
     """
     def __init__(self, directories=(), files=()):
-        from ...history.sources import stamp
+        from src.data.history.sources import stamp
         self.materials = [MaterialSeal(d) for d in directories]
         self.files = {Path(p): stamp(Path(p)) for p in files}
 
     def check(self):
         from ..control import check
         check()
-        from ...history.sources import stamp
+        from src.data.history.sources import stamp
         for seal in self.materials:
             seal.check()
         _require(all(stamp(p) == saved for p, saved in self.files.items()),

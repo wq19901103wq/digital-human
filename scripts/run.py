@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.config import parse_overrides  # noqa: E402
+from src.infrastructure.config import parse_overrides# noqa: E402
+from src.dashboard import report  # noqa: E402
 from src.iteration import experiment, runner, versions  # noqa: E402
 
 
@@ -51,6 +52,7 @@ def main() -> None:
             return
         if spec["kind"] == experiment.KIND_JUDGE_EVAL:
             runner.run_judge_experiment(exp_dir, workers=args.workers)
+            report.publish_safely(exp_dir)
             state = experiment.state_of(exp_dir)
             print(f"\n结论: {state.get('verdict')} — {state.get('reason', '')}")
             if state.get("verdict") == "adopt":
@@ -74,6 +76,7 @@ def main() -> None:
 
     if experiment.state_of(exp_dir).get('status') != 'finished':
         runner.run_gen_experiment(exp_dir)
+    report.publish_safely(exp_dir)
     state = experiment.state_of(exp_dir)
     print(f"\n结论: {state.get('verdict')} — {state.get('reason', '')}")
     print(f"账单: {exp_dir}/bill.md | 后台: python scripts/serve_dashboard.py")

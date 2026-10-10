@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from scripts.offline_demo import run, SyntheticChat
-from src.cache import digest
-from src.config import ConfigError, sha256_file
+from src.infrastructure.cache import digest
+from src.infrastructure.config import ConfigError, sha256_file
 from src.iteration import gbdt_evidence as audit, pack_transport, runtime, training_evidence, versions
 from src.iteration.materials import validation as learning_guard
 from src.judge import corrected_v1 as rt

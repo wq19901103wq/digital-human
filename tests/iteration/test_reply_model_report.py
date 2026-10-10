@@ -3,9 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import check
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import reply_model_report as report
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 
 
 BASELINE = 'baseline-model'
@@ -123,6 +123,74 @@ def test_request_cache_can_follow_another_cache_hit(comparison):
     baseline = report.summarize(comparison.directory)['cohorts']['all']['speed']['baseline']
     assert baseline['model_time']['mean_ms'] == 1200
     assert baseline['historical_calls']['source_experiments'] == ['original']
+
+
+def test_judge_codex_cache_can_follow_successful_request_from_failed_stage(comparison):
+    cached_call = dict(kind='codex', request=dict(config=dict(model=JUDGE)),
+        status='ok', elapsed_ms=1200)
+    source = dict(kind='judge', branch='candidate', round=0, status='failed',
+        elapsed_ms=1600, events=[cache_event('cache_lookup', 'llm_request'),
+            call(JUDGE, 100, 'failed'), cached_call,
+            cache_event('cache_lookup', 'llm_request', 'unrelated'), call('other-model', 500)])
+    comparison.trace('previous', SOURCE_TRACE, [source])
+    comparison.trace('current', TRACE, [dict(kind='judge', branch='baseline', round=0,
+        status='ok', elapsed_ms=350, events=[
+            cache_event('cache_hit', 'llm_request', origin=comparison.origin),
+            cache_event('cache_lookup', 'llm_request', 'feature'), call('judge-feature-model', 300)])])
+    recorded = report.RecordedCalls(comparison.directory, comparison.spec)
+    timing = recorded.operation(comparison.rows[0], 'judge', 'baseline', {JUDGE, 'judge-feature-model'})
+    assert timing['wall_ms'] == 350
+    assert timing['model_ms'] == 1600
+    assert len(timing['current_calls']) == 1
+    assert len(timing['historical_calls']) == 2
+    assert sum(attempt['failed'] for attempt in timing['historical_calls'].values()) == 1
+    _, operation = recorded.selected_operation(comparison.rows[0], 'judge', 'baseline')
+    assert recorded._uncached_wall(operation, 'case') is None
+
+
+@pytest.mark.parametrize('problem', ['failed_only', 'missing_key', 'wrong_model', 'comparison'])
+def test_invalid_judge_cache_evidence_rejected(comparison, problem):
+    source = dict(kind='judge', branch='candidate', round=0, status='failed',
+        elapsed_ms=1500, events=[cache_event('cache_lookup', 'llm_request'),
+            dict(kind='codex', request=dict(config=dict(model='other-model' if problem == 'wrong_model' else JUDGE)),
+                status='failed' if problem == 'failed_only' else 'ok', elapsed_ms=1200)])
+    comparison.trace('previous', SOURCE_TRACE, [source])
+    comparison.trace('current', TRACE, [dict(kind='judge', branch='baseline', round=0,
+        status='ok', elapsed_ms=2, events=[cache_event('cache_hit', 'llm_request',
+            key=None if problem == 'missing_key' else 'request', origin=comparison.origin)])],
+        **(dict(judge_ref='j-0002') if problem == 'comparison' else {}))
+    recorded = report.RecordedCalls(comparison.directory, comparison.spec)
+    with pytest.raises(ConfigError):
+        recorded.operation(comparison.rows[0], 'judge', 'baseline', JUDGE)
+
+
+def test_whole_stage_cache_chain_wall_gaps_do_not_change_generation_report(comparison):
+    original = dict(experiment_id='original', trace_ref='c' * 32, operation_index=0)
+    comparison.trace('original', 'c' * 32, [generation('candidate', [call(BASELINE, 1200)], wall=None)])
+    comparison.trace('previous', SOURCE_TRACE, [generation('candidate', [
+        cache_event('cache_hit', 'generation', origin=original)], wall=3)])
+    comparison.trace('current', TRACE, [generation('baseline', [
+        cache_event('cache_hit', 'generation', origin=comparison.origin)], wall=2),
+        generation('candidate', [call(CANDIDATE, 300)])])
+    recorded = report.RecordedCalls(comparison.directory, comparison.spec)
+    _, operation = recorded.selected_operation(comparison.rows[0], 'generation', 'baseline')
+    with pytest.raises(ConfigError):
+        recorded._uncached_wall(operation, 'case')
+    baseline = report.summarize(comparison.directory)['cohorts']['all']['speed']['baseline']
+    assert baseline['model_time']['mean_ms'] == 1200
+    assert baseline['generation_wall_time']['mean_ms'] == 2
+    assert baseline['missing_timing_evidence'] == {}
+
+
+def test_whole_stage_cache_wall_chain_rejects_cycle(comparison):
+    comparison.trace('previous', SOURCE_TRACE, [generation('candidate', [
+        cache_event('cache_hit', 'generation', origin=comparison.origin)])])
+    comparison.trace('current', TRACE, [generation('baseline', [
+        cache_event('cache_hit', 'generation', origin=comparison.origin)])])
+    recorded = report.RecordedCalls(comparison.directory, comparison.spec)
+    _, operation = recorded.selected_operation(comparison.rows[0], 'generation', 'baseline')
+    with pytest.raises(ConfigError, match='cyclic'):
+        recorded._uncached_wall(operation, 'case')
 
 
 @pytest.mark.parametrize('change', ['case', 'data', 'dataset', 'model', 'key', 'index', 'trace', 'path', 'cycle', 'symlink'])

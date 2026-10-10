@@ -26,7 +26,8 @@ def _share(instance, ref='s-0001'):
 
 
 def test_model_bindings_are_independent_and_share_addition_refreshes_baselines(tmp_path, monkeypatch):
-    from src.iteration import shares, versions
+    from src.share import versions as shares
+    from src.iteration import versions
 
     exp, _ = _run(tmp_path)
     instance = exp.parent.parent

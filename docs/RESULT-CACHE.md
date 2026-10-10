@@ -1,6 +1,6 @@
 # 实验结果与请求缓存
 
-实现入口：[cache.py](../src/cache.py)。数据库位于每个实例的
+实现入口：[cache.py](../src/infrastructure/cache.py)。数据库位于每个实例的
 `instances/<instance>/.cache/results.sqlite3`，实验实录继续保存在原目录。
 
 核心原则：**实验 ID、数据版本 ID 用于查来源，实际输入和执行依赖决定能否复用。**

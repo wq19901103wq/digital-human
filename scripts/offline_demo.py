@@ -14,13 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import yaml  # noqa: E402
-from src import llm, tracing  # noqa: E402
-from src.bootstrap import history  # noqa: E402
-from src.config import load_settings  # noqa: E402
+from src import llm
+from src.infrastructure import tracing# noqa: E402
+from src.data import history_build as history# noqa: E402
+from src.infrastructure.config import load_settings# noqa: E402
 from src.dashboard import report  # noqa: E402
 from src.iteration import acceptance, baseline, experiment, runner, training, versions  # noqa: E402
 from src.iteration import training_evidence, training_operations  # noqa: E402
-from src.iteration.storage import write_json  # noqa: E402
+from src.infrastructure.storage import write_json# noqa: E402
 from src.judge import corrected, corrected_v1 as rt  # noqa: E402
 
 
@@ -121,6 +122,7 @@ def run(output):
         evaluation = experiment.create_gen_experiment('development', 'synthetic model configuration change',
             {'llm': {'model': 'synthetic-candidate'}}, exp_id='synthetic-evaluation')
         runner.run_gen_experiment(evaluation)
+        report.write_run(evaluation)
         report.refresh_dashboard(versions.PRIVATE / 'experiments', output / 'dashboard/demo')
         report.write_instance_index(versions.PRIVATE.parent, output / 'dashboard')
         summary = {'training': json.loads((directory / 'state.json').read_text())['status'],

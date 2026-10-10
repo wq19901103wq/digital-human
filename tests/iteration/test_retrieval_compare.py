@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from src.cache import digest
+from src.infrastructure.cache import digest
 from src.generator.fewshot import open_session
 from src.iteration import retrieval_compare, versions
 
@@ -300,7 +300,7 @@ def test_compare_launches_three_isolated_workers_and_writes_full_output(tmp_path
     assert saved['output'] == str(output)
 
     # 覆盖既有产物必须被拒绝（历史产物不可变；同值重试才允许）。
-    from src.iteration.storage import write_once_json
+    from src.infrastructure.storage import write_once_json
     with pytest.raises(Exception):
         write_once_json(output, dict(saved, tampered=True))
     write_once_json(output, saved)  # 同值重试不报错

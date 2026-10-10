@@ -12,9 +12,12 @@ import json
 
 from math import ceil
 
-from ..config import ConfigError, load_settings, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
+from src.infrastructure.config import sha256_file
 from . import experiment, gates, protocol, versions
-from .storage import read_json, write_once_json
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_once_json
 
 DEVELOPMENT_PASS = "merge_to_iteration_baseline"
 FORMAL_PASS = "adopt"

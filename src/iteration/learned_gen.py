@@ -8,17 +8,25 @@ import subprocess
 import sys
 import time
 
-from ..config import ROOT, ConfigError, sha256_file
-from ..generator import learned_sources
+from src.infrastructure.config import ROOT
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot import provenance as learned_sources
 from ..generator.fewshot import open_session
 from ..generator.fewshot import rank as fewshot_rank
-from ..history import sources as history_sources
-from ..history.sources import require
-from ..generator.learned_selection import LearnedSelector, POLICY, recall
-from ..generator.fewshot_ranker import supplemental as extraction
+from src.data.history import sources as history_sources
+from src.data.history.sources import require
+from src.generator.fewshot.learned_selection import LearnedSelector
+from src.generator.fewshot.learned_selection import POLICY
+from src.generator.fewshot.learned_selection import recall
+from ..generator.fewshot import supplemental as extraction
 from . import branches, control, datasets, experiment, pack_transport, runtime, versions
 from .parallel import worker_limit
-from .storage import file_lock, locked, read_json, write_json, write_once_json
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import locked
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
+from src.infrastructure.storage import write_once_json
 
 TERMINAL = {'rejected', 'superseded', 'promoted', 'integrated', 'conflict', 'blocked',
             'development_accepted'}

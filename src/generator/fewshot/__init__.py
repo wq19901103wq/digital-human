@@ -2,7 +2,8 @@
 
 结构：prepare（一次性 PreparedPool）/ query（逐题输入包）/
 recall_engines（逐题资格与词项特征引擎）/ rank（逐题纯函数打分）/
-session（RecallSession 逐题会话 + open_session 工厂）。
+session（RecallSession 逐题会话 + open_session 工厂）；
+features / crosses / boosting（现用示例评分）；training（离线学习）。
 """
 from .prepare import PreparedPool
 from .query import QueryContext
@@ -23,3 +24,10 @@ __all__ = ['PreparedPool', 'QueryContext', 'RecallEngine', 'RecallSession',
            '_is_information_gap_reply', '_is_sparse_turn', '_latest_turn_form', '_needs_clarification',
            '_precise_situation', '_profile_compatibility', '_row_situation_profile',
            '_row_situation_tags', '_situation_profile', '_situation_tags', '_terms']
+
+
+def __getattr__(name):
+    if name == 'logistic':
+        from .training import logistic
+        return logistic
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

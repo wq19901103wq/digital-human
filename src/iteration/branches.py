@@ -8,9 +8,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..config import ConfigError, load_settings, sha256_file, valid_name
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
+from src.infrastructure.config import sha256_file
+from src.infrastructure.config import valid_name
 from . import datasets, experiment, gates, protocol, versions
-from .storage import write_json
+from src.infrastructure.storage import write_json
 
 _MISSING = object()
 _TERMINAL = {"rejected", "superseded", "promoted", "integrated", "conflict", "blocked", "development_accepted"}
@@ -546,7 +549,7 @@ def advance(name: str | None = None) -> list[dict]:
             running = (exp_path / "spec.json").exists() and experiment.state_of(exp_path).get("status") != "finished"
             if record["basis"] != current or record["revision"] != state["revision"]:
                 # 已开始的轮次继续保留/完成自己的快照；不把新旧基线结果混写。
-                from .storage import locked
+                from src.infrastructure.storage import locked
                 from .progress import is_active
                 if running and (locked(exp_path / ".run.lock") or
                                 is_active(experiment.state_of(exp_path).get("progress", {}))):

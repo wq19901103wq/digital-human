@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from src.judge.ownership_report import build_report
+from src.judge.diagnostics.ownership_report import build_report
 
 
 def observation(human, base, final, a=False, b=False, round_index=0):

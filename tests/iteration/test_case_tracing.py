@@ -3,7 +3,7 @@ import io
 import json
 import os
 import subprocess
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 import sys
 import urllib.error
 from pathlib import Path
@@ -12,7 +12,8 @@ from urllib.request import urlopen
 
 import pytest
 
-from src import llm, tracing
+from src import llm
+from src.infrastructure import tracing
 from src.dashboard import trace_view
 from src.generator.generator import ReplyGenerator
 from src.dashboard import report

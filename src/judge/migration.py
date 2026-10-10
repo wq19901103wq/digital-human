@@ -6,7 +6,8 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
-from ..config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from ..iteration import versions
 from .corrected import blind_case
 

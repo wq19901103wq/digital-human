@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -10,17 +11,18 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from .. import tracing
+from src.infrastructure import tracing
 from ..iteration import experiment, gates, promote, protocol
 from ..judge import normalize_mode
 from ..iteration.progress import is_active
-from ..iteration.storage import atomic_write
+from src.infrastructure.storage import atomic_write
 
 from .components import _e, _version_url, _version_link, _pre, _details, _badge, _title, _run_url
 from .read_scope import once, scope
 from .pack_metadata import summary as _pack_summary
 
 _UI = Path(__file__).resolve().parent
+_logger = logging.getLogger('digital_human.dashboard.report')
 _LABELS = {
     'merge_to_iteration_baseline': ('开发评测达标', 'success'),
     'adopt': ('固定验收通过', 'success'),
@@ -185,6 +187,29 @@ def _model_rows(config: dict) -> str:
     return ''.join(f'<div class="model-row"><span>{label}</span><strong>{_e(model)}</strong></div>' for label, model in models)
 
 
+def _feature_judge_pipeline(config: dict, features) -> str:
+    policy = config['decision_policy']
+    scorer = {'lr_only': '本地逻辑回归', 'gbdt_only': '本地 GBDT',
+              'score_fusion': '本地 GBDT / LR 冻结分数融合',
+              'embedding_only': '本地 Embedding 小模型'}[policy]
+    client = {**(config.get('llm') or {}), **(config.get('feature_llm') or {})}
+    steps = [f'''<b>大模型抽特征</b><span>{_e(client.get('model', '模型未记录'))} · {_e(client.get('reasoning_effort', '未记录'))}</span><p>对盲测 A/B 回复抽取结构化特征，不输出初始配对判定。</p>''',
+             f'''<b>小模型预测</b><span>{scorer} · {_e(features)} 维</span><p>使用冻结权重计算 A 是真人的概率。</p>''']
+    if policy == 'gbdt_only' and 'ownership_correction' in config:
+        steps.append(f'<b>归属特征与规则改判</b><span>{_e(config["ownership_correction"])}</span><p>额外调用大模型抽取上下文发言归属。规则触发后直接把小模型概率覆盖为 0 或 1。</p>')
+    if policy == 'gbdt_only' and 'contribution_correction' in config:
+        steps.append(f'''<b>回复贡献特征与规则改判</b><span>{_e(config['contribution_correction'])}</span><p>额外调用大模型抽取回复贡献特征，规则触发后直接把概率覆盖为 0 或 1。</p>''')
+    extra = len(steps) > 2
+    steps.append('<b>最终判断</b><span>概率分界 50%</span><p>A 是真人的概率 ≥ 50% 时选择 A，否则选择 B；按盲测映射计算识别结果。</p>')
+    numbered = ''.join(f'<li>{number} {step}</li>' for number, step in zip('①②③④⑤', steps))
+    architecture = ('该历史版本包含额外规则改判，不是纯小模型决策流程。' if extra
+                    else '最终判断只来自小模型概率，不叠加初判或规则改判。')
+    title = '大模型抽特征 + 小模型预测' + (' + 规则改判' if extra else '')
+    return f'''<div class="judge-pipeline"><strong>{title}</strong>
+<ol class="mechanism-steps">{numbered}</ol>
+<p class="help">抽特征通过 {_e(client.get('provider', '未记录通道'))} 调用；小模型在本地执行。{architecture}此处展示评测推理流程，不是重新训练小模型。</p></div>'''
+
+
 def _judge_pipeline(config: dict, directory: Path) -> str:
     mode = normalize_mode(config.get('mode'))
     llm = config.get('llm') or {}
@@ -195,6 +220,8 @@ def _judge_pipeline(config: dict, directory: Path) -> str:
         return f'<div class="judge-pipeline"><strong>单一大模型配对盲测</strong><p>{_e(model_name)} 对真人与 AI 回复做配对判断。该版本未配置特征提取与小模型校正。</p></div>'
     model = (_json(directory / 'correction.json').get('final_model') or {})
     features = model.get('input_feature_count', '—')
+    if config.get('decision_policy') in ('lr_only', 'gbdt_only', 'score_fusion', 'embedding_only'):
+        return _feature_judge_pipeline(config, features)
     threshold = float(config.get('correction_threshold', 0.7)) * 100
     feature_llm = {**llm, **config.get('feature_llm', {})}
     split = bool(config.get('feature_llm'))
@@ -1224,3 +1251,13 @@ def publish(exp_dir: Path) -> None:
     write_run(exp_dir)
     refresh_dashboard(instance / 'experiments', dashboard / instance.name)
     write_instance_index(instance.parent, dashboard)
+
+
+def publish_safely(exp_dir: Path) -> bool:
+    """Best-effort presentation refresh, separate from experiment execution."""
+    try:
+        publish(exp_dir)
+    except Exception:
+        _logger.exception('报告刷新失败，实验记录与结论保持不变: %s', exp_dir)
+        return False
+    return True

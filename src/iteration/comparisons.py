@@ -7,9 +7,13 @@ import re
 import time
 from pathlib import Path
 
-from ..config import ConfigError, sha256_file, valid_name
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.infrastructure.config import valid_name
 from . import experiment, gates, record_contract, versions
-from .storage import file_lock, read_json, write_json
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 
 
 def register(exp_id, *, data_ref, pack_ref, comparison, change, protocol, created=None, provenance=None):

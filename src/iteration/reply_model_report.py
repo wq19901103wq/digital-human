@@ -14,8 +14,9 @@ from functools import lru_cache
 from pathlib import Path
 import statistics
 
-from src import tracing
-from src.config import ConfigError, valid_name
+from src.infrastructure import tracing
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import valid_name
 from . import protocol
 
 
@@ -106,7 +107,7 @@ class RecordedCalls:
             raise ConfigError('cache source case or dataset mismatch')
         return trace
 
-    def _source(self, origin, case_id):
+    def _source(self, origin, case_id, kind='generation', request=False):
         experiment_id = origin['experiment_id']
         trace_ref = origin['trace_ref']
         index = origin['operation_index']
@@ -114,8 +115,8 @@ class RecordedCalls:
         if type(index) is not int or not 0 <= index < len(trace['operations']):
             raise ConfigError('invalid cache source operation')
         operation = trace['operations'][index]
-        if operation.get('kind') != 'generation' or operation.get('status') != 'ok':
-            raise ConfigError('cache source is not a successful generation')
+        if operation.get('kind') != kind or (not request and operation.get('status') != 'ok'):
+            raise ConfigError('cache source is not a successful ' + kind)
         return experiment_id, trace_ref, index, operation
 
     def _calls(self, experiment_id, trace_ref, index, operation, case_id, model,
@@ -132,42 +133,84 @@ class RecordedCalls:
                 active_key = data.get('key')
                 matched_key |= active_key == request_key
             include = request_key is None or active_key == request_key
-            if kind == 'llm' and include:
-                actual_model = event.get('request', {}).get('body', {}).get('model')
-                if actual_model != model:
+            if kind in ('llm', 'codex') and include:
+                actual_model = event.get('request', {}).get('config' if kind == 'codex' else 'body', {}).get('model')
+                expected_models = {model} if isinstance(model, str) else set(model)
+                if actual_model not in expected_models:
                     raise ConfigError('recorded reply model mismatch')
                 if event.get('status') not in ('ok', 'failed'):
                     raise ConfigError('recorded model call is incomplete')
                 call_id = (experiment_id, trace_ref, index, event_index)
                 calls[call_id] = dict(elapsed_ms=_milliseconds(event.get('elapsed_ms')),
                     failed=event['status'] == 'failed')
-            if kind == 'cache_hit' and include and data.get('layer') in ('generation', 'llm_request'):
-                source = self._source(data['origin'], case_id)
+            if kind == 'cache_hit' and include and data.get('layer') in (operation['kind'], 'llm_request'):
+                is_request = data['layer'] == 'llm_request'
+                if is_request and (not isinstance(data.get('key'), str) or not data['key']):
+                    raise ConfigError('missing cached request key')
+                source = self._source(data['origin'], case_id, operation['kind'], request=is_request)
                 key = data.get('key') if data['layer'] == 'llm_request' else request_key
                 calls.update(self._calls(*source, case_id, model, (*chain, identity), key))
         if request_key is not None and not matched_key:
             raise ConfigError('cached request key has no attributable recorded calls')
         if not calls:
             raise ConfigError('no recorded reply-model calls')
+        if request_key is not None and all(call['failed'] for call in calls.values()):
+            raise ConfigError('cached request lacks a successful recorded response')
         return calls
 
     def generation(self, row, branch, model):
+        return self.operation(row, 'generation', branch, model)
+
+    def selected_operation(self, row, kind, branch, round_index=0):
         trace_ref = row['trace_ref']
         case_id = str(row['case_id'])
         trace = self._read(self.directory.name, trace_ref, case_id)
+        if any(trace.get('versions', {}).get(name) != self.spec.get(name)
+               for name in ('baseline_ref', 'candidate_ref', 'judge_ref')):
+            raise ConfigError('current trace frozen comparison mismatch')
         operations = [(index, operation) for index, operation in enumerate(trace['operations'])
-            if operation.get('kind') == 'generation' and operation.get('branch') == branch
-            and operation.get('round') == 0 and operation.get('status') == 'ok']
+            if operation.get('kind') == kind and operation.get('branch') == branch
+            and operation.get('round') == round_index and operation.get('status') == 'ok']
         if len(operations) != 1:
-            raise ConfigError('missing or ambiguous initial generation')
-        index, operation = operations[0]
-        wall_ms = _milliseconds(operation.get('elapsed_ms'))
+            raise ConfigError('missing or ambiguous recorded ' + kind)
+        return operations[0]
+
+    def _uncached_wall(self, operation, case_id, chain=(), model=None):
+        if model is not None:
+            expected_models = {model} if isinstance(model, str) else set(model)
+            for event in operation.get('events', []):
+                kind = event.get('kind')
+                if kind in ('llm', 'codex'):
+                    actual_model = event.get('request', {}).get('config' if kind == 'codex' else 'body', {}).get('model')
+                    if actual_model not in expected_models:
+                        raise ConfigError('recorded reply model mismatch')
+        hits = [event['data'] for event in operation.get('events', [])
+                if event.get('kind') == 'cache_hit'
+                and event.get('data', {}).get('layer') in (operation['kind'], 'llm_request')]
+        if not hits:
+            return _milliseconds(operation.get('elapsed_ms'))
+        if len(hits) != 1 or hits[0]['layer'] != operation['kind']:
+            return None
+        source = self._source(hits[0]['origin'], case_id, operation['kind'])
+        identity = source[:3]
+        if identity in chain or len(chain) >= 16:
+            raise ConfigError('cyclic or excessive cache source chain')
+        return self._uncached_wall(source[3], case_id, (*chain, identity), model)
+
+    def model_attempts(self, row, kind, branch, model, round_index=0):
+        trace_ref, case_id = row['trace_ref'], str(row['case_id'])
+        index, operation = self.selected_operation(row, kind, branch, round_index)
         calls = self._calls(self.directory.name, trace_ref, index, operation, case_id, model)
         current = {identity: call for identity, call in calls.items()
             if identity[:2] == (self.directory.name, trace_ref)}
         historical = {identity: call for identity, call in calls.items() if identity not in current}
-        return dict(wall_ms=wall_ms, model_ms=sum(call['elapsed_ms'] for call in calls.values()),
+        return dict(model_ms=sum(call['elapsed_ms'] for call in calls.values()),
             current_calls=current, historical_calls=historical)
+
+    def operation(self, row, kind, branch, model, round_index=0):
+        _, operation = self.selected_operation(row, kind, branch, round_index)
+        return dict(wall_ms=_milliseconds(operation.get('elapsed_ms')),
+            **self.model_attempts(row, kind, branch, model, round_index))
 
 
 def _quality(rows, evidence_validated):

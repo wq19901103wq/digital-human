@@ -3,9 +3,9 @@ from copy import deepcopy
 
 import pytest
 
-from src.config import ConfigError
-from src.judge.ownership import POLICY, decide, validate_policy
-from src.judge.background_features import build_input
+from src.infrastructure.config import ConfigError
+from src.judge.scoring.ownership import POLICY, decide, validate_policy
+from src.judge.features.background_features import build_input
 
 
 def evidence():

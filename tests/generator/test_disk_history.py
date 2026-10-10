@@ -10,15 +10,16 @@ import pytest
 from leakage_support import historical
 from test_leakage_guards import env as env
 from test_fewshot_selection import generator
-from src.bootstrap import history
-from src.config import ConfigError, sha256_file
+from src.data import history_build as history
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.generator import disk_history
 from _reference_few_shot import few_shot
-from src.history import sources as history_sources
+from src.data.history import sources as history_sources
 from src.generator import history as eligibility
 from src.generator import indexed_retrieval
 from src.iteration import pack_transport
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 
 
 FLAGS = ('enable_clarification', 'enable_precise_situation', 'prefer_same_chat_after_situation',

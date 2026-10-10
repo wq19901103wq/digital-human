@@ -4,7 +4,7 @@ from urllib.request import urlopen
 
 from src.dashboard import workflow_view
 from src.iteration import task_state
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from test_live_dashboard import live_server as _live_server
 from test_report import _run
 

@@ -3,10 +3,12 @@ import json
 
 import pytest
 
-from src.config import ConfigError, load_settings
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.generator.fewshot import RecallSession
 from src.generator.generator import ReplyGenerator
-from src.generator.selection import POLICY, select
+from src.generator.fewshot.selection import POLICY
+from src.generator.fewshot.selection import select
 from test_leakage_guards import env as env
 
 

@@ -9,9 +9,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from ..config import ConfigError
+from src.infrastructure.config import ConfigError
 from . import task_state, versions
-from .storage import file_lock, write_json, read_json
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import write_json
+from src.infrastructure.storage import read_json
 
 _job_directory = ContextVar('controlled_job_directory', default=None)
 

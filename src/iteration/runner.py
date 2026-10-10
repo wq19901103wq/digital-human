@@ -15,7 +15,6 @@ from ..config import ConfigError, load_settings
 from ..generator.generator import ReplyGenerator
 from ..judge.judge import Judge, build_judge
 from . import data_guard, experiment, protocol, versions
-from ..dashboard import report
 from .progress import ParallelCaseProgress, track_run
 from .parallel import completed_map
 from . import datasets, record_contract
@@ -47,8 +46,7 @@ def _run_gen_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path:
     seal = learning_execution_seal(spec)
     state = experiment.state_of(exp_dir)
     if state.get("status") == "finished":
-        _logger.info("实验已完赛(%s)，直接出报告", state.get("verdict"))
-        report.write_run(exp_dir)
+        _logger.info("实验已完赛(%s)，复用冻结结果", state.get("verdict"))
         return exp_dir
     from . import measurements
     measurements.apply_replay_safely(exp_dir)  # 同对复用：重放已完成题，只跑缺的
@@ -180,7 +178,6 @@ def _run_gen_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path:
     verdict = protocol.decide(metrics, spec["dataset"], proto)
     seal.check()
     experiment.finish(exp_dir, metrics, verdict)
-    report.publish(exp_dir)
     return exp_dir
 
 
@@ -279,7 +276,6 @@ def run_judge_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path
     seal = learning_execution_seal(spec)
     state = experiment.state_of(exp_dir)
     if state.get("status") == "finished":
-        report.write_run(exp_dir)
         return exp_dir
     from . import measurements
     measurements.apply_replay_safely(exp_dir)  # 同对复用：重放已完成题，只跑缺的
@@ -466,7 +462,6 @@ def run_judge_experiment(exp_dir: Path, *, workers=None, _progress=None) -> Path
                               higher_is_better=True)
     seal.check()
     experiment.finish(exp_dir, metrics, verdict)
-    report.publish(exp_dir)
     return exp_dir
 
 

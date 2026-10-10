@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src import cache
+from src.infrastructure import cache
 
 
 def main():
@@ -48,7 +48,7 @@ def main():
     elif args.command == "stats":
         result = store.stats()
     elif args.command == "reuse-blind-orders":
-        from src.config import sha256_file
+        from src.infrastructure.config import sha256_file
         if Path(args.experiment).name != args.experiment or args.experiment in {".", ".."}:
             parser.error("实验名不能包含路径")
         spec = json.loads((instance / "experiments" / args.experiment / "spec.json").read_text())

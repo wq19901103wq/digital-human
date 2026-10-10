@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from src.config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.iteration import data_guard
 
 

@@ -7,9 +7,13 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError
-from src.generator.fewshot_ranker import extraction, features, schema, training
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.generator.fewshot import extraction
+from src.generator.fewshot import features
+from src.generator.fewshot import schema
+from src.generator.fewshot.training import optimization as training
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from src.judge.embedding import fit_encoder, restore
 
 

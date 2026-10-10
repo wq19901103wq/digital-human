@@ -1,10 +1,12 @@
 import pytest
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.generator.fewshot import RecallSession
-from src.generator.ranker_expansion import prepare, read_inventory
-from src.generator.ranker_preparation import seed_checkpoints
-from src.iteration.storage import read_json, write_json
+from src.generator.fewshot.training.expansion import prepare
+from src.generator.fewshot.training.expansion import read_inventory
+from src.generator.fewshot.training.checkpoint_reuse import seed_checkpoints
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_ranker_expansion import setup_batch
 
 

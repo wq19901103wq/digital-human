@@ -7,15 +7,22 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.bootstrap.history import write_rows
-from src.config import ConfigError, sha256_file
+from src.data.history_build import write_rows
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.generator.fewshot import RecallSession
-from src.history.sources import digest
-from src.generator.ranker_expansion import cap_rows, isolated_rows, prepare, read_inventory
-from src.generator.ranker_expansion.reuse import import_labels, reuse_source
-from src.generator.ranker_samples import prepare as original_prepare
-from src.generator.ranker_labels import _save, _saved
-from src.iteration.storage import read_json, write_json
+from src.data.history.sources import digest
+from src.generator.fewshot.training.expansion import cap_rows
+from src.generator.fewshot.training.expansion import isolated_rows
+from src.generator.fewshot.training.expansion import prepare
+from src.generator.fewshot.training.expansion import read_inventory
+from src.generator.fewshot.training.label_reuse import import_labels
+from src.generator.fewshot.training.label_reuse import reuse_source
+from src.generator.fewshot.training.samples import prepare as original_prepare
+from src.generator.fewshot.training.labels import _save
+from src.generator.fewshot.training.labels import _saved
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.leakage_support import historical, mechanical
 from tests.generator.test_ranker_samples import teacher_at
 from tests.generator.test_ranker_labels import row

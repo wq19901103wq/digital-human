@@ -5,7 +5,7 @@ import json
 import re
 from urllib.parse import quote
 
-from .. import tracing
+from src.infrastructure import tracing
 from .components import _badge, _details, _e, _pre
 
 

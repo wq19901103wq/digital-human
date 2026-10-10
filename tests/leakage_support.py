@@ -4,11 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.iteration import training as recipe
-from src.bootstrap import history
-from src.config import sha256_file
+from src.data import history_build as history
+from src.infrastructure.config import sha256_file
 from src.iteration import datasets, versions
 from src.iteration.materials import MECHANICAL_ASSETS, validation
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 
 
 def mechanical(directory):

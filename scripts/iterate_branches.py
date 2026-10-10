@@ -12,6 +12,7 @@ os.environ.setdefault('OMP_NUM_THREADS', '1')
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.dashboard import report  # noqa: E402
 from src.iteration import branches, experiment, runner, scheduler, versions, jobs  # noqa: E402
 
 
@@ -138,6 +139,7 @@ def work(args):
             runner.run_judge_experiment(directory, workers=args.workers)
         else:
             runner.run_gen_experiment(directory, workers=args.workers)
+        report.publish_safely(directory)
 
 
 if __name__ == "__main__":

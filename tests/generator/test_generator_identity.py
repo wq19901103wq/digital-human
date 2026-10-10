@@ -3,11 +3,13 @@ from copy import deepcopy
 
 import pytest
 
-from src import tracing
-from src.config import ConfigError, load_settings
+from src.infrastructure import tracing
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.generator.generator import ReplyGenerator
-from src.history.sources import prompt_case
-from src.generator.persona import CONTEXT_IDENTITY_POLICY, PersonaPromptBuilder
+from src.data.history.sources import prompt_case
+from src.generator.context.persona import CONTEXT_IDENTITY_POLICY
+from src.generator.context.persona import PersonaPromptBuilder
 from test_leakage_guards import env as env
 
 

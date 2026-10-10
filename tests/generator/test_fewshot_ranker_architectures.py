@@ -4,12 +4,16 @@ import numpy as np
 import pytest
 torch = pytest.importorskip('torch')
 
-from src.config import ConfigError, sha256_file
-from src.generator.fewshot_ranker import (
-    architecture_comparison as comparison, boosting, neural_models, neural_sweep, training,
-)
-from src.history.sources import digest
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training import architecture_comparison as comparison
+from src.generator.fewshot import boosting
+from src.generator.fewshot.training import neural_models
+from src.generator.fewshot.training import neural_sweep
+from src.generator.fewshot.training import optimization as training
+from src.data.history.sources import digest
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.generator.test_fewshot_ranker_training import synthetic
 

@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.iteration import versions
 from src.judge import corrected, corrected_v1 as runtime
 from src.judge.migration import enrich_cases

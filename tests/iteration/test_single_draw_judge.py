@@ -9,9 +9,10 @@ import json
 
 import pytest
 
-from src.config import ConfigError, load_settings
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.iteration import comparisons, experiment, record_contract, runner, versions
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from leakage_support import isolated_legacy_provenance
 
 pytestmark = pytest.mark.usefixtures('isolated_legacy_provenance')
@@ -258,4 +259,3 @@ def test_flip_two_still_requires_full_votes(single_draw_comparison):
         append(_single_draw_row(1, True, True))
     with pytest.raises(ConfigError, match="独立补验"):
         comparisons.complete(target)
-

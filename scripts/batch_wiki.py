@@ -8,8 +8,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap.wiki import wiki_batch, wiki_continuation, wiki_delivery, wiki_supplement  # noqa: E402
-from src.config import load_settings  # noqa: E402
+from src.share.wiki import wiki_batch, wiki_continuation, wiki_delivery, wiki_supplement
+from src.infrastructure.config import load_settings
 
 
 def main():
@@ -71,7 +71,7 @@ def main():
         config = {k: llm[k] for k in ('provider', 'model', 'reasoning_effort', 'timeout_seconds',
                                      'codex_cli_version')}
         if args.command == 'prepare-members':
-            from src.bootstrap.wiki import wiki_members
+            from src.share.wiki import wiki_members
             value = wiki_members.prepare(args.members, args.page, output, args.self_account, config,
                 non_friends_only=args.non_friends_only, priority_accounts=args.priority_account,
                 max_chars=args.batch_chars)
@@ -83,10 +83,10 @@ def main():
     elif args.command == 'prepare-continuation':
         value = wiki_continuation.prepare(args.source, output, parent=args.parent)
     elif args.command == 'prepare-revision':
-        from src.bootstrap.wiki import wiki_revision_batch
+        from src.share.wiki import wiki_revision_batch
         value = wiki_revision_batch.prepare(args.source, output, engine=args.engine)
     elif args.command == 'revise':
-        from src.bootstrap.wiki import wiki_revision_batch
+        from src.share.wiki import wiki_revision_batch
         value = wiki_revision_batch.run(output, workers=args.workers, attempts=args.attempts,
                                        object_workers=args.object_workers,
                                        max_jobs=args.max_jobs, follow=args.follow,

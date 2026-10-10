@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..config import sha256_file
+from src.infrastructure.config import sha256_file
 from ..iteration.versions import version_payload
 from ..judge import normalize_mode
 from .read_scope import once
@@ -11,7 +11,7 @@ from .read_scope import once
 _asset_digest = once(sha256_file)
 _version_payload = once(version_payload)
 
-MODES = {'corrected_pairwise': '大模型初判与抽特征 + 小模型预测与校正',
+MODES = {'corrected_pairwise': '特征判别（具体流程由冻结决策策略确定）',
          'pairwise_llm': '单一大模型配对盲测'}
 _LABELS = {'mode': '裁判机制', 'llm': '大模型', 'feature_llm': '抽特征大模型', 'private': '私聊', 'group': '群聊',
            'model': '模型', 'timeout_seconds': '超时上限（秒）', 'max_tokens': '输出 token 上限配置',
@@ -37,7 +37,7 @@ def _format(key, value):
     if value is None:
         return '未显式设置'
     if key == 'mode':
-        return MODES.get(value, value)
+        return MODES.get(normalize_mode(value), value)
     if key == 'correction_threshold':
         return f'{value:.0%}'
     if isinstance(value, bool):

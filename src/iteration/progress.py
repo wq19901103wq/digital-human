@@ -7,9 +7,10 @@ from threading import RLock
 from contextlib import nullcontext
 from functools import wraps
 
-from ..tracing import CaseTrace
+from src.infrastructure.tracing import CaseTrace
 from . import experiment, protocol
-from .storage import write_json, file_lock
+from src.infrastructure.storage import write_json
+from src.infrastructure.storage import file_lock
 
 
 def is_active(progress: dict) -> bool:
@@ -71,7 +72,7 @@ class RunProgress:
     def start_case(self, case):
         self.trace = CaseTrace(self.exp_dir, case, self.spec)
         if self.previous_trace:
-            from ..tracing import read
+            from src.infrastructure.tracing import read
             previous = read(self.exp_dir, self.previous_trace)
             if previous['case_id'] == str(case['case_id']):
                 self.trace.value['previous_trace_ref'] = self.previous_trace
@@ -158,7 +159,7 @@ def track_run(function):
         from .record_contract import require_registered
         spec, _ = require_registered(exp_dir)
         if spec.get('comparison'):
-            from ..config import ConfigError
+            from src.infrastructure.config import ConfigError
             raise ConfigError('专项比较记录不能由普通 Gen/Judge 执行器续跑')
         with file_lock(exp_dir / ".run.lock", blocking=False), job(exp_dir):
             return run_locked(exp_dir, *args, **kwargs)

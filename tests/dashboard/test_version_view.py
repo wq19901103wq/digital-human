@@ -44,6 +44,24 @@ def test_history_links_bind_judge_pack_generator_and_both_compared_versions(tmp_
     assert '/generators/candidate/' not in page
 
 
+@pytest.mark.parametrize('mode', ['corrected_pairwise', 'rpa_corrected_pairwise'])
+def test_judge_version_page_shows_frozen_feature_only_pipeline(tmp_path, mode):
+    exp, _ = _run(tmp_path)
+    instance = exp.parent.parent
+    directory = instance / 'judges/candidate'
+    _write(directory / 'config.json', {'mode': mode, 'decision_policy': 'gbdt_only',
+           'llm': {'model': 'unused-initial-model'},
+           'feature_llm': {'model': 'feature-model', 'provider': 'codex_cli', 'reasoning_effort': 'low'},
+           'correction_threshold': .7})
+    _write(directory / 'correction.json', {'final_model': {'input_feature_count': 352}})
+    page = version_view.detail_html(instance, 'judges', 'candidate', {})
+    for phrase in ['冻结推理流程', '大模型抽特征', '本地 GBDT · 352 维', '概率分界 50%',
+                   'feature-model · low', '最终判断只来自小模型概率']:
+        assert phrase in page
+    for phrase in ['大模型初判', '保留大模型', '改判阈值', '本地逻辑回归']:
+        assert phrase not in page
+
+
 def test_data_pages_preserve_records_order_and_never_render_fixed_answers(tmp_path, live_server):
     exp, _ = _run(tmp_path)
     directory = exp.parent.parent / 'data/data'

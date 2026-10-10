@@ -11,9 +11,12 @@ import time
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.generator.fewshot_ranker.pipeline import status
-from src.generator.ranker_report import report
-from src.iteration.storage import file_lock, locked, read_json, write_json
+from src.generator.fewshot.training.pipeline import status
+from src.generator.fewshot.training.report import report
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import locked
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 
 
 def main(argv=None):
@@ -29,7 +32,7 @@ def main(argv=None):
     if not (output / 'manifest.json').is_file():
         parser.error('training manifest does not exist')
     if read_json(output/'manifest.json').get('kind') == 'cached_fewshot_graded_comparison':
-        from src.generator.fewshot_ranker.graded_comparison import report as grade_report
+        from src.generator.fewshot.training.graded_comparison import report as grade_report
         print(json.dumps(grade_report(output), ensure_ascii=False, indent=2), flush=True)
         return
     if args.background:
@@ -62,7 +65,7 @@ def main(argv=None):
 
 
 def diagnose_selection(argv):
-    from src.generator.selection_analysis import report as diagnose
+    from src.generator.fewshot.training.selection_analysis import report as diagnose
     from src.iteration import versions
     parser = argparse.ArgumentParser(description='Cached-only development selection diagnosis')
     parser.add_argument('--instance', required=True)

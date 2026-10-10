@@ -5,10 +5,11 @@ import numpy as np
 import pytest
 
 pytest.importorskip('torch')  # 可选重依赖：缺省时整模块跳过
-from src import cache
-from src.config import ConfigError, sha256_file
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.iteration import embedding_adoption as adoption
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from src.judge import embedding as net
 from test_embedding_judge import recipe
 from test_corrected_judge import features, bundle, case

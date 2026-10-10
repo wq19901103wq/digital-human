@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import pack_transport, runtime
 from test_leakage_guards import env as env
 
@@ -34,6 +34,33 @@ def test_snapshot_generation_classifies_legacy_and_modern(tmp_path):
     modern = write_manifest(tmp_path / 'modern', MODERN_MANIFEST)
     assert pack_transport.snapshot_generation(legacy, runtime) == 'few_shot'
     assert pack_transport.snapshot_generation(modern, runtime) == 'fewshot'
+
+
+@pytest.mark.parametrize('package', ('fewshot_ranker', 'fewshot'))
+def test_snapshot_scoring_hooks_follow_authenticated_manifest(tmp_path, package):
+    path = 'src/generator/' + package + '/supplemental.py'
+    snapshot = write_manifest(tmp_path, {'files': {path: 'ab' * 32}})
+    assert pack_transport.snapshot_feature_module(snapshot, runtime) == 'src.generator.' + package + '.supplemental'
+
+
+def test_snapshot_scoring_ignores_unlisted_files_and_rejects_mixed_manifest(tmp_path):
+    snapshot = write_manifest(tmp_path, {'files': {}})
+    path = snapshot / 'src/generator/fewshot/supplemental.py'
+    path.parent.mkdir(parents=True)
+    path.write_text('not authenticated')
+    assert pack_transport.snapshot_feature_module(snapshot, runtime) is None
+    write_manifest(snapshot, {'files': {
+        'src/generator/fewshot/supplemental.py': 'ab' * 32,
+        'src/generator/fewshot_ranker/supplemental.py': 'cd' * 32}})
+    with pytest.raises(ConfigError, match='mixed implementations'):
+        pack_transport.snapshot_feature_module(snapshot, runtime)
+
+
+@pytest.mark.parametrize('manifest', ({}, {'files': []}))
+def test_snapshot_scoring_rejects_invalid_manifest(tmp_path, manifest):
+    snapshot = write_manifest(tmp_path, manifest)
+    with pytest.raises(ConfigError, match='cannot classify snapshot scoring'):
+        pack_transport.snapshot_feature_module(snapshot, runtime)
 
 
 def test_modern_dispatch_calls_authenticated_archive_driver(tmp_path, monkeypatch):
@@ -79,10 +106,54 @@ def test_default_modern_worker_installs_provenance_and_preserves_timeouts(tmp_pa
 
     driver = SimpleNamespace(__file__=str(driver_path), _run_modern=run)
     original_load = pack_transport.load_external_module
-    monkeypatch.setattr(pack_transport, 'load_external_module', lambda name, path:
-                        driver if path == driver_path else original_load(name, path))
+    preflights = []
+
+    def load(name, path):
+        if path == driver_path:
+            return driver
+        module = original_load(name, path)
+        if name == '_digital_human_codex_transport':
+            monkeypatch.setattr(module, 'settings', lambda: preflights.append('checked'))
+        return module
+
+    monkeypatch.setattr(pack_transport, 'load_external_module', load)
     assert pack_transport.dispatch_worker(SimpleNamespace(timeout_seconds=0), tmp_path,
         tmp_path / 'job', 'fewshot') == 'default-worker'
+    assert preflights == ['checked']
+
+
+def test_transport_preflight_stops_before_archived_worker(tmp_path, monkeypatch):
+    driver = SimpleNamespace(_run_modern=lambda *args: pytest.fail('worker must not start'))
+
+    def preflight():
+        raise RuntimeError('transport configuration unavailable')
+
+    adapter = SimpleNamespace(settings=preflight,
+        install=lambda *args, **kwargs: pytest.fail('transport must not install'))
+    monkeypatch.setattr(pack_transport, 'load_external_module', lambda name, path:
+                        adapter if name == '_digital_human_codex_transport' else driver)
+    monkeypatch.setattr(pack_transport, 'install_modern_recall_transport', lambda *args:
+                        pytest.fail('retrieval preparation must not start'))
+    with pytest.raises(RuntimeError, match='transport configuration unavailable'):
+        pack_transport.dispatch_worker(SimpleNamespace(timeout_seconds=0), tmp_path,
+                                       tmp_path / 'job', 'fewshot')
+
+
+def test_saved_reply_judge_resume_does_not_install_live_recall_adapter(tmp_path, monkeypatch):
+    directory = tmp_path / 'job'
+    directory.mkdir()
+    (directory / 'spec.json').write_text(json.dumps({'kind': 'judge_eval'}))
+    events = []
+    driver = SimpleNamespace(_run_modern=lambda *args: events.append('archived_worker'))
+    monkeypatch.setattr(pack_transport, 'load_external_module', lambda *args: driver)
+    monkeypatch.setattr(pack_transport, 'install_judge_transport',
+                        lambda *args: events.append('judge_transport'))
+    monkeypatch.setattr(pack_transport, 'install_modern_recall_transport',
+                        lambda *args: pytest.fail('saved replies do not retrieve history'))
+    monkeypatch.delenv('DH_LLM_DIRECT_HOSTS', raising=False)
+    pack_transport.dispatch_worker(SimpleNamespace(kind='experiment', timeout_seconds=0),
+                                   tmp_path, directory, 'fewshot')
+    assert events == ['judge_transport', 'archived_worker']
 
 
 def test_snapshot_generation_accepts_legacy_nested_prefix(tmp_path):
@@ -153,7 +224,7 @@ def test_main_authenticates_before_snapshot_imports(tmp_path, monkeypatch):
 def prepare_main(monkeypatch, env, tmp_path, snapshot, argv):
     import faulthandler
     from src.iteration import jobs
-    from src.iteration.storage import write_json
+    from src.infrastructure.storage import write_json
     directory = env.root / 'experiments/synthetic'
     monkeypatch.setenv('DH_INSTANCES_ROOT', str(env.root.parent))
     write_json(directory / 'spec.json', {'kind': 'gen_ab'})
@@ -244,7 +315,7 @@ def test_main_dispatches_modern_manifest_without_importing_few_shot(env, tmp_pat
 
 @pytest.mark.parametrize('with_sparse_filter', [False, True])
 def test_fewshot_profile_instrument_times_and_restores(with_sparse_filter):
-    from src import tracing
+    from src.infrastructure import tracing
 
     class FakeMemoryEngine:
         def excluded_ids(self):
@@ -347,11 +418,12 @@ def test_fewshot_profile_substage_errors_preserve_failure_and_restore(monkeypatc
 
 
 def test_modern_recall_transport_records_and_restores_authenticated_hooks(tmp_path, monkeypatch):
-    from src.generator import fewshot, shared_history
+    from src.generator import fewshot
+    from src.generator.fewshot import shared_history
     from src.iteration.runtime_auth import file_digest
 
     paths = [tmp_path / 'src/generator/fewshot/__init__.py',
-             tmp_path / 'src/generator/shared_history.py',
+             tmp_path / 'src/generator/fewshot/shared_history.py',
              tmp_path / 'src/iteration/pack_transport.py']
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +444,7 @@ def test_modern_recall_transport_records_and_restores_authenticated_hooks(tmp_pa
     assert receipt['archive_driver_sha256'] == file_digest(paths[2])
     assert receipt['capacity'] == reuse.CAPACITY
     assert receipt['max_bytes'] == reuse.MAX_BYTES
-    assert Path(reuse.__file__).name == 'recall_reuse.py'
+    assert Path(reuse.__file__).name == 'recall_cache.py'
     with pytest.raises(ValueError, match='restore'):
         with driver.fewshot_profile_instrument(DummyProfile(), fewshot):
             assert shared_history.PinnedRetriever.retrieve is not original_retrieve
@@ -385,7 +457,8 @@ def test_modern_recall_transport_records_and_restores_authenticated_hooks(tmp_pa
 
 @pytest.mark.parametrize('module_name', ['fewshot', 'shared_history'])
 def test_modern_recall_transport_rejects_modules_outside_archive(tmp_path, monkeypatch, module_name):
-    from src.generator import fewshot, shared_history
+    from src.generator import fewshot
+    from src.generator.fewshot import shared_history
     for name, module in [('fewshot', fewshot), ('shared_history', shared_history)]:
         path = tmp_path / ('outside' if name == module_name else 'snapshot') / (name + '.py')
         monkeypatch.setattr(module, '__file__', str(path))

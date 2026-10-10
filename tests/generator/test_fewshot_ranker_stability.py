@@ -6,11 +6,13 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError, sha256_file
-from src.generator.fewshot_ranker import stability
-from src.history.sources import digest
-from src.generator import ranker_labels as labels
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training import stability
+from src.data.history.sources import digest
+from src.generator.fewshot.training import labels
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_ranker_labels import row
 
 

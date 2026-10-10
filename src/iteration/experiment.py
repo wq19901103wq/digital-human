@@ -17,10 +17,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import ConfigError, dataset_plan, load_settings
+from src.infrastructure.config import ConfigError, dataset_plan, load_settings
 from ..generator.generator import ReplyGenerator
 from . import acceptance, data_guard, datasets, gates, protocol, versions, record_contract
-from .storage import read_json as _read_json, write_json, write_once_json
+from src.infrastructure.storage import read_json as _read_json, write_json, write_once_json
 
 _write_json = write_json  # 兼容旧脚本（历史调用名）
 
@@ -213,7 +213,7 @@ def _matching_experiments(kind: str, **filters: Any) -> list[tuple[Path, dict, d
 def _asset_diff(baseline_dir: Path, data_dir: Path) -> list[str]:
     """资产内容差异（SOP §2）：基线版本快照 vs 数据版本工作区。
     提示词/场景迭代不改配置，diff 断言必须能看到内容变化。"""
-    from ..config import sha256_file
+    from src.infrastructure.config import sha256_file
     diffs = []
     for name in ("persona.md",):
         b, w = baseline_dir / name, data_dir / name
@@ -510,7 +510,7 @@ def create_judge_eval_experiment(
                 raise ConfigError('已冻结的 Judge 候选不能再叠加 override')
             cand_cfg = versions.judge_dir(candidate_ref)['config']
         # 提示词迭代：全局模板若已更新，候选的 prompt_sha256 取当前模板（版本创建时快照新模板）
-        from ..config import ROOT as _ROOT, sha256_file as _sha
+        from src.infrastructure.config import ROOT as _ROOT, sha256_file as _sha
         from ..judge import normalize_mode
         imported = normalize_mode(cand_cfg.get("mode", "pairwise_llm")) != "pairwise_llm"
         if not imported and not candidate_ref:

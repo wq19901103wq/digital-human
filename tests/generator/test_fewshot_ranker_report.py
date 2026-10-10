@@ -3,7 +3,8 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.generator.ranker_report import selection_comparison, render
+from src.generator.fewshot.training.report import selection_comparison
+from src.generator.fewshot.training.report import render
 from src.generator.history import HistoryError
 
 

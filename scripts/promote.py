@@ -69,7 +69,7 @@ def main(argv=None) -> None:
 
 
 def execute(args):
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration import experiment, promote, runtime, versions
     if getattr(args, "instance", None):
         versions.switch_instance(args.instance)

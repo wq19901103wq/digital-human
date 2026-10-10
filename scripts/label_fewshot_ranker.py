@@ -7,9 +7,10 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.config import sha256_file
-from src.generator.ranker_labels import LabelBatch
-from src.iteration.storage import file_lock, write_json
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training.labels import LabelBatch
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import write_json
 
 
 def wait_for_inventory(inventory):
@@ -31,10 +32,10 @@ def execute(inventory, data, teacher, generator, instance, *, run=False, workers
             wait_for_inventory(inventory)
         batch = LabelBatch(inventory, data, teacher, generator, instance)
         if (inventory / 'expansion_plan.json').exists():
-            from src.generator.ranker_expansion.reuse import reuse_source
+            from src.generator.fewshot.training.label_reuse import reuse_source
             reuse_inventory = reuse_source(inventory, reuse_inventory)
         if reuse_inventory is not None:
-            from src.generator.ranker_expansion.reuse import import_when_idle
+            from src.generator.fewshot.training.label_reuse import import_when_idle
             import_when_idle(batch, reuse_inventory, data, teacher, generator, instance, wait=wait_for_reuse)
         if not run:
             return batch.report()
@@ -85,7 +86,7 @@ def main():
     if args.stability_output:
         if args.additional_draws < 1 or any((args.reuse_inventory, args.wait_for_reuse, args.wait_for_preparation)):
             parser.error('stability requires positive additional draws and a completed source inventory')
-        from src.generator.fewshot_ranker.stability import execute as repeat
+        from src.generator.fewshot.training.stability import execute as repeat
         result = repeat(**options)
         result = {k: v for k, v in result.items() if k != 'methods'}
     else:

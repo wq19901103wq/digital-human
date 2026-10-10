@@ -54,8 +54,41 @@ def test_failed_smoke_is_not_running_or_a_quality_score(tmp_path):
     assert 'href="/dashboard/demo/index.html"' in page
 
 
+@pytest.mark.parametrize('stage', ['write_run', 'refresh_dashboard', 'write_instance_index'])
+def test_safe_publish_keeps_authoritative_evidence_after_failure(tmp_path, monkeypatch, caplog, stage):
+    exp, _ = _run(tmp_path)
+    evidence = {name: (exp / name).read_bytes() for name in ('spec.json', 'state.json', 'cases.jsonl')}
+    original = getattr(report, stage)
+
+    def broken(*args):
+        raise OSError('report storage unavailable')
+
+    monkeypatch.setattr(report, stage, broken)
+    assert report.publish_safely(exp) is False
+    assert 'report storage unavailable' in caplog.text
+    assert any(record.exc_info and record.exc_info[0] is OSError for record in caplog.records)
+    assert {name: (exp / name).read_bytes() for name in evidence} == evidence
+    monkeypatch.setattr(report, stage, original)
+    assert report.publish_safely(exp) is True
+    assert (exp / 'bill.md').exists() and (exp / 'index.html').exists()
+    assert {name: (exp / name).read_bytes() for name in evidence} == evidence
+
+
+def test_safe_publish_does_not_swallow_user_interrupt(tmp_path, monkeypatch):
+    exp, _ = _run(tmp_path)
+    before = (exp / 'state.json').read_bytes()
+
+    def interrupted(directory):
+        raise KeyboardInterrupt('stop report rendering')
+
+    monkeypatch.setattr(report, 'publish', interrupted)
+    with pytest.raises(KeyboardInterrupt, match='stop report rendering'):
+        report.publish_safely(exp)
+    assert (exp / 'state.json').read_bytes() == before
+
+
 def test_threshold_review_display_keeps_original_decision(tmp_path):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     exp, run = _run(tmp_path, fixed=True, state={
         'status': 'finished', 'verdict': 'reject',
         'metrics': {'attempted': 1000, 'pairs': 1000, 'net_win_confirmed': 9}})

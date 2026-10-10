@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from scipy.special import expit
 
-from src import cache
-from src.config import ConfigError
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
 from src.iteration import versions
 from src.judge import gbdt, corrected, corrected_v1 as rt
 from src.judge.judge import build_judge

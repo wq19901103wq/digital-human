@@ -7,10 +7,10 @@ import json
 
 import pytest
 
-from src import cache
-from src.judge import background_features as features
-from src.judge import feature_inspection as inspection
-from src.judge import context_attribution as separate
+from src.infrastructure import cache
+from src.judge.features import background_features as features
+from src.judge.diagnostics import feature_inspection as inspection
+from src.judge.features import context_attribution as separate
 
 
 @pytest.fixture

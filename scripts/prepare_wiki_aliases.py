@@ -10,9 +10,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap.wiki.wiki_aliases import build_review, write_review  # noqa: E402
-from src.bootstrap.wiki.wiki_alias_review import refine_review, write_refined  # noqa: E402
-from src.bootstrap.wiki.wiki_content import compile_content, write_content  # noqa: E402
+from src.share.wiki.wiki_aliases import build_review
+from src.share.wiki.wiki_aliases import write_review# noqa: E402
+from src.share.wiki.wiki_alias_review import refine_review
+from src.share.wiki.wiki_alias_review import write_refined# noqa: E402
+from src.share.wiki.wiki_content import compile_content
+from src.share.wiki.wiki_content import write_content# noqa: E402
 
 
 def main():
@@ -50,8 +53,8 @@ def main():
             parser.error('--library requires --identity-review, --review, --curated, --llm-config')
         if output.is_relative_to(args.library.resolve()):
             parser.error('整理结果不能写入原 Wiki')
-        from src.bootstrap.wiki.wiki_library_extract import organize_library
-        from src.config import load_settings
+        from src.share.wiki.wiki_library_extract import organize_library
+        from src.infrastructure.config import load_settings
         load_settings()
         config = json.loads(args.llm_config.read_text())
         summary = organize_library(args.library, output, args.identity_review, args.review, args.curated,

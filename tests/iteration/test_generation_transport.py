@@ -155,7 +155,8 @@ def test_probe_rejects_unsafe_endpoint(monkeypatch, url):
 
 @pytest.mark.parametrize('healthy', [True, False])
 def test_worker_routes_records_preflight_and_restores(monkeypatch, tmp_path, healthy):
-    from src import llm, config
+    from src import llm
+    from src.infrastructure import config
     model = client(monkeypatch)
     snapshot = tmp_path / 'snapshot'
     directory = tmp_path / 'experiment'
@@ -193,7 +194,8 @@ def test_worker_routes_records_preflight_and_restores(monkeypatch, tmp_path, hea
 
 @pytest.mark.parametrize('authenticated', [True, False])
 def test_worker_rejects_unbound_route_or_client(monkeypatch, tmp_path, authenticated):
-    from src import llm, config
+    from src import llm
+    from src.infrastructure import config
     model = client(monkeypatch)
     monkeypatch.setattr(config, 'load_settings', lambda: {})
     monkeypatch.setattr(llm, '__file__', str((tmp_path if authenticated else tmp_path.parent) / 'src/llm.py'))

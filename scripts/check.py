@@ -42,10 +42,16 @@ class Report:
         return self.value
 
 
-def command(argv):
-    result = subprocess.run([sys.executable, *argv], cwd=ROOT, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+def command(argv, *, timeout=None):
+    try:
+        result = subprocess.run([sys.executable, *argv], cwd=ROOT, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ''
+        if isinstance(output, bytes):
+            output = output.decode('utf-8', errors='replace')
+        raise RuntimeError(f'timeout={timeout}s\n{output}') from exc
     if result.returncode:
         raise RuntimeError(f'exit={result.returncode}\n{result.stdout}')
     return result.stdout.strip()
@@ -75,6 +81,14 @@ def check_code(args, report):
         report.run('offline_demo', lambda: command(['scripts/offline_demo.py', '--output', args.demo_output]))
 
 
+def check_inference(args, report):
+    def saved_prediction():
+        output = command(['-m', 'src.iteration.inference_check', '--kind', args.kind,
+                          '--model', str(args.model)], timeout=60)
+        return json.loads(output.splitlines()[-1])
+    report.run('saved_model_loading_and_prediction', saved_prediction)
+
+
 @contextmanager
 def offline():
     from src.judge.corrected import CodexJudgeClient
@@ -100,7 +114,8 @@ def check_replay(path, pack, baseline, candidate):
 
 
 def check_judge(args, report):
-    from src.config import ConfigError, valid_name
+    from src.infrastructure.config import ConfigError
+    from src.infrastructure.config import valid_name
     from src.iteration import datasets, versions
     from src.iteration.materials import validation
     from src.iteration.materials import seals as guard
@@ -123,7 +138,7 @@ def check_judge(args, report):
 
     report.run('development_pack', check_pack)
     def learning_sources():
-        from src import cache
+        from src.infrastructure import cache
         proof = validation.snapshot(pack['data_ref'], dirs, 'judge_development')
         return dict(snapshot_sha256=cache.digest(proof), materials=list(proof['materials']),
                     guard_code=proof['guard_code'])
@@ -144,7 +159,7 @@ def check_judge(args, report):
 
 
 def check_experiment(args, report):
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration import experiment, gates, protocol, record_contract, versions
     if not args.exp:
         from scripts.check_rules import check_instance
@@ -192,7 +207,9 @@ def check_experiment(args, report):
 
 
 def check_data(args, report):
-    from src.bootstrap import conversations, data_quality, import_coverage
+    from src.data import conversations
+    from src.data import data_quality
+    from src.data import import_coverage
     from src.iteration import versions
     overrides = {k: getattr(args, k) for k in
         ('context_gap_seconds', 'response_gap_seconds', 'reply_gap_seconds') if getattr(args, k) is not None}
@@ -207,7 +224,7 @@ def check_data(args, report):
             report.value['data_quality'][ref] = result
             if binding is not None:
                 if binding != data_quality.acceptance_binding(directory):
-                    from src.config import ConfigError
+                    from src.infrastructure.config import ConfigError
                     raise ConfigError('数据内容或验收代码在检查过程中变化')
                 result['acceptance_binding'] = binding
             data_quality.require_passed(result)
@@ -216,7 +233,7 @@ def check_data(args, report):
 
 
 def check_materials(args, report):
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration import material_compatibility, versions
     def inspect():
         value = material_compatibility.inspect(versions.data_version_dir(args.data),
@@ -300,6 +317,10 @@ def main(argv=None):
                       help='离线交替比较 SQLite 资格缓存的冷/热两路耗时；不代表实验整体速度')
     code.add_argument('--eligibility-repeats', type=int, default=5,
                       help='每组资格缓存对照的重复次数（默认 5）；仅用于离线微基准')
+    inference = sub.add_parser('inference', help='只读加载已有评分资产并合成预测；不训练、不请求、不核验来源证明')
+    inference.add_argument('--kind', required=True,
+                           choices=('judge-gbdt', 'fewshot-xgboost', 'judge-embedding'))
+    inference.add_argument('--model', required=True, type=Path)
     wiki = sub.add_parser('wiki', help='核对 Wiki 批次产物及已知转发称呼归属问题；不生成事实')
     wiki.add_argument('--batch', action='append', required=True, type=Path)
     wiki.add_argument('--require-complete', action='store_true', help='批次仍有未完成任务时检查失败')
@@ -355,8 +376,12 @@ def main(argv=None):
     report = Report(args.mode)
     if args.mode == 'code':
         check_code(args, report)
+    elif args.mode == 'inference':
+        check_inference(args, report)
+        report.value.update(evaluation_started=False, model_requests_prohibited=True,
+                            training_started=False, project_case_count=0)
     elif args.mode == 'wiki':
-        from src.bootstrap.wiki.wiki_delivery import require_valid
+        from src.share.wiki.wiki_delivery import require_valid
         with offline():
             report.run('wiki_artifacts', lambda: require_valid(args.batch,
                 require_complete=args.require_complete, catalog=args.catalog))
@@ -379,13 +404,14 @@ def main(argv=None):
                             project_case_count=0)
     else:
         from src.iteration import versions
-        from src.config import ConfigError
+        from src.infrastructure.config import ConfigError
         before = None
         try:
             versions.switch_instance(args.instance)
             before = versions.POINTERS_PATH.read_bytes()
             with offline():
-                {'judge': check_judge, 'experiment': check_experiment, 'data': check_data,
+                {'judge': check_judge,
+                 'experiment': check_experiment, 'data': check_data,
                  'materials': check_materials, 'dashboard': check_dashboard,
                  'retrieval': check_retrieval}[args.mode](args, report)
         except Exception as exc:
@@ -400,7 +426,7 @@ def main(argv=None):
         report.value.update(evaluation_started=False, model_requests_prohibited=True)
     value = report.finish()
     if args.output:
-        from src.iteration.storage import write_once_json
+        from src.infrastructure.storage import write_once_json
         write_once_json(Path(args.output), value)
     print(json.dumps(value, ensure_ascii=False, indent=2))
     return int(value['status'] != 'passed')

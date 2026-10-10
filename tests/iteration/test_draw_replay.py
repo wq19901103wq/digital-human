@@ -6,10 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src import cache
-from src.config import ConfigError, sha256_file
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from src.iteration import branches, draw_replay as replay, experiment, gates, runner, versions
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from src.iteration.training_evidence import Evidence
 from src.judge import corrected, corrected_v1 as rt
 from test_corrected_judge import bundle, case

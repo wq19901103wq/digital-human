@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import dataset_plan, load_settings
+from src.infrastructure.config import dataset_plan
+from src.infrastructure.config import load_settings
 from src.iteration import protocol
 
 

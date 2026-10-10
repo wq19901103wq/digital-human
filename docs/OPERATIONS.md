@@ -96,6 +96,16 @@ python scripts/check.py materials --instance demo --data DATA_REF --judge JUDGE_
 
 运行时检查不请求模型、不生成实验结果、不写基线指针，也不读取固定验收答案。JSON 报告给出每项通过或失败以及原因；任一失败均返回非零，互不依赖的检查继续汇总。`--output` 只能写入新报告路径。检查通过是当前材料/证据通过相应检查，实际晋级仍从晋级入口重验当前条件。
 
+若回归在 XGBoost 或 PyTorch 原生库内中止，可单独核验已有评分资产的在线加载和预测：
+
+```bash
+python scripts/check.py inference --kind fewshot-xgboost --model /path/to/ranker/model.json
+python scripts/check.py inference --kind judge-gbdt --model /path/to/scorer.json
+python scripts/check.py inference --kind judge-embedding --model /path/to/embedding.json
+```
+
+`inference` 在隔离子进程中调用实际在线评分 API，以两条合成输入检查导入、已有权重加载和有限预测值，限时 60 秒；原生中止或超时均报告失败，不静默跳过。它不拟合、不发模型请求、不修改模型资产；通过不代表来源证明已核验、实验效果达标或完整推理链路可用。失败阶段保留在报告中，用于区分训练测试限制与在线评分故障。
+
 已冻结候选和观察可以交给普通实验命令，沿用创建和执行时的自动保护：
 
 ```bash
@@ -354,6 +364,20 @@ Wiki 原批次可用 `scripts/batch_wiki.py run --output instances/demo/backgrou
 冻结实验按时间片续跑时，可在 `src/iteration/pack_transport.py --kind experiment --time-slice-seconds 900` 的原命令上加 `--unattempted-first`：只把未尝试题排在历史失败重试前面，保留原题号、全部待办及失败记录。未尝试题推进完后仍会重试失败题；成功题仍由原执行器跳过，最终失败率、补验和准入条件不变。该选项不能用于没有时间片的执行或其他任务类型，调度选择记录在 `transport_overrides` 中。
 
 ## 维护与发布
+
+### 统一实验指标
+
+使用 `scripts/check.py --output REPORT.json experiment --instance demo --exp EXPERIMENT --metrics-report`，在既有完成和证据检查后附加 `experiment_metrics`。统计统一位于 `src/iteration/metrics.py`，支持生成器和 Judge 比较；仅读冻结题单、最终记录与 trace，不调用模型、不重跑题目、不改版本指针或晋级门槛。固定实验只核验完成，不冒充开发晋级。开发结论未通过时仍可输出统计，但整体检查保持失败。
+
+`cohorts.all/group/private` 分别给出识别数、识别率、净胜、失败率和题单覆盖；识别率分母为成功配对数，失败和未完成题单列。生成器指标是“生成回复被识别为 AI”，越低越好；Judge 指标是“正确识别真人与 AI”，越高越好，两者不可混称准确率。`per_case` 保存逐题两侧的阶段耗时与证据缺口，不包含回复或提示正文。
+
+逐题 Gen/Judge 延迟只统计最终成功题的初测阶段：先题内聚合，再计算跨题均值、P50、P95，并列出样本数、缺失数和覆盖率。
+
+- `current_wall_ms`：本次完整生成或判定阶段的端到端耗时，包括本地处理及响应缓存查询，不含实验启动准备。
+- `pre_response_cache_wall_ms`：未命中框架响应缓存的完整阶段耗时；全阶段命中时追溯原始 trace。若仅部分请求命中缓存，无法还原没有缓存时的完整阶段，标为缺失，不用 API 时间相加冒充端到端。此口径不排除模型服务商自己的 prompt cache。
+- `model_attempt_ms`：每题该阶段可追溯的模型请求尝试耗时合计，包括失败尝试；不是平均单请求耗时，也不是端到端时间。当前调用与历史调用分别计数，历史不同服务时段不能直接证明提速。
+
+Judge 实验复用冻结生成回复，Gen 延迟记为 `not_executed`，不是 0ms。成功题延迟可能有幸存者偏差；完整运行跨度、重试和失败请求累计损耗另看 `run_window_speed`，补验与初测分开。缺少 trace 或耗时的历史实验只报告已有覆盖，不为了补指标重跑。
 
 `run_window_speed.totals` 汇总全部有记录的正式运行窗口：`elapsed_span_ms` 是首次记录启动至最后记录更新的跨度，`recorded_active_time_ms` 是窗口区间并集，重叠时间只计一次；`uncovered_time_ms` 仅表示没有进程 profile 覆盖的时间，不能自动认定为停机或空闲。`real_calls.attempt_time` 汇总成功和失败尝试的请求占用时间，含未归属窗口的真实调用，不导入缓存历史，不给缺失耗时或未结束请求补零；它不是墙钟损失。`retained_final_records` 是当前仍保留的最终结果，后续续跑会替换旧失败，不能据此还原每窗曾写入的全部结果。运行未结束或时间证据有缺口时，这些数值只代表已记录部分，不宣称完整耗时或整体提速。
 

@@ -11,7 +11,7 @@ import sys
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.iteration import experiment, learned_gen, pack_transport, versions
-from src.iteration.storage import read_json
+from src.infrastructure.storage import read_json
 
 
 def main():

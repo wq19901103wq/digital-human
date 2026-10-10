@@ -6,12 +6,13 @@ import pytest
 
 from src.iteration.training_evidence import generation_cache
 from src.iteration.training_evidence import SavedCache
-from src import cache, tracing
+from src.infrastructure import cache
+from src.infrastructure import tracing
 
 
 @pytest.mark.parametrize('prefix', ['/src/', '/src/digital_human/'])
 def test_renamed_frozen_code_keeps_original_digest(prefix):
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration.training_evidence import input_code_hash
     inputs = {'/old' + prefix + 'judge/rpa_v1.py': 'historical-digest'}
     assert input_code_hash({'inputs': inputs}, 'judge/corrected_v1.py') == 'historical-digest'
@@ -21,7 +22,7 @@ def test_renamed_frozen_code_keeps_original_digest(prefix):
 
 
 def test_unrecognized_frozen_code_is_rejected():
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration.training_evidence import input_code_hash
     with pytest.raises(ConfigError, match='missing'):
         input_code_hash({'inputs': {'/other/rpa_v1.py': 'digest'}}, 'judge/corrected_v1.py')

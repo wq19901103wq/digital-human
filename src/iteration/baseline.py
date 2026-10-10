@@ -10,12 +10,12 @@ import time
 import uuid
 from pathlib import Path
 
-from ..cache import digest
-from ..config import ConfigError
+from src.infrastructure.cache import digest
+from src.infrastructure.config import ConfigError
 from . import versions
 from .materials import RunSeal
 from .materials import validation as guard
-from .storage import write_json
+from src.infrastructure.storage import write_json
 
 
 def _selection(data, generator, judge):
@@ -52,7 +52,7 @@ def prepare(data, generator, judge, *, reason):
 
 
 def _data_proof(data, report):
-    from ..bootstrap.data_quality import accepted_report
+    from src.data.data_quality import accepted_report
     directory = versions.data_version_dir(data)
     seal = RunSeal([directory], [Path(report)])
     proof = accepted_report(directory, report)

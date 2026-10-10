@@ -17,7 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.config import parse_overrides  # noqa: E402
+from src.infrastructure.config import parse_overrides
+from src.dashboard import report
 from src.iteration import branch_packs, experiment, runner, versions  # noqa: E402
 
 
@@ -44,6 +45,7 @@ def cmd_compare(args: argparse.Namespace) -> None:
     print(f"校准实验已创建: {exp_dir}")
     if experiment.state_of(exp_dir).get('status') != 'finished':
         runner.run_judge_experiment(exp_dir, workers=args.workers)
+    report.publish_safely(exp_dir)
     state = experiment.state_of(exp_dir)
     print(f"结论: {state.get('verdict')} — {state.get('reason')}")
     if state.get("verdict") == "adopt":
@@ -61,7 +63,7 @@ def cmd_embedding(args: argparse.Namespace) -> None:
 
 
 def cmd_features(args: argparse.Namespace) -> None:
-    from src.judge.feature_inspection import inspect
+    from src.judge.diagnostics.feature_inspection import inspect
     inspect(Path(args.experiment), args.case, args.share, args.judge, Path(args.output),
             branch=args.branch, round_index=args.round, conditions=args.condition,
             memory_index=args.memory_index, memory_model=args.memory_model,
@@ -71,7 +73,7 @@ def cmd_features(args: argparse.Namespace) -> None:
 
 def cmd_ownership_report(args: argparse.Namespace) -> None:
     import json
-    from src.judge.ownership_report import build_report
+    from src.judge.diagnostics.ownership_report import build_report
     directory = versions.PRIVATE / 'experiments' / args.experiment
     family = args.feature_family
     report = build_report(directory, family + '_features')
@@ -84,7 +86,7 @@ def cmd_ownership_report(args: argparse.Namespace) -> None:
 
 def cmd_contribution(args: argparse.Namespace) -> None:
     from concurrent.futures import ThreadPoolExecutor
-    from src.judge.feature_inspection import inspect_contribution
+    from src.judge.diagnostics.feature_inspection import inspect_contribution
     def one(case_id):
         output = Path(args.output) / case_id
         inspect_contribution(Path(args.experiment), case_id, args.judge, output,

@@ -6,10 +6,10 @@ import random
 import time
 from collections import defaultdict
 
-from ..cache import digest
-from ..config import ConfigError, sha256_file
+from src.infrastructure.cache import digest
+from src.infrastructure.config import ConfigError, sha256_file
 from . import datasets, versions
-from .storage import file_lock, write_json
+from src.infrastructure.storage import file_lock, write_json
 
 
 def _root(data_ref):

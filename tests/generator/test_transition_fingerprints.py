@@ -9,13 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from src import cache
-from src.config import ConfigError, sha256_file
-from src.generator import ranker_samples
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training import samples as ranker_samples
 from src.generator.fewshot import RecallSession
-from src.history.sources import digest
+from src.data.history.sources import digest
 from src.iteration import data_guard, versions
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from leakage_support import historical
 from test_ranker_samples import teacher_at
 
@@ -182,7 +184,7 @@ def test_rank_py_evolution_does_not_block_legacy_resume(monkeypatch, tmp_path):
     """活树 rank.py 字节已演进，但旧快照身份 = 归档字节（未变）→ 续跑放行。"""
     experiment = _experiment(tmp_path)
     archive = _fake_runtime_archive(monkeypatch, tmp_path, experiment, _LEGACY_ARCHIVE_FILES)
-    rank_path = Path(ranker_samples.__file__).parent / 'fewshot' / 'rank.py'
+    rank_path = Path(ranker_samples.__file__).resolve().parents[1] / 'rank.py'
     original = data_guard.sha256_file
 
     def evolved(path):
@@ -213,7 +215,7 @@ def _inventory(tmp_path):
 def _repo_src_archived_names(inputs):
     """旧清单输入键 → runtime 归档相对名；只映射仓库 src/ 下的实现/检查件，
     数据类输入（池/cases/teacher/generator）不在归档内。"""
-    repo_src = Path(ranker_samples.__file__).resolve().parents[1]
+    repo_src = Path(ranker_samples.__file__).resolve().parents[3]
     names = {}
     for key in inputs:
         try:
@@ -239,8 +241,9 @@ def _to_legacy_manifest(output, legacy_key, legacy_sha, archive=None):
     archive 提供时：其余 src/ 输入摘要一律按归档真实字节回填（旧运行身份=归档字节）；
     archive=None 时保留活树摘要（仅用于归档缺失的拒绝路径，该路径先报缺 runtime.json）。"""
     manifest = read_json(output / 'manifest.json')
+    implementation_keys = {str(path.resolve()) for path in ranker_samples.IMPLEMENTATION_FILES}
     inputs = {name: sha for name, sha in manifest['inputs'].items()
-              if '/src/generator/fewshot/' not in name.replace('\\', '/')}
+              if name not in implementation_keys}
     legacy_resolved = str(Path(legacy_key).resolve())
     inputs[legacy_resolved] = legacy_sha
     if archive is not None:
@@ -266,10 +269,16 @@ def _no_retrieval(*args, **kwargs):
     raise AssertionError('旧清单完成后续跑不得重新检索')
 
 
-def test_legacy_monolith_inventory_resumes_against_archive(monkeypatch, tmp_path):
+@pytest.mark.parametrize('archived_samples_path', ['current', 'legacy'])
+def test_legacy_monolith_inventory_resumes_against_archive(monkeypatch, tmp_path, archived_samples_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
     manifest = read_json(output / 'manifest.json')
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    if archived_samples_path == 'legacy':
+        current_path = Path(ranker_samples.__file__).resolve()
+        old_path = current_path.parents[2] / 'ranker_samples.py'
+        manifest['inputs'][str(old_path)] = manifest['inputs'].pop(str(current_path))
+        write_json(output / 'manifest.json', manifest)
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[2] / 'few_shot.py'
     archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
                               {'src/generator/few_shot.py': 'legacy few_shot\n'})
     _to_legacy_manifest(output, str(legacy_key),
@@ -283,7 +292,7 @@ def test_legacy_monolith_inventory_resumes_against_archive(monkeypatch, tmp_path
 def test_legacy_session_only_inventory_resumes_against_archive(monkeypatch, tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
     manifest = read_json(output / 'manifest.json')
-    legacy_key = Path(ranker_samples.__file__).parent / 'fewshot' / 'session.py'
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'session.py'
     archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
                               {'src/generator/fewshot/session.py': 'legacy session\n'})
     _to_legacy_manifest(output, str(legacy_key),
@@ -297,7 +306,7 @@ def test_legacy_session_only_inventory_resumes_against_archive(monkeypatch, tmp_
 def test_tampered_legacy_inventory_rejected(monkeypatch, tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
     manifest = read_json(output / 'manifest.json')
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[2] / 'few_shot.py'
     archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
                               {'src/generator/few_shot.py': 'legacy\n'})
     _to_legacy_manifest(output, str(legacy_key), '0' * 64, archive)
@@ -308,7 +317,7 @@ def test_tampered_legacy_inventory_rejected(monkeypatch, tmp_path):
 
 def test_legacy_inventory_without_runtime_archive_rejected(tmp_path):
     fixture, teacher, generator, output = _inventory(tmp_path)
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[2] / 'few_shot.py'
     _to_legacy_manifest(output, str(legacy_key), '0' * 64)
     with pytest.raises(ConfigError, match='runtime.json'):
         ranker_samples.prepare(fixture.directory, teacher, generator, output,
@@ -319,7 +328,7 @@ def _legacy_ready_inventory(monkeypatch, tmp_path):
     """可放行的旧形态清单场景（单件 monolith），返回 (fixture, teacher, generator, output)。"""
     fixture, teacher, generator, output = _inventory(tmp_path)
     manifest = read_json(output / 'manifest.json')
-    legacy_key = Path(ranker_samples.__file__).resolve().parents[1] / 'generator/few_shot.py'
+    legacy_key = Path(ranker_samples.__file__).resolve().parents[2] / 'few_shot.py'
     archive = _legacy_archive(monkeypatch, tmp_path, manifest['inputs'],
                               {'src/generator/few_shot.py': 'legacy few_shot\n'})
     _to_legacy_manifest(output, str(legacy_key),

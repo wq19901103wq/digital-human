@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import branch_packs, experiment, runner, versions
 from test_iteration import priv, _case, _mk_dev_exp, _write
 from test_branches import tree
@@ -107,7 +107,8 @@ def test_generator_rejects_invalid_workers_before_requests(priv, monkeypatch, wo
 
 def test_generator_parallelism_is_bounded_and_rounds_remain_isolated(priv, monkeypatch):
     from threading import Barrier, Lock, get_ident
-    from src import cache, tracing
+    from src.infrastructure import cache
+    from src.infrastructure import tracing
     exp, calls, control = _gen_run(priv, monkeypatch)
     control['interrupt'] = False
     original = runner.ReplyGenerator
@@ -245,6 +246,82 @@ def _judge_run(priv, monkeypatch):
     return exp, path, calls, control
 
 
+@pytest.mark.parametrize('kind,entrypoint', [('gen', 'run'), ('judge', 'run'),
+                                           ('gen', 'worker'), ('judge', 'worker'), ('judge', 'compare')])
+def test_report_failure_preserves_completion_and_finished_reentry(priv, monkeypatch, caplog, kind, entrypoint):
+    from argparse import Namespace
+    from scripts import run, iterate_branches, evaluate_judge
+    from src.dashboard import report
+    if kind == 'gen':
+        exp, calls, control = _gen_run(priv, monkeypatch)
+        execute = runner.run_gen_experiment
+    else:
+        exp, _, calls, control = _judge_run(priv, monkeypatch)
+        execute = runner.run_judge_experiment
+    control['interrupt'] = False
+    reported = []
+
+    def broken_report(directory):
+        reported.append(experiment.state_of(directory)['status'])
+        raise RuntimeError('presentation unavailable')
+
+    monkeypatch.setattr(report, 'publish', broken_report)
+    monkeypatch.setattr('sys.argv', ['run.py', '--exp', exp.name])
+    if entrypoint == 'compare':
+        monkeypatch.setattr(experiment, 'create_judge_eval_experiment', lambda *args, **kwargs: exp)
+
+    def command():
+        if entrypoint == 'run':
+            run.main()
+        elif entrypoint == 'worker':
+            iterate_branches.work(Namespace(kind='experiment', job=exp.name, workers=2))
+        else:
+            evaluate_judge.cmd_compare(Namespace(pack=experiment.spec_of(exp)['pack_ref'],
+                override=[], change='test', against_production=False, workers=2))
+
+    command()
+    state = experiment.state_of(exp)
+    assert state['status'] == state['progress']['status'] == 'finished'
+    assert state['progress']['phase'] == 'finished'
+    assert reported == ['finished']
+    assert 'presentation unavailable' in caplog.text
+    assert '实验记录与结论保持不变' in caplog.text
+    evidence = {name: (exp / name).read_bytes() for name in ('spec.json', 'state.json', 'cases.jsonl')}
+    completed_calls = list(calls)
+    command()
+    assert reported == ['finished', 'finished']
+    assert execute(exp) == exp
+    assert reported == ['finished', 'finished']
+    assert calls == completed_calls
+    assert {name: (exp / name).read_bytes() for name in evidence} == evidence
+
+
+@pytest.mark.parametrize('kind', ['gen', 'judge'])
+@pytest.mark.parametrize('failure', [RuntimeError, KeyboardInterrupt])
+def test_execution_failure_is_not_a_presentation_failure(priv, monkeypatch, kind, failure):
+    from scripts import run
+    from src.dashboard import report
+    if kind == 'gen':
+        exp, _, _ = _gen_run(priv, monkeypatch)
+    else:
+        exp, _, _, _ = _judge_run(priv, monkeypatch)
+    published = []
+    monkeypatch.setattr(report, 'publish', lambda directory: published.append(directory))
+
+    def interrupted(*args):
+        raise failure('execution interrupted')
+
+    monkeypatch.setattr(runner, 'completed_map', interrupted)
+    monkeypatch.setattr('sys.argv', ['run.py', '--exp', exp.name])
+    with pytest.raises(failure, match='execution interrupted'):
+        run.main()
+    state = experiment.state_of(exp)
+    assert state['status'] == 'running'
+    assert state['progress']['phase'] == 'interrupted'
+    assert state['progress']['status'] == 'stopped'
+    assert published == []
+
+
 @pytest.mark.parametrize("workers", [1, 4])
 @pytest.mark.parametrize("mutation", ["context", "human_reply", "ai_replies", "add", "remove", "order"])
 def test_judge_resume_validates_frozen_pack(priv, monkeypatch, mutation, workers):
@@ -331,7 +408,7 @@ def test_legacy_judge_with_frozen_hash_keeps_valid_checkpoint(priv, monkeypatch)
 
 
 def test_pack_rebuild_checks_pool_before_skipping_saved_rows(tree, monkeypatch):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     ptr = versions.load_pointers()
     cfg = versions.current_generator("production")["config"]
     ptr["production_gen"] = versions.create_generator_version(

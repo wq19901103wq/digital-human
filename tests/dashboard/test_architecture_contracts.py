@@ -4,10 +4,13 @@ from argparse import Namespace
 
 import pytest
 
-from src.config import ConfigError, parse_overrides
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import parse_overrides
 from src.iteration import branch_packs, experiment, jobs, runtime, scheduler
 from src.iteration.materials import validation as learning_guard
-from src.iteration.storage import read_json, write_json, write_once_json
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
+from src.infrastructure.storage import write_once_json
 from test_leakage_guards import env as _env
 
 env = _env
@@ -82,7 +85,7 @@ def test_initial_pack_uses_the_same_guarded_resume_loop(env, monkeypatch):
 @pytest.mark.parametrize('changed_material', [False, True])
 def test_pack_checks_once_then_watches_changes_and_reuses_after_validator_revision(env, monkeypatch, changed_material):
     from unittest.mock import Mock
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import versions
     monkeypatch.setattr(branch_packs, 'build_clients', lambda *args: env.client)
     ref = branch_packs.prepare_initial()
@@ -192,6 +195,19 @@ def test_documentation_links_and_presentation_dependency_boundary():
     tree = ast.parse((ROOT / 'src/iteration/learning_guard.py').read_text())
     assert not any(isinstance(node, ast.ImportFrom) and (node.module or '').endswith('branch_packs')
                    for node in ast.walk(tree))
+
+
+def test_experiment_runner_does_not_import_dashboard():
+    from scripts.check_docs import ROOT
+    tree = ast.parse((ROOT / 'src/iteration/runner.py').read_text())
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.append(node.module or '')
+            imports.extend(alias.name for alias in node.names)
+    assert not any('dashboard' in name.split('.') for name in imports)
 
 
 def test_materials_validation_hosts_the_real_guard_implementation():

@@ -225,9 +225,9 @@ def worker_command(worker: str, *, pool: Path, cases_file: Path, count: int,
 
 def select_cases(instance: str, experiment: str, count: int) -> tuple[list, Path, Path]:
     """冻结实验 dev cases 前 N 题 + 冻结历史池路径 + 数据集 cases 文件路径。"""
-    from src.config import valid_name
+    from src.infrastructure.config import valid_name
     from . import datasets, versions
-    from .storage import read_json
+    from src.infrastructure.storage import read_json
     directory = versions.PRIVATE / 'experiments' / valid_name(experiment)
     spec = read_json(directory / 'spec.json')
     data = versions.data_version_dir(spec['data_ref'])
@@ -252,10 +252,11 @@ def compare(instance: str, experiment: str, *, cases: int = 3,
             launch=None) -> dict:
     """三方对比主入口；返回完整结果 dict（含落盘路径）。无模型请求/实验写入。"""
     launch = launch or _launch_worker
-    from src.config import valid_name
+    from src.infrastructure.config import valid_name
     from . import versions
     from .pack_transport import connection_env_file
-    from .storage import read_json, write_once_json
+    from src.infrastructure.storage import read_json
+    from src.infrastructure.storage import write_once_json
     started = time.time()
     case_list, pool, cases_file = select_cases(instance, experiment, cases)
     directory = versions.PRIVATE / 'experiments' / valid_name(experiment)

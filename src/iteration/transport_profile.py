@@ -133,7 +133,7 @@ class TransportProfile:
                 timings_are_nested=True)
 
     def flush(self, status='running'):
-        from src.iteration.storage import write_json
+        from src.infrastructure.storage import write_json
         try:
             write_json(self.path, self.snapshot(status))
         except (OSError, ValueError, TypeError) as exc:
@@ -157,8 +157,12 @@ class TransportProfile:
 
     @contextmanager
     def instrument(self, *, history_required=True, disk_history=None):
-        from src import llm, tracing
-        from src.generator import few_shot, history, history_sources, shared_history
+        from src import llm
+        from src.infrastructure import tracing
+        from src.generator import few_shot
+        from src.generator import history
+        from src.generator import history_sources
+        from src.generator.fewshot import shared_history
         from src.iteration import control, datasets, learning_guard
         originals = []
 
@@ -224,7 +228,9 @@ class TransportProfile:
 
         try:
             if history_required:
-                from src.generator import learned_sources, ranker_report, ranker_samples
+                from src.generator.fewshot import provenance as learned_sources
+                from src.generator.fewshot.training import report as ranker_report
+                from src.generator.fewshot.training import samples as ranker_samples
                 replace(few_shot.PersonaFewShotRetriever, 'retrieve', measured('retrieval_compute'))
                 replace(few_shot.PersonaFewShotRetriever, '_load', measured('history_index_load'))
                 replace(few_shot.PersonaFewShotRetriever, 'is_approved', measured('history_pool_approval'))

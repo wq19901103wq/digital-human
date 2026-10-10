@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import cache
-from ..config import sha256_file, valid_name
+from src.infrastructure import cache
+from src.infrastructure.config import sha256_file
+from src.infrastructure.config import valid_name
 from ..judge import embedding as net
 from . import versions
 from .training_evidence import read, require

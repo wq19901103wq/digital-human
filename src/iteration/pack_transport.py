@@ -35,7 +35,7 @@ def live_transport_profile():
 
 
 def live_retrieval_cache():
-    path = Path(__file__).resolve().parents[1] / 'generator' / 'recall_reuse.py'
+    path = Path(__file__).resolve().parents[1] / 'generator' / 'fewshot' / 'recall_cache.py'
     spec = importlib.util.spec_from_file_location('_digital_human_retrieval_cache', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -126,7 +126,9 @@ def history_memory_lane(output, *, required=True):
     并发槽全局有界，但不按实例隔离；多实例部署需要更强隔离时应改配置而非散锁。
     """
     from src.iteration import control, versions
-    from src.iteration.storage import LockBusy, file_lock, write_json
+    from src.infrastructure.storage import LockBusy
+    from src.infrastructure.storage import file_lock
+    from src.infrastructure.storage import write_json
     output = Path(output)
     if not required:
         control.check(output)
@@ -325,10 +327,10 @@ def worker_timeout_floor(client_type, seconds):
 
 
 @contextmanager
-def feature_response_cache_validation():
+def feature_response_cache_validation(module_name='src.generator.fewshot.supplemental'):
     """Reject cached responses using the frozen extractor's own evidence rules."""
-    from src import cache
-    from src.generator.fewshot_ranker import supplemental
+    from src.infrastructure import cache
+    supplemental = importlib.import_module(module_name)
     from src.generator.history import HistoryError
     from src.llm import LLMError
     original = supplemental.extract_one
@@ -409,6 +411,22 @@ def archived_gbdt_paths(module, runtime):
         module.verify = original_verify
 
 
+def snapshot_feature_module(snapshot, runtime):
+    """Select scoring hooks only from the authenticated snapshot manifest."""
+    try:
+        files = json.loads((Path(snapshot) / 'manifest.json').read_text())['files']
+    except (OSError, ValueError, KeyError) as exc:
+        raise runtime.ConfigError(f'cannot classify snapshot scoring: {exc}') from exc
+    if not isinstance(files, dict):
+        raise runtime.ConfigError('cannot classify snapshot scoring: manifest has no files map')
+    modules = ('src.generator.fewshot_ranker.supplemental',
+               'src.generator.fewshot.supplemental')
+    selected = [module for module in modules if module.replace('.', '/') + '.py' in files]
+    if len(selected) > 1:
+        raise runtime.ConfigError('cannot classify snapshot scoring: mixed implementations')
+    return selected[0] if selected else None
+
+
 def snapshot_generation(snapshot, runtime):
     """Classify an authenticated snapshot by its manifest file list (design §2.3a).
 
@@ -444,7 +462,7 @@ def fewshot_profile_instrument(profile, fewshot):
     Legacy snapshots keep using transport_profile.instrument, which patches the
     old PersonaFewShotRetriever; modern archives do not contain that class.
     """
-    from src import tracing
+    from src.infrastructure import tracing
     originals = []
 
     def replace(owner, name, wrapper):
@@ -526,20 +544,23 @@ def complete_saved_features(directory, output, workers, *, generation=None):
     """Extract only a complete frozen recall checkpoint, without history loading.
 
     generation: 'few_shot' 旧代快照走归档自带 src/generator/history_sources.py；
-    'fewshot' 新代快照走 src/history/sources.py；None 默认新包（活树 shim 与
+    'fewshot' 新代快照走 src/data/history/sources.py；None 默认新包（活树 shim 与
     新包同源，保持旧调用方在当前树进程中的行为）。两代路径由 _run_legacy /
     _run_modern 显式注入。
     """
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     if generation in (None, 'fewshot'):
-        from src.history.sources import digest, require
+        from src.data.history.sources import digest
+        from src.data.history.sources import require
     elif generation == 'few_shot':
         from src.generator.history_sources import digest, require
     else:
         raise ValueError(f'unknown snapshot generation: {generation}')
     from src.iteration import control, experiment, learned_gen, learning_guard, runtime, versions
     from src.iteration.parallel import worker_limit
-    from src.iteration.storage import file_lock, read_json, write_json
+    from src.infrastructure.storage import file_lock
+    from src.infrastructure.storage import read_json
+    from src.infrastructure.storage import write_json
 
     directory, output = Path(directory).resolve(), Path(output).resolve()
     require(output.is_dir() and output != directory, 'Existing feature output is required')
@@ -628,7 +649,7 @@ def complete_saved_features(directory, output, workers, *, generation=None):
 
 def promote_saved(directory):
     """Run the frozen promotion gates, without preparing or evaluating a job."""
-    from src.config import ConfigError
+    from src.infrastructure.config import ConfigError
     from src.iteration import experiment, promote, versions
     kind = experiment.spec_of(directory)['kind']
     functions = {'gen_ab': promote.promote_gen, 'judge_eval': promote.promote_judge}
@@ -677,6 +698,7 @@ def install_judge_transport(snapshot, directory, driver):
     from src.judge import corrected
     adapter = load_external_module('_digital_human_codex_transport',
         Path(__file__).resolve().parents[1] / 'judge' / 'codex_transport.py')
+    adapter.settings()
     authentication = load_external_module('_digital_human_runtime_auth_receipt',
                                          Path(__file__).with_name('runtime_auth.py'))
     adapter.install(corrected, expected_root=snapshot,
@@ -688,9 +710,10 @@ def install_judge_transport(snapshot, directory, driver):
 
 
 def install_modern_recall_transport(snapshot, directory, driver):
-    from src.config import ConfigError
-    from src.generator import fewshot, shared_history
-    from src.iteration.storage import write_once_json
+    from src.infrastructure.config import ConfigError
+    from src.generator import fewshot
+    from src.generator.fewshot import shared_history
+    from src.infrastructure.storage import write_once_json
     if any(not Path(module.__file__).resolve().is_relative_to(snapshot.resolve())
            for module in (fewshot, shared_history)):
         raise ConfigError('modern recall transport requires authenticated archive modules')
@@ -738,7 +761,8 @@ def dispatch_worker(args, snapshot, directory, generation):
         if args.timeout_seconds == 0:
             driver.timeout_floor = worker_timeout_floor
         install_judge_transport(snapshot, directory, driver)
-        install_modern_recall_transport(snapshot, directory, driver)
+        if needs_history_memory(directory, getattr(args, 'kind', None)):
+            install_modern_recall_transport(snapshot, directory, driver)
         with generation_routes(snapshot, directory, driver):
             return driver._run_modern(args, snapshot, directory)
     if os.environ.get('DH_LLM_DIRECT_HOSTS'):
@@ -791,16 +815,18 @@ def main():
 
 def _run_legacy(args, snapshot, directory):
     """Legacy snapshot generation: the original assembly, kept verbatim (§2.3a)."""
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import few_shot
     from src.iteration import gbdt_evidence, runtime
-    from src.iteration.storage import read_json, write_once_json
+    from src.infrastructure.storage import read_json
+    from src.infrastructure.storage import write_once_json
     from src.llm import ChatClient
     needs_history = args.kind != 'features' and needs_history_memory(directory, args.kind)
     disk_history = live_disk_history() if needs_history else None
     history_storage = disk_history.disk_storage(few_shot) if needs_history else nullcontext()
     profile_module = live_transport_profile()
-    feature_validation = (snapshot / 'src/generator/fewshot_ranker/supplemental.py').is_file()
+    feature_module = snapshot_feature_module(snapshot, runtime)
+    feature_validation = feature_module is not None
     retrieval_cache = live_retrieval_cache() if needs_history and args.kind not in {'features', 'promotion'} else None
     source_reader = live_disk_source_reads() if needs_history and args.kind not in {'features', 'promotion'} else None
     material_reuse = live_material_reuse() if args.kind not in {'features', 'promotion'} else None
@@ -857,14 +883,14 @@ def _run_legacy(args, snapshot, directory):
         profile = profile_module.TransportProfile(directory / 'transport_profiles' / (uuid.uuid4().hex + '.json'),
             dict(job=args.job, kind=args.kind, workers=args.workers,
                  timeout_seconds=args.timeout_seconds, time_slice_seconds=args.time_slice_seconds))
-        from src.generator import shared_history
+        from src.generator.fewshot import shared_history
         retrieval_reuse = retrieval_cache.exact_retrieval_calls(shared_history, profile=profile) if retrieval_cache else nullcontext()
         source_read_reuse = source_reader.source_reads(disk_history, retrievers=few_shot,
                                                       profile=profile) if source_reader else nullcontext()
         from src.iteration import learning_guard
         material_validation_reuse = material_reuse.verified_materials(learning_guard, profile=profile,
                                                                      disk_rows=disk_history)
-        feature_response_reuse = feature_response_cache_validation() if feature_validation else nullcontext()
+        feature_response_reuse = feature_response_cache_validation(feature_module) if feature_validation else nullcontext()
         with profile, profile.admission(history_memory_lane(directory, required=needs_history), 'history_lane_wait'), \
                 worker_timeout_floor(ChatClient, args.timeout_seconds), \
                 archived_runtime_paths(runtime), archived_gbdt_paths(gbdt_evidence, runtime), \
@@ -888,14 +914,16 @@ def _run_modern(args, snapshot, directory):
     with-stack semantics (profile admission, history lane, timeout floor,
     archived evidence paths, case time slice). All imports resolve against the
     archived snapshot via sys.path and stay inside this branch."""
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import fewshot
     from src.iteration import control, gbdt_evidence, runtime, transport_profile
     from src.iteration.materials import validation
-    from src.iteration.storage import read_json, write_once_json
+    from src.infrastructure.storage import read_json
+    from src.infrastructure.storage import write_once_json
     from src.llm import ChatClient
     needs_history = args.kind != 'features' and needs_history_memory(directory, args.kind)
-    feature_validation = (snapshot / 'src/generator/fewshot_ranker/supplemental.py').is_file()
+    feature_module = snapshot_feature_module(snapshot, runtime)
+    feature_validation = feature_module is not None
     receipt = {'schema': 1, 'kind': 'transport_timeout_floor',
                'operation': args.kind,
                'timeout_seconds': args.timeout_seconds, 'workers': args.workers,
@@ -933,7 +961,7 @@ def _run_modern(args, snapshot, directory):
             dict(job=args.job, kind=args.kind, workers=args.workers,
                  timeout_seconds=args.timeout_seconds, time_slice_seconds=args.time_slice_seconds))
         material_validation_reuse = validation.verified_materials(profile=profile)
-        feature_response_reuse = feature_response_cache_validation() if feature_validation else nullcontext()
+        feature_response_reuse = feature_response_cache_validation(feature_module) if feature_validation else nullcontext()
         with profile, profile.admission(history_memory_lane(directory, required=needs_history), 'history_lane_wait'), \
                 worker_timeout_floor(ChatClient, args.timeout_seconds), \
                 archived_runtime_paths(runtime), archived_gbdt_paths(gbdt_evidence, runtime), \

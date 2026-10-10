@@ -6,11 +6,16 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError
-from src.generator.fewshot_ranker import (
-    comparison, discovery, identity_comparison, identity_crosses, logistic, neural_sweep, training,
-)
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.generator.fewshot.training import comparison
+from src.generator.fewshot.training import discovery
+from src.generator.fewshot.training import identity_comparison
+from src.generator.fewshot import identity_crosses
+from src.generator.fewshot.training import logistic
+from src.generator.fewshot.training import neural_sweep
+from src.generator.fewshot.training import optimization as training
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from src.judge.embedding import restore
 from tests.generator.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.generator.test_fewshot_ranker_training import synthetic

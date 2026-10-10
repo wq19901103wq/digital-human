@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from src.iteration import experiment, measurements, runner, versions
-from src.config import load_settings
+from src.infrastructure.config import load_settings
 from test_iteration import _write, _use_small_settings, priv, _case  # noqa: F401
 from leakage_support import isolated_legacy_provenance  # noqa: F401
 

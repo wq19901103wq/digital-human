@@ -11,8 +11,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap import conversations, history, ingest, import_coverage  # noqa: E402
-from src.config import ConfigError, sha256_file  # noqa: E402
+from src.data import conversations
+from src.data import history_build as history
+from src.data import ingest
+from src.data import import_coverage# noqa: E402
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file# noqa: E402
 from src.iteration import versions  # noqa: E402
 
 
@@ -39,7 +43,7 @@ def main():
         parser.error('--fixed-chat-cap 仅可用于 --refresh-fixed-data')
     versions.switch_instance(args.instance)
     if args.refresh_fixed_data:
-        from src.bootstrap.acceptance_refresh import refresh
+        from src.data.acceptance_refresh import refresh
         print(json.dumps(refresh(args.refresh_fixed_data, seed=args.fixed_seed,
                          fixed_chat_cap=args.fixed_chat_cap, build=args.build),
                          ensure_ascii=False), flush=True)

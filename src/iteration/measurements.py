@@ -14,9 +14,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from . import experiment, versions
-from .storage import write_json
+from src.infrastructure.storage import write_json
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS measurements(
@@ -236,7 +237,7 @@ _FIELDS = ('source_exp', 'source_line', 'side_fp', 'data_ref', 'case_id', 'datas
 def record_experiment(exp_dir: Path, db: sqlite3.Connection | None = None) -> int:
     """实验 finish 时批量事务写入。同键内容一致幂等忽略；不一致拒绝。
     单写者由文件锁强制（评审 P2-3）。返回新写入行数。"""
-    from .storage import file_lock
+    from src.infrastructure.storage import file_lock
     rows = list(iter_side_measurements(exp_dir))
     own = db is None
     if own:

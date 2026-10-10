@@ -14,7 +14,9 @@ from urllib.request import urlopen
 
 import pytest
 
-from src import cache, llm, tracing
+from src.infrastructure import cache
+from src import llm
+from src.infrastructure import tracing
 from src.generator.generator import ReplyGenerator
 from src.judge import corrected
 from src.judge.judge import Judge

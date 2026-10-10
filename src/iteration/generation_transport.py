@@ -129,7 +129,7 @@ def experiment_clients(directory, snapshot):
     import yaml
     from src.llm import build_clients
     from src.iteration import versions
-    from src.iteration.storage import read_json
+    from src.infrastructure.storage import read_json
 
     settings = yaml.safe_load((snapshot / 'settings.snapshot.yaml').read_text())
     spec = read_json(directory / 'spec.json')
@@ -144,7 +144,8 @@ def experiment_clients(directory, snapshot):
 
 
 def probe_experiment(instance, experiment_id, **kwargs):
-    from src.config import load_settings, valid_name
+    from src.infrastructure.config import load_settings
+    from src.infrastructure.config import valid_name
     from src.iteration import runtime, versions
 
     load_settings()
@@ -164,8 +165,8 @@ def worker_routes(snapshot, directory, *, provenance):
     from pathlib import Path
     import uuid
     from src import llm
-    from src.config import load_settings
-    from src.iteration.storage import write_once_json
+    from src.infrastructure.config import load_settings
+    from src.infrastructure.storage import write_once_json
 
     hosts = direct_hosts()
     if not hosts:

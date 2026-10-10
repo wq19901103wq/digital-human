@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import generation_reuse as reuse
 
 

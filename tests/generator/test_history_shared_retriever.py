@@ -5,9 +5,9 @@ from threading import Barrier
 
 import pytest
 
-from src.generator import shared_history as runtime
+from src.generator.fewshot import shared_history as runtime
 from src.iteration.training_operations import ExcludingRetriever
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 
 
 def fixture(tmp_path, monkeypatch):

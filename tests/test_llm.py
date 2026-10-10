@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src import config, llm
+from src.infrastructure import config
+from src import llm
 
 
 @pytest.fixture

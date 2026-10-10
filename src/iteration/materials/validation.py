@@ -17,7 +17,8 @@ from pathlib import Path
 import sqlite3
 from threading import Lock, local
 
-from ...config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from .. import datasets, versions
 from .seals import RunSeal
 
@@ -79,7 +80,7 @@ def _reconstructed_judge(data_ref, directory, record):
     # Reconstruct the actual training inputs; a new evaluation version does not
     # turn its repaired source files into the model's historical training data.
     source_data = spec['data_ref']
-    from ...history.sources import load
+    from src.data.history.sources import load
     history = load(versions.data_version_dir(source_data))
     train = history.role('judge_training')
     history.role('judge_development')
@@ -161,7 +162,7 @@ def require_materials(data_ref, directories, role='development'):
         elif bound == {'prompt.md': GENERIC_JUDGE_TEMPLATE}:
             _require(record.get('information_end') == 0, '通用 Judge 指令不能声明额外学习来源')
         elif 'ranker/provenance.json' in bound:
-            from ...generator.learned_sources import verify as verify_ranker
+            from src.generator.fewshot.provenance import verify as verify_ranker
             verify_ranker(data_ref, directory, record)
         else:
             _reconstructed_judge(data_ref, directory, record)
@@ -185,7 +186,7 @@ def _directories(spec):
 
 
 def snapshot(data_ref, directories, role='development'):
-    from ...history.sources import load
+    from src.data.history.sources import load
     data = versions.data_version_dir(data_ref)
     require_materials(data_ref, directories, role)
     history = load(data)
@@ -203,7 +204,8 @@ def snapshot(data_ref, directories, role='development'):
                  'iteration/training_evidence.py', 'iteration/gbdt_evidence.py',
                  'iteration/fusion.py', 'iteration/embedding_adoption.py',
                  'iteration/material_compatibility.py',
-                 'iteration/datasets.py', 'history/sources.py', 'generator/learned_sources.py')}}
+                 'iteration/datasets.py', 'data/history/sources.py',
+                 'generator/fewshot/provenance.py')}}
 
 
 def bind(spec):
@@ -238,7 +240,7 @@ def verify(spec, *, historical_directory=None):
 
 def verify_generation(spec, cases):
     """Training/pack generators must check sources even when all outputs exist."""
-    from ...history.sources import load
+    from src.data.history.sources import load
     seal = RunSeal([versions.data_version_dir(spec['data_ref']),
                     versions.generator_dir(spec['generator_ref'])], spec.get('inputs', {}))
     history = load(versions.data_version_dir(spec['data_ref']))
@@ -301,8 +303,8 @@ def verify_training(directory, spec, rows, entries=None, *, complete=False):
     evidence, train-only vocabulary, generated negatives and actual feature
     requests. Older recipes without that evidence remain archived, not runnable.
     """
-    from ... import cache
-    from ...history.sources import load
+    from src.infrastructure import cache
+    from src.data.history.sources import load
     from .. import training_evidence as audit
     from ..training_evidence import generation_cache, generations
     from ..training_evidence import Evidence
@@ -359,7 +361,7 @@ def verify_training(directory, spec, rows, entries=None, *, complete=False):
 
 def verify_features(directory, rows, entries, config, evidence, *, complete=False):
     """A feature digest is insufficient without the request which produced it."""
-    from ... import cache
+    from src.infrastructure import cache
     from ..training_evidence import generation_cache
     by_id = {r['case_id']: r for r in rows}
     _require(len(by_id) == len(rows) and set(entries) <= by_id.keys(), '特征包含重复或额外训练样本')
@@ -386,7 +388,7 @@ def verify_features(directory, rows, entries, config, evidence, *, complete=Fals
 
 def verify_fit(rows, entries, artifact):
     """No direct fitting from arbitrary inherited vocabulary or checkpoints."""
-    from ... import cache
+    from src.infrastructure import cache
     artifact = Path(artifact)
     _require(artifact.name == 'model_template.json' and (artifact.parent / 'spec.json').is_file(),
              '拟合缺少干净训练来源，禁止直接使用旧模型模板')
@@ -413,7 +415,7 @@ def verify_fit(rows, entries, artifact):
 
 def verify_pack(pack, dataset):
     """A newly frozen evaluation spec must not bless old unproven AI replies."""
-    from ... import cache
+    from src.infrastructure import cache
     proof = pack.get('generation_proof')
     _require(isinstance(proof, dict), '回复包缺少生成前冻结的来源证明；禁止补签旧回复')
     recipe = proof.get('recipe', {})
@@ -430,7 +432,7 @@ def verify_pack(pack, dataset):
 
 def pack_proof(recipe, rows):
     """Called by guarded builders only after generating under a frozen recipe."""
-    from ... import cache
+    from src.infrastructure import cache
     return {'recipe': recipe, 'rows_sha256': cache.digest(rows)}
 
 
@@ -591,9 +593,9 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
 
 
 def judge_dependencies(directory):
-    from ...config import settings_path
+    from src.infrastructure.config import settings_path
     from .. import runtime
-    from ..storage import read_json
+    from src.infrastructure.storage import read_json
 
     source = directory / 'source_judge.json'
     if not source.is_file():
@@ -631,8 +633,8 @@ def judge_dependencies(directory):
 
 
 def dependencies(data_ref, directories):
-    from ...generator import learned_sources
-    from ..storage import read_json
+    from src.generator.fewshot import provenance as learned_sources
+    from src.infrastructure.storage import read_json
 
     data = {versions.data_version_dir(data_ref)}
     rankers = []
@@ -725,7 +727,7 @@ def cached_training_reads():
 
 
 def ranker_stamps(keys):
-    from ...generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
 
     stamps = {}
     for key in keys:
@@ -740,7 +742,7 @@ def ranker_stamps(keys):
 
 
 def check_stamps(stamps):
-    from ...history.sources import stamp
+    from src.data.history.sources import stamp
 
     _require(all(stamp(path) == saved for path, saved in stamps.items()),
              '运行中已核验 Ranker 依赖变化；禁止复用材料核验')
@@ -765,9 +767,9 @@ def receipt_path(data_ref, directories, role):
 
 
 def restore_ranker_record(item):
-    from ...generator import learned_sources
-    from ...history.sources import stamp
-    from ..storage import read_json
+    from src.generator.fewshot import provenance as learned_sources
+    from src.data.history.sources import stamp
+    from src.infrastructure.storage import read_json
 
     stamps = {Path(path): tuple(value) for path, value in item['stamps'].items()}
     result = copy.deepcopy(item['result'])
@@ -793,7 +795,7 @@ def restore_ranker_record(item):
 
 
 def read_receipt(path, key, seal, rankers, environment, check_cache):
-    from ...generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
 
     if not path.exists():
         return None
@@ -811,6 +813,9 @@ def read_receipt(path, key, seal, rankers, environment, check_cache):
         records = payload['rankers']
         _require([tuple(item['key']) for item in records] == rankers, '材料核验依赖集合不符')
         stamps = {Path(path): tuple(value) for item in records for path, value in item['stamps'].items()}
+        from src.generator.fewshot.runtime_layout import retired_runtime_path
+        if any(not path.is_file() and retired_runtime_path(path) for path in stamps):
+            return None
         check_stamps(stamps)
         restored = {tuple(item['key']): restore_ranker_record(item) for item in records}
         for saved, _ in restored.values():
@@ -824,8 +829,8 @@ def read_receipt(path, key, seal, rankers, environment, check_cache):
 
 
 def write_receipt(path, key, seal, rankers, audit, environment, cache_rows):
-    from ...generator import learned_sources
-    from ..storage import write_json
+    from src.generator.fewshot import provenance as learned_sources
+    from src.infrastructure.storage import write_json
 
     records = [dict(key=key, stamps={str(path): value for path, value in learned_sources._verified[key][0].items()},
                     result=learned_sources._verified[key][1]) for key in rankers]
@@ -896,7 +901,7 @@ def verified_materials(*, profile=None, capacity=CAPACITY, disk_rows=None):
                         environment = environment_record(packages)
                 if closure is None:
                     return full(data_ref, directories, role)
-                from ..storage import file_lock
+                from src.infrastructure.storage import file_lock
                 path, receipt_key = receipt_path(data_ref, directories, role)
                 with ExitStack() as receipt_lock:
                     with timing('material_validation_receipt_wait'):
@@ -934,7 +939,7 @@ def verified_materials(*, profile=None, capacity=CAPACITY, disk_rows=None):
     history_pools = nullcontext()
     if disk_rows is not None:
         from ...generator import few_shot
-        from ...history import sources as history_sources
+        from src.data.history import sources as history_sources
         history_pools = verified_history_pools(few_shot, history_sources,
                                                disk_rows=disk_rows, profile=profile)
     try:

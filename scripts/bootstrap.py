@@ -10,8 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap import history, ingest  # noqa: E402
-from src.config import ConfigError, sha256_file  # noqa: E402
+from src.data import history_build as history
+from src.data import ingest# noqa: E402
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file# noqa: E402
 from src.iteration import baseline, training, versions  # noqa: E402
 
 

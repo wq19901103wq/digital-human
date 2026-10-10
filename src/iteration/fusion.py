@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import sha256_file
+from src.infrastructure.config import sha256_file
 from ..judge import corrected_v1 as rt
 from ..judge.gbdt import GBDTScorer, option_vectors
 from . import gbdt_evidence, versions

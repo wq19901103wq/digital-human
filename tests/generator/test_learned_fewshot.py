@@ -7,12 +7,16 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError
-from src.generator import learned_selection as selection
-from src.generator import learned_sources
-from src.generator.fewshot_ranker import crosses, extraction, identity_crosses, training
+from src.infrastructure.config import ConfigError
+from src.generator.fewshot import learned_selection as selection
+from src.generator.fewshot import provenance as learned_sources
+from src.generator.fewshot import crosses
+from src.generator.fewshot import extraction
+from src.generator.fewshot import identity_crosses
+from src.generator.fewshot.training import optimization as training
 from src.iteration import branches, learned_gen, versions
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from test_fewshot_ranker_training import record
 from test_fewshot_selection import Renderer
 from test_branches import tree as tree, isolated_legacy_provenance as isolated_legacy_provenance
@@ -25,10 +29,10 @@ def example(identity, i=1):
 @pytest.fixture
 def saved_features(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from src.config import sha256_file
-    from src.generator.fewshot_ranker import concern
-    from src.generator.fewshot_ranker.features import context_view
-    from src.history.sources import digest
+    from src.infrastructure.config import sha256_file
+    from src.generator.fewshot import concern
+    from src.generator.fewshot.features import context_view
+    from src.data.history.sources import digest
     from src.iteration import pack_transport, runtime
 
     root = tmp_path / 'instance'
@@ -101,7 +105,7 @@ def saved_features(tmp_path, monkeypatch):
 
 
 def test_saved_features_only_fills_missing_cache_without_advancing(saved_features):
-    from src.generator.fewshot_ranker import supplemental
+    from src.generator.fewshot import supplemental
     value = saved_features
     key, request = next(iter(value.tasks.items()))
     supplemental.extract_one(value.selector.cache, key, request, value.selector.client)
@@ -125,7 +129,7 @@ def test_saved_features_only_fills_missing_cache_without_advancing(saved_feature
 @pytest.mark.parametrize('changed', ['binding', 'payload', 'incomplete', 'task_key', 'client',
                                    'material', 'extra_material', 'source', 'code', 'manifest', 'state'])
 def test_saved_features_rejects_changed_inputs_before_extraction(saved_features, monkeypatch, changed):
-    from src.history.sources import digest
+    from src.data.history.sources import digest
     value = saved_features
     saved = read_json(value.checkpoint)
     if changed == 'binding':
@@ -179,7 +183,8 @@ def test_saved_features_honors_both_job_cancellations(saved_features, target, du
 @pytest.mark.parametrize('target', ['output', 'directory'])
 def test_saved_features_requires_exclusive_output_and_experiment(saved_features, target):
     from concurrent.futures import ThreadPoolExecutor
-    from src.iteration.storage import LockBusy, file_lock
+    from src.infrastructure.storage import LockBusy
+    from src.infrastructure.storage import file_lock
     value = saved_features
     with file_lock(getattr(value, target) / '.run.lock', blocking=False), \
             ThreadPoolExecutor(max_workers=1) as executor:
@@ -190,7 +195,7 @@ def test_saved_features_requires_exclusive_output_and_experiment(saved_features,
 
 def test_saved_features_failure_preserves_cache_and_restores_control(saved_features):
     from src.iteration import control
-    from src.generator.fewshot_ranker import supplemental
+    from src.generator.fewshot import supplemental
     value = saved_features
     key, request = next(iter(value.tasks.items()))
     supplemental.extract_one(value.selector.cache, key, request, value.selector.client)
@@ -242,7 +247,7 @@ def test_serving_reads_frozen_transport_config(tmp_path, monkeypatch):
 
 
 def test_runtime_evidence_relocation_keeps_hashes_and_data_paths(tmp_path, monkeypatch):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     source = tmp_path / 'original/src/scorer.py'
     source.parent.mkdir(parents=True)
     source.write_text('frozen')
@@ -265,14 +270,14 @@ def test_deployment_pins_inference_without_rerunning_historical_training(monkeyp
     monkeypatch.setattr(learned_sources, 'sha256_file', lambda path: 'frozen')
     assert learned_sources.serving_runtime({'runtime': runtime}) == {
         name: 'frozen' for name in learned_sources.SERVING_RUNTIME}
-    runtime['src/generator/fewshot_ranker/schema.py'] = 'changed'
+    runtime['src/generator/fewshot/schema.py'] = 'changed'
     with pytest.raises(ConfigError, match='feature/scoring runtime changed'):
         learned_sources.serving_runtime({'runtime': runtime})
 
 
 @pytest.mark.parametrize('evaluation_data', ['original-data', 'new-data'])
 def test_verification_reconstructs_original_data_before_current_guard(tmp_path, monkeypatch, evaluation_data):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import material_compatibility
     from src.iteration.materials import validation
     deployed = tmp_path / 'generator'
@@ -442,7 +447,7 @@ def test_serving_features_match_training_and_ignore_target_answers():
 
 
 def test_serving_action_crosses_require_explicit_model_transform(monkeypatch):
-    from src.generator.fewshot_ranker import action_crosses
+    from src.generator.fewshot import action_crosses
     target, rows = dict(record(10), case_id='target'), [example('a')]
     tasks, refs = extraction.prepare([dict(target_id='target', target=target,
         candidates=[dict(example=row) for row in rows])], {'model': 'frozen'})

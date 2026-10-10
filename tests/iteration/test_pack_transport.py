@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src import llm
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import pack_transport, runtime, versions
 from _reference_few_shot import few_shot
 from test_fewshot_selection import generator
@@ -215,7 +215,8 @@ def test_time_slice_restores_progress_hooks_on_cancel():
 
 def test_saved_reply_judge_does_not_wait_for_generation_archive(env):
     from src.iteration import control
-    from src.iteration.storage import file_lock, write_json
+    from src.infrastructure.storage import file_lock
+    from src.infrastructure.storage import write_json
     directory = env.root / 'experiments' / 'saved-judge'
     write_json(directory / 'spec.json', {'kind': 'judge_eval'})
     with file_lock(env.root.parent / '.history_memory.lock'):
@@ -234,7 +235,7 @@ def test_saved_reply_judge_does_not_wait_for_generation_archive(env):
                                          ('experiment', 'gen_ab'), ('promotion', 'gen_ab'),
                                          ('experiment', 'unknown')])
 def test_history_jobs_keep_archive_capacity_limit(env, kind, spec_kind):
-    from src.iteration.storage import write_json
+    from src.infrastructure.storage import write_json
     directory = env.root / 'job'
     write_json(directory / 'spec.json', {'kind': spec_kind})
     assert pack_transport.needs_history_memory(directory, kind)
@@ -243,7 +244,8 @@ def test_history_jobs_keep_archive_capacity_limit(env, kind, spec_kind):
 def test_history_memory_lane_releases_on_error_and_serializes_work(env):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
-    from src.iteration.storage import locked, read_json
+    from src.infrastructure.storage import locked
+    from src.infrastructure.storage import read_json
     lock = env.root.parent / '.history_memory.lock'
     first, second = env.root / 'first', env.root / 'second'
     entered, started = Event(), Event()
@@ -276,7 +278,10 @@ def test_history_memory_capacity_rejects_unbounded_values(monkeypatch, value):
 def test_two_history_slots_count_live_legacy_job_and_release_on_error(env, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
-    from src.iteration.storage import LockBusy, file_lock, locked, read_json
+    from src.infrastructure.storage import LockBusy
+    from src.infrastructure.storage import file_lock
+    from src.infrastructure.storage import locked
+    from src.infrastructure.storage import read_json
     monkeypatch.setenv('DH_HISTORY_MEMORY_LANES', '2')
     legacy_lock = env.root.parent / '.history_memory.lock'
     extra_lock = env.root.parent / '.history_memory.1.lock'
@@ -317,7 +322,8 @@ def test_waiting_history_job_can_be_cancelled(env, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     from src.iteration import control
-    from src.iteration.storage import file_lock, read_json
+    from src.infrastructure.storage import file_lock
+    from src.infrastructure.storage import read_json
     monkeypatch.setenv('DH_HISTORY_MEMORY_LANES', '1')
     output = env.root / 'cancelled'
     checked = Event()
@@ -430,11 +436,12 @@ def test_main_records_and_scopes_disk_storage(env, tmp_path, monkeypatch, kind, 
     monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
     import faulthandler
     import sys
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import disk_history
-    from src.history import sources as history_sources
+    from src.data.history import sources as history_sources
     from src.iteration import jobs, learning_guard, material_reuse
-    from src.iteration.storage import read_json, write_json
+    from src.infrastructure.storage import read_json
+    from src.infrastructure.storage import write_json
     directory = env.root / 'experiments/synthetic'
     monkeypatch.setenv('DH_INSTANCES_ROOT', str(env.root.parent))
     write_json(directory / 'spec.json', {'kind': spec_kind})
@@ -600,7 +607,7 @@ class CachedFeatureClient:
         return {'model': 'synthetic'}
 
     def run(self, prompt, schema):
-        from src import cache
+        from src.infrastructure import cache
 
         def produce():
             self.calls += 1
@@ -611,14 +618,14 @@ class CachedFeatureClient:
 
 
 def concern_cache_request(client):
-    from src.generator.fewshot_ranker import concern
-    from src.generator.fewshot_ranker.features import context_view
+    from src.generator.fewshot import concern
+    from src.generator.fewshot.features import context_view
     from tests.generator.test_fewshot_ranker_concern import concerned_record
     return concern.task(context_view(concerned_record()), client.cache_identity())
 
 
 def concern_cache_scope(directory):
-    from src import cache
+    from src.infrastructure import cache
     trace = {'case_id': 'synthetic-case', 'trace_ref': 'synthetic-trace',
              'versions': {'data_ref': 'synthetic-data', 'dataset': 'fixed'}}
     return cache.scope(directory / 'experiments' / 'fixed', trace, {}, 0)
@@ -630,8 +637,8 @@ def concern_cache_response(valid):
 
 
 def test_feature_cache_retries_invalid_original_and_repair_responses(tmp_path):
-    from src import cache
-    from src.generator.fewshot_ranker import supplemental
+    from src.infrastructure import cache
+    from src.generator.fewshot import supplemental
     invalid, valid = concern_cache_response(False), concern_cache_response(True)
     client = CachedFeatureClient([invalid, invalid, invalid, valid])
     key, request = concern_cache_request(client)
@@ -653,7 +660,7 @@ def test_feature_cache_retries_invalid_original_and_repair_responses(tmp_path):
 
 
 def test_feature_cache_reuses_valid_request_response(tmp_path):
-    from src.generator.fewshot_ranker import supplemental
+    from src.generator.fewshot import supplemental
     valid = concern_cache_response(True)
     client = CachedFeatureClient([valid])
     key, request = concern_cache_request(client)
@@ -665,8 +672,8 @@ def test_feature_cache_reuses_valid_request_response(tmp_path):
 
 
 def test_invalid_feature_responses_remain_retryable_and_restore_hooks(tmp_path):
-    from src import cache
-    from src.generator.fewshot_ranker import supplemental
+    from src.infrastructure import cache
+    from src.generator.fewshot import supplemental
     invalid, valid = concern_cache_response(False), concern_cache_response(True)
     client = CachedFeatureClient([invalid, invalid, invalid, invalid, valid])
     key, request = concern_cache_request(client)
@@ -692,8 +699,8 @@ def test_invalid_feature_responses_remain_retryable_and_restore_hooks(tmp_path):
 
 @pytest.mark.parametrize('legacy', [False, True])
 def test_feature_validation_preserves_client_binding_failures(tmp_path, monkeypatch, legacy):
-    from src.generator.fewshot_ranker import supplemental
-    from src.history.sources import digest
+    from src.generator.fewshot import supplemental
+    from src.data.history.sources import digest
     if legacy:
         monkeypatch.delattr(supplemental, 'failed')
     client = CachedFeatureClient([])
@@ -708,8 +715,8 @@ def test_feature_validation_preserves_client_binding_failures(tmp_path, monkeypa
 
 @pytest.mark.parametrize('invalid_evidence', [False, True])
 def test_feature_validation_preserves_success_cache_integrity_failures(tmp_path, invalid_evidence):
-    from src.generator.fewshot_ranker import supplemental
-    from src.history.sources import digest
+    from src.generator.fewshot import supplemental
+    from src.data.history.sources import digest
     client = CachedFeatureClient([concern_cache_response(True)])
     key, request = concern_cache_request(client)
     supplemental.extract_one(tmp_path / 'features', key, request, client)
@@ -733,7 +740,7 @@ def test_feature_validation_preserves_success_cache_integrity_failures(tmp_path,
 def test_feature_validation_isolates_parallel_response_and_binding_failures(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
-    from src.generator.fewshot_ranker import supplemental
+    from src.generator.fewshot import supplemental
     from src.generator.history import HistoryError
     ready = Barrier(2)
     request = {'kind': supplemental.concern.KIND}
@@ -760,8 +767,8 @@ def test_feature_validation_isolates_parallel_response_and_binding_failures(tmp_
 
 @pytest.mark.parametrize('legacy', [False, True])
 def test_feature_validation_preserves_other_extractors(monkeypatch, legacy):
-    from src import cache
-    from src.generator.fewshot_ranker import supplemental
+    from src.infrastructure import cache
+    from src.generator.fewshot import supplemental
     if legacy:
         monkeypatch.delattr(supplemental, 'failed')
     calls = []
@@ -779,8 +786,8 @@ def test_feature_validation_preserves_other_extractors(monkeypatch, legacy):
 
 
 def test_legacy_feature_validation_rejects_bad_responses_without_adding_hooks(tmp_path, monkeypatch):
-    from src import cache
-    from src.generator.fewshot_ranker import supplemental
+    from src.infrastructure import cache
+    from src.generator.fewshot import supplemental
     invalid, valid = concern_cache_response(False), concern_cache_response(True)
     client = CachedFeatureClient([invalid, valid])
     key, request = concern_cache_request(client)

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from scipy.special import expit
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import fusion, versions
 from src.iteration.materials import validation
 from src.judge import corrected

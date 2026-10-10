@@ -751,9 +751,9 @@ def _visible_overlap_fixture(tmp_path):
     """
     from types import SimpleNamespace
 
-    from src.bootstrap import history
-    from src.config import sha256_file
-    from src.iteration.storage import write_json
+    from src.data import history_build as history
+    from src.infrastructure.config import sha256_file
+    from src.infrastructure.storage import write_json
 
     directory = tmp_path / 'data'
     directory.mkdir(parents=True, exist_ok=True)
@@ -862,7 +862,8 @@ def test_recall_session_history_pool_indexed_parity(tmp_path):
 def _assert_recipe_parity(old, new, case, overlapped_id):
     """learned_selection.recall 两路策略：旧类与新包逐字节一致，且
     exclude_reply_in_context_v1 只从同一份无策略选择集中去掉可见回复示例。"""
-    from src.generator.learned_selection import SOURCE_OVERLAP_POLICY, recall
+    from src.generator.fewshot.learned_selection import SOURCE_OVERLAP_POLICY
+    from src.generator.fewshot.learned_selection import recall
 
     for policy in (None, SOURCE_OVERLAP_POLICY):
         expected = [dict(row) for row in recall(old, case, source_overlap_policy=policy)]
@@ -1348,9 +1349,9 @@ def test_sparse_cache_preserves_history_exclusion_in_each_engine(tmp_path, monke
 
 @pytest.mark.parametrize('engine', ['memory', 'indexed', 'hydrated'])
 def test_sparse_cache_keeps_portable_rows_with_changing_history_boundary(tmp_path, monkeypatch, engine):
-    from src.bootstrap import history
-    from src.config import sha256_file
-    from src.iteration.storage import write_json
+    from src.data import history_build as history
+    from src.infrastructure.config import sha256_file
+    from src.infrastructure.storage import write_json
 
     directory = tmp_path / 'data'
     directory.mkdir()
@@ -1630,7 +1631,7 @@ def test_reference_fallback_materializes_real_file(tmp_path, monkeypatch):
     from pathlib import Path
 
     import _reference_few_shot as reference
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
 
     root = tmp_path  # 该根下没有 instances/ 归档树 → 强制走兜底
     assert not reference.archived_few_shot_path(root).is_file()

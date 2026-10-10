@@ -10,8 +10,11 @@ import time
 
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.generator.fewshot_ranker.pipeline import execute, status
-from src.iteration.storage import file_lock, locked, write_json
+from src.generator.fewshot.training.pipeline import execute
+from src.generator.fewshot.training.pipeline import status
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import locked
+from src.infrastructure.storage import write_json
 
 
 def main(argv=None):
@@ -33,7 +36,7 @@ def main(argv=None):
     if args.command == 'compare-grades':
         if not args.source or not args.reference or not args.stability or args.background:
             parser.error('compare-grades requires --source, --reference, --stability; runs locally in foreground')
-        from src.generator.fewshot_ranker.graded_comparison import run
+        from src.generator.fewshot.training.graded_comparison import run
         result = run(args.source, args.reference, args.stability, args.output)
         print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],
                               new_model_requests=result['new_model_requests']), indent=2))
@@ -42,11 +45,11 @@ def main(argv=None):
         if not args.source or not args.reference or args.background:
             parser.error('feature comparison requires --source and --reference and runs locally in the foreground')
         if args.command == 'compare-actions':
-            from src.generator.fewshot_ranker.action_comparison import run
+            from src.generator.fewshot.training.action_comparison import run
         elif args.command == 'compare-models':
-            from src.generator.fewshot_ranker.architecture_comparison import run
+            from src.generator.fewshot.training.architecture_comparison import run
         else:
-            from src.generator.fewshot_ranker.identity_comparison import run
+            from src.generator.fewshot.training.identity_comparison import run
         result = run(args.source, args.reference, args.output)
         print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],
                               new_model_requests=result['new_model_requests']), ensure_ascii=False, indent=2))
@@ -54,7 +57,7 @@ def main(argv=None):
     if args.command == 'compare-lr':
         if not args.source or args.background:
             parser.error('compare-lr requires --source and runs locally in the foreground')
-        from src.generator.fewshot_ranker.comparison import run
+        from src.generator.fewshot.training.comparison import run
         result = run(args.source, args.output)
         print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],
             validation={name: {k: v for k, v in item['validation'].items() if k != 'contexts'}
@@ -87,7 +90,7 @@ def main(argv=None):
                                   running=process.poll() is None, exit_code=process.poll()), ensure_ascii=False))
         return
     if args.command == 'compare-concern':
-        from src.generator.fewshot_ranker.concern_comparison import run
+        from src.generator.fewshot.training.concern_comparison import run
         result = run(args.source, args.reference, args.output, feature_cache=args.feature_cache,
                      instance=args.instance, workers=args.workers, passes=args.passes)
         print(json.dumps(dict(status=result['status'], output=str(args.output), seconds=result['seconds'],

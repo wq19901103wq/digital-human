@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 torch = pytest.importorskip('torch')
 
-from src import cache
-from src.config import ConfigError
+from src.infrastructure import cache
+from src.infrastructure.config import ConfigError
 from src.iteration import embedding_tuning as tuning
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 from src.judge import embedding as net
 from test_corrected_judge import features
 

@@ -7,14 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.cache import Store
-from src import config
-from src.config import ConfigError
-from src.generator import disk_history, learned_sources
+from src.infrastructure.cache import Store
+from src.infrastructure import config
+from src.infrastructure.config import ConfigError
+from src.generator import disk_history
+from src.generator.fewshot import provenance as learned_sources
 from src.generator import history_sources as generator_history_sources
 from _reference_few_shot import few_shot
-from src.history import sources as history_sources
-from src.history.sources import stamp
+from src.data.history import sources as history_sources
+from src.data.history.sources import stamp
 from src.iteration import control, learning_guard, material_reuse, versions
 from src.iteration.training_evidence import SavedCache
 from src.iteration.transport_profile import TransportProfile
@@ -129,9 +130,9 @@ def test_persistent_receipt_restores_ranker_dependency_evidence(materials, tmp_p
 
 @pytest.fixture
 def runtime_ranker(materials, tmp_path, monkeypatch):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
 
-    name = 'src/scorer.py'
+    name = 'src/generator/fewshot/features.py'
     roots = [tmp_path / 'executor-one', tmp_path / 'executor-two']
     for root in roots:
         code = root / name
@@ -522,7 +523,7 @@ def test_changed_material_or_ranker_dependency_rejects_reuse(materials, tmp_path
 
 
 def test_evidence_change_rejects_reuse(materials, tmp_path):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     evidence = tmp_path / 'evidence.json'
     evidence.write_text('{}')
     (materials.directory / 'learning.json').write_text(json.dumps({

@@ -282,6 +282,8 @@ def detail_html(instance: Path, kind: str, ref: str, query: dict) -> str:
             pass
     if kind == 'generators':
         body += '<p>人格与场景材料来自 ' + report._version_link(instance, 'data', cfg.get('data_version')) + '；实际评测数据见关联实验。</p>'
+    if kind == 'judges':
+        body += '<section class="panel"><h2>冻结推理流程</h2>' + report._judge_pipeline(cfg, directory) + '</section>'
     if kind == 'data':
         body += _purposes(instance, directory, url)
         sets = cfg.get('testsets', {})

@@ -18,7 +18,7 @@ def measure_ranking(*, sizes=(512, 8192, 65536), repeats=5):
     from itertools import islice
     from random import Random
     from statistics import median
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator.fewshot import rank
 
     repeats = positive(repeats)
@@ -73,7 +73,7 @@ def measure_eligibility(*, sizes=(512, 8192, 100000), repeats=5):
     from tempfile import TemporaryDirectory
     from types import SimpleNamespace
 
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.generator import disk_history
     from src.generator.fewshot import recall_engines
 
@@ -182,7 +182,7 @@ def positive(value):
 
 
 def inspect(instance, experiment, *, cases=3, repeats=1, materials=False):
-    from src.config import valid_name
+    from src.infrastructure.config import valid_name
     from src.iteration import runtime, versions
     from src.iteration.pack_transport import connection_env_file
     directory = versions.PRIVATE / 'experiments' / valid_name(experiment)
@@ -289,8 +289,8 @@ def _frozen_authenticated(args, transport):
 
 def _frozen_modern(args, snapshot, directory):
     """新代快照：旧 profiler 跳过；核验快照内 fewshot 包字节与认证清单一致。"""
-    from src.config import sha256_file
-    from src.iteration.storage import read_json
+    from src.infrastructure.config import sha256_file
+    from src.infrastructure.storage import read_json
     try:
         manifest = json.loads((snapshot / 'manifest.json').read_text())
         files = manifest['files']
@@ -317,9 +317,10 @@ def _frozen_modern(args, snapshot, directory):
 
 
 def _frozen_legacy(args, snapshot, directory, transport):
-    from src.generator import few_shot, learned_selection
+    from src.generator import few_shot
+    from src.generator.fewshot import learned_selection as learned_selection
     from src.iteration import datasets, gbdt_evidence, learning_guard, runtime, versions
-    from src.iteration.storage import read_json
+    from src.infrastructure.storage import read_json
     from src.judge.corrected import CodexJudgeClient
     from src.llm import ChatClient
     pointers = versions.POINTERS_PATH.read_bytes()

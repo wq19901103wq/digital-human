@@ -1,6 +1,8 @@
 """机制与改动说明按版本证据展示，不混淆本轮候选和跨任务变化。"""
 from pathlib import Path
 
+import pytest
+
 from src.dashboard.changes import snapshot_delta
 from src.dashboard import report
 from test_report import _run, _write
@@ -69,7 +71,7 @@ def test_local_candidate_diff_is_separate_from_previous_task_judge_change(tmp_pa
     assert '本轮对比' in page and '模型行为配置、提示词与快照资产一致' in page
     assert '生成器快照的数据标记' in page and 'd1' in page and 'd2' in page
     assert '评分裁判 · old-judge → base' in page
-    assert '单一大模型配对盲测' in page and '小模型预测与校正' in page
+    assert '单一大模型配对盲测' in page and '特征判别（具体流程由冻结决策策略确定）' in page
     assert '这不是本轮候选的改动' in page
 
 
@@ -91,3 +93,49 @@ def test_separate_feature_model_and_effort_are_visible(tmp_path):
     page = report._judge_pipeline(cfg, tmp_path)
     for text in ['① 大模型初判', 'gpt-5.6-luna · low', '② 大模型抽特征', 'gpt-5.6-sol · high']:
         assert text in page
+
+
+@pytest.mark.parametrize('policy,scorer', [('lr_only', '本地逻辑回归'), ('gbdt_only', '本地 GBDT'),
+                                         ('score_fusion', '本地 GBDT / LR 冻结分数融合'),
+                                         ('embedding_only', '本地 Embedding 小模型')])
+def test_feature_only_pipeline_uses_decision_policy_not_legacy_mode(tmp_path, policy, scorer):
+    config = {'mode': 'rpa_corrected_pairwise', 'decision_policy': policy,
+              'llm': {'model': 'unused-initial-model', 'reasoning_effort': 'low'},
+              'feature_llm': {'model': 'feature-model', 'reasoning_effort': 'high', 'provider': 'codex_cli'},
+              'correction_threshold': .7}
+    path = _version(tmp_path, 'judges', 'base', config)
+    _write(path / 'correction.json', {'final_model': {'input_feature_count': 352}})
+    page = report._judge_pipeline(config, path)
+    for phrase in ['① <b>大模型抽特征', '② <b>小模型预测', scorer, '352 维', '概率分界 50%',
+                   'feature-model · high', 'codex_cli', '最终判断只来自小模型概率']:
+        assert phrase in page
+    for phrase in ['大模型初判', '保留大模型', '改判阈值', '70%', 'unused-initial-model']:
+        assert phrase not in page
+
+
+def test_historical_ownership_pipeline_discloses_rule_override(tmp_path):
+    config = {'mode': 'corrected_pairwise', 'decision_policy': 'gbdt_only',
+              'ownership_correction': 'context_owner_shift_v1', 'llm': {'model': 'feature-model'}}
+    page = report._judge_pipeline(config, tmp_path)
+    for phrase in ['本地 GBDT', 'context_owner_shift_v1', '额外调用大模型抽取上下文发言归属',
+                   '概率覆盖为 0 或 1', '不是纯小模型决策流程']:
+        assert phrase in page
+    assert '大模型初判' not in page
+
+
+def test_historical_contribution_pipeline_discloses_both_override_layers(tmp_path):
+    config = {'mode': 'corrected_pairwise', 'decision_policy': 'gbdt_only',
+              'ownership_correction': 'context_owner_shift_v1',
+              'contribution_correction': 'joint_response_features_v1'}
+    page = report._judge_pipeline(config, tmp_path)
+    assert '归属特征与规则改判' in page and '回复贡献特征与规则改判' in page
+    assert '⑤ <b>最终判断' in page
+
+
+def test_feature_only_pipeline_is_used_in_experiment_detail(tmp_path):
+    exp, _ = _run(tmp_path, smoke=True)
+    instance = exp.parent.parent
+    _version(instance, 'judges', 'base', {'mode': 'rpa_corrected_pairwise', 'decision_policy': 'gbdt_only'})
+    page = report._render_run_html(report._load_run(exp))
+    assert '本地 GBDT' in page and '概率分界 50%' in page
+    assert '大模型初判' not in page

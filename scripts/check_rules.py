@@ -102,7 +102,7 @@ def check(root=ROOT, *, staged=False):
 
 def check_instance(instance):
     """Detect results produced by an external script that bypassed registration."""
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     imported = {}
     for path in (instance / 'experiments').glob('*/spec.json'):
         spec = json.loads(path.read_text())

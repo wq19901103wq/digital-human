@@ -4,10 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import ConfigError, load_settings
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.generator.generator import ReplyGenerator
-from src.history.sources import Message
-from src.generator.source_projection import POLICY, project_validated, validate_policy
+from src.data.history.sources import Message
+from src.generator.context.source_projection import POLICY
+from src.generator.context.source_projection import project_validated
+from src.generator.context.source_projection import validate_policy
 from test_leakage_guards import env as env
 
 
@@ -131,7 +134,7 @@ def test_projection_cannot_run_without_sources_or_mix_legacy_identity(env):
 
 
 def test_candidate_request_is_distinct_and_resume_reuses_it(env):
-    from src import tracing
+    from src.infrastructure import tracing
     case = env.source.roles['development'][0]
     for name, policy in [('baseline', None), ('candidate', POLICY), ('resume', POLICY)]:
         generator = ReplyGenerator(load_settings(), {**env.cfg, 'context_projection': policy},

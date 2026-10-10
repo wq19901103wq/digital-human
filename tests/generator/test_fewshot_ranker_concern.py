@@ -8,12 +8,17 @@ import pytest
 
 pytest.importorskip('torch')
 pytest.importorskip('xgboost')
-from src.config import ConfigError, sha256_file
-from src.generator import learned_sources, ranker_report
-from src.generator.fewshot_ranker import concern, concern_comparison as comparison, supplemental
-from src.generator.fewshot_ranker.features import context_view
-from src.history.sources import digest
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot import provenance as learned_sources
+from src.generator.fewshot.training import report as ranker_report
+from src.generator.fewshot import concern
+from src.generator.fewshot.training import concern_comparison as comparison
+from src.generator.fewshot import supplemental
+from src.generator.fewshot.features import context_view
+from src.data.history.sources import digest
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_fewshot_ranker_actions import control_model, frozen_control
 from tests.generator.test_fewshot_ranker_lr import feature_row, frozen_source
 from tests.generator.test_fewshot_ranker_training import record, synthetic
@@ -153,14 +158,16 @@ def test_concern_eight_fields_exclude_positions_and_fit_does_not_read_outer_labe
     assert model == second and fitted == other
     assert model['recipe'] == control['recipe'] and model['rounds'] == control['rounds']
     assert model['feature_transform'] == concern.TRANSFORM and 'identity=15' not in model['vocabulary']
-    from src.generator.fewshot_ranker.boosting import score_document
+    from src.generator.fewshot.boosting import score_document
     np.testing.assert_allclose(score_document(model, expanded), scores)
 
 
 @pytest.mark.parametrize('enabled', [False, True])
 def test_selector_scores_training_features_and_reuses_both_caches(tmp_path, monkeypatch, enabled):
-    from src.generator import learned_selection as selection
-    from src.generator.fewshot_ranker import boosting, extraction, training
+    from src.generator.fewshot import learned_selection as selection
+    from src.generator.fewshot import boosting
+    from src.generator.fewshot import extraction
+    from src.generator.fewshot.training import optimization as training
     from tests.generator.test_fewshot_selection import Renderer
 
     groups, rows, observations = synthetic()

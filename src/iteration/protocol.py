@@ -8,7 +8,7 @@ from math import ceil, comb
 from pathlib import Path
 from typing import Any
 
-from ..config import load_settings
+from src.infrastructure.config import load_settings
 
 
 def config_diff(base: dict[str, Any], cand: dict[str, Any], prefix: str = "") -> list[str]:

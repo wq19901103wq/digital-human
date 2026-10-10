@@ -3,12 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from src.config import ConfigError, sha256_file
-from src.generator import ranker_samples
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training import samples as ranker_samples
 from src.generator.fewshot import RecallSession, open_session
-from src.history.sources import load
-from src.generator.ranker_samples import object_match, prepare, select_candidates, teacher_overlap
-from src.iteration.storage import read_json, write_json
+from src.data.history.sources import load
+from src.generator.fewshot.training.samples import object_match
+from src.generator.fewshot.training.samples import prepare
+from src.generator.fewshot.training.samples import select_candidates
+from src.generator.fewshot.training.samples import teacher_overlap
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.leakage_support import historical
 
 
@@ -73,7 +78,7 @@ def test_unbudgeted_example_cannot_be_truncated_into_candidate(tmp_path):
     row['context_messages'] = deepcopy(row['context_messages'])
     plain = tmp_path / 'plain'
     plain.mkdir()
-    from src.bootstrap.history import write_rows
+    from src.data.history_build import write_rows
     write_rows(plain / 'fewshot_pool.jsonl', [row])
     retriever = open_session(plain / 'fewshot_pool.jsonl', index_policy='use_if_present')
     result = select_candidates(fixture.cases[1], {'recent3': [row], 'latest1': []}, retriever)
@@ -124,7 +129,7 @@ def test_changed_rank_implementation_rejects_inventory_resume(tmp_path, monkeypa
     write_json(generator / 'config.json', dict(max_shots_per_case=3, shots_char_budget=2500))
     output = tmp_path / 'inventory'
     prepare(fixture.directory, teacher, generator, output, progress=lambda _: None)
-    rank_path = Path(ranker_samples.__file__).parent / 'fewshot' / 'rank.py'
+    rank_path = Path(ranker_samples.__file__).parents[1] / 'rank.py'
     original_sha256 = ranker_samples.sha256_file
 
     def changed(path):

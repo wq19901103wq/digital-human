@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from src.config import ConfigError, load_settings
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.iteration import experiment, promote, runner, versions
 from gate_support import finish_with_cases
 from leakage_support import isolated_legacy_provenance

@@ -2,6 +2,29 @@
   "schema": 1,
   "rules": [
     {
+      "id": "business-domain-layout",
+      "rule": "业务执行不依赖展示层，共享记忆不依赖模型私有实现；迁移仅保留同对象兼容入口，不改变冻结评分内核，训练归档覆盖新实现及冻结依赖，退役实现不得由生产代码引用",
+      "enforcement": "code",
+      "code": [
+        "src/generator/fewshot/training/runtime_sources.py::runtime_files",
+        "src/iteration/pack_transport.py::live_retrieval_cache",
+        "src/infrastructure/json_schema.py::object_schema"
+      ],
+      "tests": [
+        "tests/test_architecture_layout.py::test_compatibility_paths_share_the_same_module_and_state",
+        "tests/test_architecture_layout.py::test_runtime_sources_cover_moved_implementations_and_frozen_serving",
+        "tests/test_architecture_layout.py::test_runtime_transport_loads_the_actual_recall_cache",
+        "tests/test_architecture_layout.py::test_business_execution_does_not_import_dashboard",
+        "tests/test_architecture_layout.py::test_shared_memory_does_not_depend_on_judge_or_generator",
+        "tests/test_architecture_layout.py::test_knowledge_maintenance_query_and_prompt_respect_dependency_direction",
+        "tests/test_architecture_layout.py::test_retired_implementations_have_no_production_imports",
+        "tests/test_architecture_layout.py::test_domain_names_do_not_restore_redundant_or_misleading_packages",
+        "tests/generator/test_fewshot_runtime_layout.py::test_frozen_bytes_and_actual_bridges_are_covered_by_execution_seal",
+        "tests/generator/test_fewshot_runtime_layout.py::test_serving_accepts_one_complete_generation_and_preserves_logical_keys",
+        "tests/generator/test_fewshot_runtime_layout.py::test_serving_rejects_mixed_generations_even_for_optional_features"
+      ]
+    },
+    {
       "id": "dashboard-request-read-scope",
       "rule": "首页请求只渲染一次，不写静态副本；同次渲染复用实验列表、评估包和版本资产读取，缓存不跨请求或线程，下一次请求可见记录及资产变化。",
       "enforcement": "code",
@@ -19,7 +42,7 @@
       "id": "fewshot-model-reranking",
       "rule": "模型重排只使用经过历史时间与来源过滤的候选；当前输入不含目标答案。序号须唯一且属于召回候选；无效结果不缓存、不静默回退，缓存命中也检查来源。",
       "enforcement": "code",
-      "code": ["src/generator/reranker.py::FewShotReranker", "src/generator/generator.py::ReplyGenerator"],
+      "code": ["src/generator/fewshot/reranker.py::FewShotReranker", "src/generator/generator.py::ReplyGenerator"],
       "tests": ["tests/generator/test_fewshot_reranker.py::test_real_history_filtered_answers_hidden_and_cache_reused", "tests/generator/test_fewshot_reranker.py::test_invalid_selections_never_cached_or_silently_fallback", "tests/generator/test_fewshot_reranker.py::test_changed_sources_rejected_including_cache_hits"]
     },
     {
@@ -216,7 +239,7 @@
       "rule": "任务规格及版本不可原地替换，来源改变时拒绝复用",
       "enforcement": "code",
       "code": [
-        "src/iteration/storage.py::write_once_json",
+        "src/infrastructure/storage.py::write_once_json",
         "src/iteration/materials/validation.py::verify"
       ],
       "tests": [
@@ -237,7 +260,7 @@
         "tests/test_leakage_guards.py::test_verified_flag_cannot_certify_arbitrary_assets",
         "tests/test_leakage_guards.py::test_conversation_recipe_cannot_be_resigned_with_answers",
         "tests/test_leakage_guards.py::test_unknown_or_judge_prompt_recipe_rejected",
-        "tests/bootstrap/test_data_boundaries.py::test_other_chat_future_unknown_source_and_same_second"
+        "tests/data/test_data_boundaries.py::test_other_chat_future_unknown_source_and_same_second"
       ]
     },
     {

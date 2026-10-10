@@ -22,8 +22,12 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from ..config import ConfigError, ROOT, sha256_file
-from .storage import file_lock, write_json, read_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import ROOT
+from src.infrastructure.config import sha256_file
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import write_json
+from src.infrastructure.storage import read_json
 
 
 def instances_root() -> Path:
@@ -164,7 +168,7 @@ def current_data_version() -> Path:
 # ---------- 生成器版本 ----------
 
 def generator_behavior(config: dict, source: Path) -> str:
-    from .shares import validate_binding
+    from src.share.versions import validate_binding
     validate_binding(config)
     clean = {k: v for k, v in config.items() if k not in
              {'data_version', 'persona_sha256', 'behavior_sha256'}}
@@ -236,7 +240,7 @@ def generator_dir(gid: str) -> Path:
     d = GEN_ROOT / gid
     if not (d / "config.json").exists():
         raise ConfigError(f"生成器版本不存在: {d}")
-    from .shares import validate_binding
+    from src.share.versions import validate_binding
     validate_binding(read_json(d / 'config.json'))
     return d
 
@@ -269,7 +273,7 @@ def create_judge_version(
         [p.name for p in root.iterdir()] if root.exists() else [], "j"
     )
     behavior_cfg = dict(behavior_cfg)
-    from .shares import validate_binding
+    from src.share.versions import validate_binding
     validate_binding(behavior_cfg)
     if assets is None and source_dir is not None:
         assets = {name: (source_dir / name).read_bytes()
@@ -306,7 +310,7 @@ def judge_dir(jid: str) -> dict[str, Any]:
     if not (d / "config.json").exists():
         raise ConfigError(f"Judge 版本不存在: {d}")
     config = read_json(d / 'config.json')
-    from .shares import validate_binding
+    from src.share.versions import validate_binding
     validate_binding(config)
     return {
         "id": jid,
@@ -328,11 +332,11 @@ def version_payload(version_dir: Path) -> dict[str, Any]:
     cfg = version_dir / "config.json"
     if cfg.exists():  # 数据版本工作区无 config.json，容忍
         payload["config"] = read_json(cfg)
-        from .shares import validate_binding
+        from src.share.versions import validate_binding
         # Dashboard reads multiple instances concurrently, without switching
         # the process-wide runtime instance. Resolve Share beside this version.
         validate_binding(payload['config'], instance=version_dir.parent.parent)
-    from ..config import sha256_file
+    from src.infrastructure.config import sha256_file
     persona = version_dir / "persona.md"
     if persona.exists():
         payload["persona_sha256"] = sha256_file(persona)

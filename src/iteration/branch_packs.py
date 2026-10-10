@@ -8,15 +8,15 @@ import time
 import uuid
 from threading import local
 
-from ..config import ConfigError, load_settings, sha256_file
+from src.infrastructure.config import ConfigError, load_settings, sha256_file
 from ..generator.generator import ReplyGenerator
 from ..llm import LLMRefusal, build_clients
-from ..tracing import CaseTrace
+from src.infrastructure.tracing import CaseTrace
 from . import acceptance, control, data_guard, datasets, experiment, gates, runtime, task_state, versions
 from .materials import validation
 from .materials.seals import RunSeal
 from .parallel import completed_map
-from .storage import write_json, file_lock, read_json, write_once_json
+from src.infrastructure.storage import write_json, file_lock, read_json, write_once_json
 
 
 _INVALID_GENERATION = "生成结果两次都无效（JSON 结构/非空/条数校验失败）"
@@ -36,7 +36,7 @@ def prepare_initial(kind='calibration', sample=None, reuse_generations=None):
         raise ConfigError('固定回复包必须由候选分支绑定验收批次后构建；请使用 iterate_branches.py')
     if kind != 'calibration':
         raise ConfigError('未知回复包用途')
-    from ..history.sources import load
+    from src.data.history.sources import load
     data = versions.data_version_dir(current['data'])
     cases = load(data).role('judge_development')
     if not cases or (sample is not None and sample != len(cases)):

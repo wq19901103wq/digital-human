@@ -3,7 +3,8 @@ import pytest
 
 pytest.importorskip('torch')
 pytest.importorskip('xgboost')
-from src.generator import learned_selection, selection_analysis
+from src.generator.fewshot import learned_selection as learned_selection
+from src.generator.fewshot.training import selection_analysis
 from test_learned_fewshot import example
 from test_fewshot_selection import Renderer
 
@@ -54,7 +55,7 @@ def test_summary_distinguishes_changed_ids_from_selected_count():
 
 
 def test_optional_concern_keeps_original_tasks_and_adds_only_context_requests():
-    from src.generator.fewshot_ranker import concern
+    from src.generator.fewshot import concern
     case = dict(example('target', 10), case_id='target', human_reply=['FORBIDDEN_TARGET_ANSWER'])
     rows = [example('a')]
     selector = learned_selection.LearnedSelector.__new__(learned_selection.LearnedSelector)

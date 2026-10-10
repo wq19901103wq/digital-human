@@ -9,20 +9,26 @@ import pytest
 
 from leakage_support import historical
 from test_disk_history import FLAGS, queries, retriever
-from src.config import ConfigError, sha256_file
-from src.generator import disk_history, disk_source_reads, few_shot, retrieval_cache, shared_history
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator import disk_history
+from src.generator import disk_source_reads
+from src.generator import few_shot
+from src.generator import retrieval_cache
+from src.generator.fewshot import shared_history
 from src.iteration import pack_transport, transport_profile
 
 
 def test_legacy_adapter_reexports_formal_recall_reuse():
-    from src.generator import recall_reuse
+    from src.generator.fewshot import recall_cache as recall_reuse
     assert retrieval_cache.exact_retrieval_calls is recall_reuse.exact_retrieval_calls
     assert retrieval_cache.CallCache is recall_reuse.CallCache
 
 
 @pytest.mark.parametrize('index_policy', ['use_if_present', 'build'])
 def test_modern_recall_session_reuses_exact_calls_with_guards(tmp_path, monkeypatch, index_policy):
-    from src.generator import fewshot, recall_reuse
+    from src.generator import fewshot
+    from src.generator.fewshot import recall_cache as recall_reuse
     source = historical(tmp_path / 'data')
     pool = source.directory / 'fewshot_pool.jsonl'
     inputs = {str(path.resolve()): sha256_file(path) for path in (pool, pool.with_name('report.json'))}

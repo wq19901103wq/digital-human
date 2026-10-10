@@ -16,14 +16,16 @@ from threading import local
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap.ingest import load_weflow_dir  # noqa: E402
-from src.config import ConfigError, load_settings, sha256_file  # noqa: E402
+from src.data.ingest import load_weflow_dir# noqa: E402
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
+from src.infrastructure.config import sha256_file# noqa: E402
 from src.generator.generator import ReplyGenerator  # noqa: E402
 from src.iteration import experiment, runner, versions
 from src.dashboard import report  # noqa: E402  # noqa: E402
 from src.llm import LLMRefusal, build_clients  # noqa: E402
 from src.iteration.parallel import completed_map  # noqa: E402
-from src.tracing import CaseTrace  # noqa: E402
+from src.infrastructure.tracing import CaseTrace# noqa: E402
 
 
 def clean_cases(pool, messages):
@@ -216,8 +218,8 @@ def main():
         if experiment.spec_of(directory)['pack_sha256'] != sha256_file(pack_path):
             raise ConfigError('评估包已被改写，拒绝混合结果')
         print(f'开始 {exp_id}', flush=True)
-        report.write_run(directory)
         runner.run_judge_experiment(directory, workers=args.workers)
+        report.publish_safely(directory)
         state = experiment.state_of(directory)
         results.append({'experiment': exp_id, 'candidate': experiment.spec_of(directory)['candidate_ref'],
                         'feature_model': model, 'effort': args.effort, **state})

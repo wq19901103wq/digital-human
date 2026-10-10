@@ -1,15 +1,15 @@
 """Reusable generation and feature stages with source-checked checkpoints."""
 from __future__ import annotations
 from threading import local
-from .. import cache, tracing
-from ..config import ConfigError, load_settings
+from src.infrastructure import cache, tracing
+from src.infrastructure.config import ConfigError, load_settings
 from ..generator.generator import ReplyGenerator
 from ..llm import build_clients
 from ..judge import lr_retrain as lr, corrected_v1 as rt
 from ..judge.corrected import CodexJudgeClient
 from . import versions
 from .parallel import completed_map
-from .storage import write_json, read_json as read
+from src.infrastructure.storage import write_json, read_json as read
 from .task_state import update as status
 from .training_evidence import checkpoint
 

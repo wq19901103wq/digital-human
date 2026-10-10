@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from src.config import ConfigError
-from src.judge import contribution as c
+from src.infrastructure.config import ConfigError
+from src.judge.scoring import contribution as c
 
 PAYLOAD = {'context': [{'ref': 'context:0:0', 'role': 'other'}]}
 

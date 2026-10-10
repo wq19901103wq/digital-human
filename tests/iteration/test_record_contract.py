@@ -3,9 +3,10 @@ import json
 
 import pytest
 
-from src.config import ConfigError
+from src.infrastructure.config import ConfigError
 from src.iteration import comparisons, experiment, record_contract, runner, versions
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 
 
 @pytest.fixture
@@ -180,7 +181,7 @@ def test_tampered_pack_or_symlink_cannot_redirect_registered_results(comparison,
 
 
 def legacy_source(comparison):
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     from src.iteration import gates
     source = versions.PRIVATE / 'judge_training/legacy'
     definition = {'id': 'luna-gbdt-vs-lr', 'baseline': {'arm': 'luna', 'recipe': 'lr', 'policy': 'pure'},

@@ -26,8 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DEPLOYMENT = min(ROOT.parent.glob('wechat-mac-*/'), key=lambda p: len(p.name), default=ROOT.parent / 'wechat-mac-missing')
 sys.path.insert(0, str(ROOT))
 
-from src.bootstrap import build_testsets, ingest, partition  # noqa: E402
-from src.config import ConfigError, load_settings  # noqa: E402
+from src.data import build_testsets
+from src.data import ingest
+from src.data import partition# noqa: E402
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings# noqa: E402
 from src.iteration import versions  # noqa: E402
 from src.judge.corrected import prepare_import  # noqa: E402
 

@@ -5,9 +5,9 @@ bound before pack creation. Missing outputs use the ordinary guarded builder.
 """
 from __future__ import annotations
 
-from ..config import ConfigError, sha256_file, valid_name
+from src.infrastructure.config import ConfigError, sha256_file, valid_name
 from . import runtime, versions
-from .storage import read_json
+from src.infrastructure.storage import read_json
 
 
 def require(condition, message):

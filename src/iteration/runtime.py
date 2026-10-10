@@ -9,10 +9,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ..cache import digest
-from ..config import ConfigError, ROOT, settings_path, sha256_file
+from src.infrastructure.cache import digest
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import ROOT
+from src.infrastructure.config import settings_path
+from src.infrastructure.config import sha256_file
 from . import versions
-from .storage import file_lock, write_json
+from src.infrastructure.storage import file_lock
+from src.infrastructure.storage import write_json
 
 
 def environment():
@@ -135,6 +139,11 @@ def evidence_path(name, expected):
     p = Path(name)
     if p.is_file() and sha256_file(p) == expected:
         return p
+    from src.generator.fewshot.runtime_layout import relocated_file
+    relocated = relocated_file(ROOT, name)
+    if (relocated is not None and relocated.is_file() and not relocated.is_symlink()
+            and sha256_file(relocated) == expected):
+        return relocated
     archived = versions.PRIVATE / 'evidence_blobs' / expected
     if p.suffix == '.py' and archived.is_file() and sha256_file(archived) == expected:
         return archived

@@ -5,9 +5,10 @@ The normal experiment guards remain authoritative and are never bypassed here.
 """
 from pathlib import Path
 
-from ..config import ConfigError, sha256_file
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
 from . import datasets
-from .storage import read_json
+from src.infrastructure.storage import read_json
 
 
 def _require(ok, message):

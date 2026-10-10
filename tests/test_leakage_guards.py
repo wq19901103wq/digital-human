@@ -12,15 +12,19 @@ import pytest
 from leakage_support import historical, mechanical
 from src.iteration import training_operations as features_job
 from src.iteration import training_operations as generation_job
-from src import cache, llm, tracing
-from src.bootstrap import history
-from src.config import ConfigError, load_settings, sha256_file
+from src.infrastructure import cache
+from src import llm
+from src.infrastructure import tracing
+from src.data import history_build as history
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
+from src.infrastructure.config import sha256_file
 from src.generator.generator import ReplyGenerator
-from src.history.sources import load
+from src.data.history.sources import load
 from src.judge import judge as judge_module, lr_retrain
 from src.iteration import experiment, promote, runner, versions
 from src.iteration.materials import validation as guard
-from src.iteration.storage import write_json
+from src.infrastructure.storage import write_json
 
 
 @pytest.fixture

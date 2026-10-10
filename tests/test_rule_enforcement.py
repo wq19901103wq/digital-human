@@ -31,7 +31,7 @@ def test_unregistered_external_results_are_detected(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text('{"case_id":"a"}\n')
     assert len(check_instance(tmp_path)) == 1
-    from src.config import sha256_file
+    from src.infrastructure.config import sha256_file
     spec = tmp_path / 'experiments/imported/spec.json'
     spec.parent.mkdir(parents=True)
     spec.write_text(json.dumps({'provenance': {'source_hashes': {

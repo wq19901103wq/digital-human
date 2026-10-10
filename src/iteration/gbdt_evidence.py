@@ -11,8 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ..cache import digest
-from ..config import sha256_file
+from src.infrastructure.cache import digest
+from src.infrastructure.config import sha256_file
 from ..judge import corrected_v1 as rt
 from ..judge.gbdt import GBDTScorer, option_vectors
 from . import runtime, versions
@@ -66,11 +66,11 @@ def verify(directory, record, original, study, source_spec, arm):
     expected = {**old_cfg, 'decision_policy': 'gbdt_only', 'scorer_file': 'scorer.json',
         'assets': {**old_cfg['assets'], **additions, 'learning.json': sha256_file(directory / 'learning.json')}}
     if 'ownership_correction' in cfg:
-        from ..judge.ownership import validate_policy
+        from src.judge.scoring.ownership import validate_policy
         validate_policy(cfg['ownership_correction'])
         expected['ownership_correction'] = cfg['ownership_correction']
     if 'contribution_correction' in cfg:
-        from ..judge.contribution import validate_policy
+        from src.judge.scoring.contribution import validate_policy
         validate_policy(cfg['contribution_correction'])
         require('ownership_correction' in cfg, 'Contribution correction requires ownership baseline')
         expected['contribution_correction'] = cfg['contribution_correction']

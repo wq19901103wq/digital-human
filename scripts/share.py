@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.iteration import shares, versions
+from src.share import versions as shares
+from src.iteration import versions
 
 
 def main(argv=None):
@@ -41,7 +42,7 @@ def main(argv=None):
         result = {'kind': args.kind, 'version': shares.bind_model(args.kind, args.model, args.share),
                   'share_ref': args.share, 'pointers_changed': False, 'runtime_usable': False}
     elif args.action == 'configure-gen':
-        from src.generator.background import configure
+        from src.generator.context.background import configure
         result = {'kind': 'gen', 'version': configure(args.model, args.share,
                   args.memory_index, args.memory_model), 'share_ref': args.share,
                   'pointers_changed': False, 'runtime_policy': 'account_wiki_memory_v1'}

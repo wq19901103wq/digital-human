@@ -4,10 +4,13 @@ import json
 
 import pytest
 
-from src import cache, llm, tracing
-from src.config import ConfigError, load_settings
+from src.infrastructure import cache
+from src import llm
+from src.infrastructure import tracing
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import load_settings
 from src.generator.generator import ReplyGenerator
-from src.generator.reranker import FewShotReranker
+from src.generator.fewshot.reranker import FewShotReranker
 from test_leakage_guards import env as env
 
 

@@ -142,9 +142,9 @@ def verified_history_pools(retrievers, sources, *, disk_rows=None, profile=None,
 
 
 def judge_dependencies(module, directory):
-    from src.config import settings_path
+    from src.infrastructure.config import settings_path
     from src.iteration import runtime, versions
-    from src.iteration.storage import read_json
+    from src.infrastructure.storage import read_json
 
     source = directory / 'source_judge.json'
     if not source.is_file():
@@ -182,9 +182,9 @@ def judge_dependencies(module, directory):
 
 
 def dependencies(module, data_ref, directories):
-    from src.generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
     from src.iteration import versions
-    from src.iteration.storage import read_json
+    from src.infrastructure.storage import read_json
 
     data = {versions.data_version_dir(data_ref)}
     rankers = []
@@ -236,7 +236,7 @@ def cached_training_reads():
             identity = (str(Path(path).resolve()), key)
             fingerprint = cache_fingerprint(value)
             if identity in records and records[identity] != fingerprint:
-                from src.config import ConfigError
+                from src.infrastructure.config import ConfigError
                 raise ConfigError('材料核验期间训练请求缓存变化')
             records[identity] = fingerprint
         return value
@@ -251,7 +251,7 @@ def cached_training_reads():
         finally:
             scoped.records = previous
             if previous is not None:
-                from src.config import ConfigError
+                from src.infrastructure.config import ConfigError
                 for identity, fingerprint in records.items():
                     if identity in previous and previous[identity] != fingerprint:
                         raise ConfigError('嵌套材料核验期间训练请求缓存变化')
@@ -266,7 +266,7 @@ def cached_training_reads():
                 module._require(cache_fingerprint(original(stores[path], key)) == expected,
                                 '已核验训练请求缓存变化；禁止复用材料核验')
         except sqlite3.Error as exc:
-            from src.config import ConfigError
+            from src.infrastructure.config import ConfigError
             raise ConfigError('训练请求缓存无法读取；禁止复用材料核验') from exc
         finally:
             for store in stores.values():
@@ -280,7 +280,7 @@ def cached_training_reads():
 
 
 def ranker_stamps(keys):
-    from src.generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
 
     stamps = {}
     for key in keys:
@@ -322,9 +322,9 @@ def receipt_path(data_ref, directories, role):
 
 
 def restore_ranker_record(module, item):
-    from src.generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
     from src.generator.history_sources import stamp
-    from src.iteration.storage import read_json
+    from src.infrastructure.storage import read_json
 
     stamps = {Path(path): tuple(value) for path, value in item['stamps'].items()}
     result = copy.deepcopy(item['result'])
@@ -350,7 +350,7 @@ def restore_ranker_record(module, item):
 
 
 def read_receipt(module, path, key, seal, rankers, environment, check_cache):
-    from src.generator import learned_sources
+    from src.generator.fewshot import provenance as learned_sources
 
     if not path.exists():
         return None
@@ -377,13 +377,13 @@ def read_receipt(module, path, key, seal, rankers, environment, check_cache):
         learned_sources._verified.update(restored)
         return seal, stamps, payload['audit'], cache_rows, environment
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        from src.config import ConfigError
+        from src.infrastructure.config import ConfigError
         raise ConfigError('材料核验缓存无法读取；禁止复用') from exc
 
 
 def write_receipt(path, key, seal, rankers, audit, environment, cache_rows):
-    from src.generator import learned_sources
-    from src.iteration.storage import write_json
+    from src.generator.fewshot import provenance as learned_sources
+    from src.infrastructure.storage import write_json
 
     records = [dict(key=key, stamps={str(path): value for path, value in learned_sources._verified[key][0].items()},
                     result=learned_sources._verified[key][1]) for key in rankers]
@@ -450,7 +450,7 @@ def verified_materials(module, *, profile=None, capacity=CAPACITY, disk_rows=Non
                         environment = environment_record(packages)
                 if closure is None:
                     return full(data_ref, directories, role)
-                from src.iteration.storage import file_lock
+                from src.infrastructure.storage import file_lock
                 path, receipt_key = receipt_path(data_ref, directories, role)
                 with ExitStack() as receipt_lock:
                     with timing('material_validation_receipt_wait'):

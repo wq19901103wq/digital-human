@@ -7,11 +7,18 @@ import pytest
 import pytest
 pytest.importorskip('torch')  # 可选重依赖
 pytest.importorskip('xgboost')  # 可选重依赖
-from src.config import ConfigError, sha256_file
-from src.generator import ranker_report
-from src.generator.fewshot_ranker import comparison, crosses, features, logistic, schema, training
-from src.history.sources import digest
-from src.iteration.storage import read_json, write_json
+from src.infrastructure.config import ConfigError
+from src.infrastructure.config import sha256_file
+from src.generator.fewshot.training import report as ranker_report
+from src.generator.fewshot.training import comparison
+from src.generator.fewshot import crosses
+from src.generator.fewshot import features
+from src.generator.fewshot.training import logistic
+from src.generator.fewshot import schema
+from src.generator.fewshot.training import optimization as training
+from src.data.history.sources import digest
+from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
 from tests.generator.test_fewshot_ranker_training import record, synthetic
 
 
