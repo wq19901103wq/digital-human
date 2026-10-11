@@ -446,6 +446,156 @@ def test_serving_features_match_training_and_ignore_target_answers():
     assert selection.feature_rows(changed, rows, refs, values) == expected
 
 
+@pytest.fixture
+def checked_selector(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.generator.fewshot import boosting
+
+    source = {'valid': True}
+    checks, scored = [], []
+
+    def check():
+        checks.append(source['valid'])
+        if not source['valid']:
+            raise ConfigError('feature source changed')
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+            self.hook = None
+            self.concern_replies = []
+
+        def cache_identity(self):
+            return {'model': 'synthetic-features'}
+
+        def run(self, prompt, schema):
+            self.calls.append((prompt, schema))
+            if self.hook is not None:
+                self.hook(prompt, schema)
+            if 'self_concern_state' in schema['properties']:
+                return self.concern_replies.pop(0) if self.concern_replies else 'invalid JSON'
+            return json.dumps({name: 'unknown' for name in schema['properties']})
+
+    client = Client()
+    selector = selection.LearnedSelector.__new__(selection.LearnedSelector)
+    selector.proof = {'feature_identity': client.cache_identity()}
+    selector.model = {}
+    selector.client = client
+    selector.cache = tmp_path / 'features'
+    target, rows = dict(record(10), case_id='target'), [example('a'), example('b', 2)]
+    target['context'][0]['is_self'] = True
+    for row in rows:
+        row['context_messages'][0]['is_self'] = True
+
+    def score(model, values):
+        scored.append(values)
+        return list(range(len(values)))
+
+    monkeypatch.setattr(boosting, 'score_document', score)
+
+    def select():
+        return selector.select(target, rows, count=2, budget=2500,
+                               retriever=Renderer, check=check)
+
+    return SimpleNamespace(selector=selector, client=client, source=source,
+                           checks=checks, scored=scored, select=select,
+                           target=target, rows=rows)
+
+
+def test_learned_feature_request_checks_before_success_cache_and_next_task(checked_selector):
+    value = checked_selector
+    value.client.hook = lambda *args: value.source.update(valid=False)
+    with pytest.raises(ConfigError, match='feature source changed'):
+        value.select()
+    assert len(value.client.calls) == 1
+    assert not list(value.selector.cache.glob('*.json'))
+    assert value.scored == []
+    assert value.selector.client is value.client
+    value.source['valid'] = True
+    value.client.hook = None
+    assert value.select()
+
+
+@pytest.mark.parametrize('stage', ['request', 'repair', 'repair-response'])
+def test_learned_concern_requests_and_repairs_check_sources(checked_selector, monkeypatch, stage):
+    from src.generator.fewshot import concern, supplemental
+    value = checked_selector
+    value.selector.model = {'feature_transform': {'self_concern': concern.VERSION}}
+    if stage in ('request', 'repair-response'):
+        def change_source(prompt, schema):
+            concern_calls = sum('self_concern_state' in output['properties']
+                                for _, output in value.client.calls)
+            if 'self_concern_state' in schema['properties'] and concern_calls == (
+                    1 if stage == 'request' else 2):
+                value.source['valid'] = False
+
+        value.client.hook = change_source
+    else:
+        original_failed = supplemental.failed
+
+        def fail_and_change_source(*args):
+            original_failed(*args)
+            value.source['valid'] = False
+
+        monkeypatch.setattr(supplemental, 'failed', fail_and_change_source)
+    tasks, _ = value.selector.tasks(value.target, value.rows)
+    with pytest.raises(ConfigError, match='feature source changed'):
+        value.select()
+    concern_calls = [schema for prompt, schema in value.client.calls
+                     if 'self_concern_state' in schema['properties']]
+    assert len(concern_calls) == (2 if stage == 'repair-response' else 1)
+    assert all(not (value.selector.cache / (key + '.json')).exists()
+               for key, task in tasks.items() if task['kind'] == concern.KIND)
+    assert not list((value.selector.cache / 'repairs').rglob('*.json'))
+    assert value.scored == []
+    assert value.selector.client is value.client
+
+
+def test_learned_concern_repair_preserves_selection_and_feature_cache_reuse(checked_selector):
+    from src.generator.fewshot import concern
+    value = checked_selector
+    value.selector.model = {'feature_transform': {'self_concern': concern.VERSION}}
+    tasks, _ = value.selector.tasks(value.target, value.rows)
+    concern_tasks = [task for task in tasks.values() if task['kind'] == concern.KIND]
+    repaired = json.dumps(dict(self_concern_state='unstated',
+                              later_incoming_basis='no_relevant_input',
+                              self_positions=[], incoming_positions=[]))
+    value.client.concern_replies = ['invalid JSON', repaired] * len(concern_tasks)
+    selected = value.select()
+    calls = len(value.client.calls)
+    assert selected
+    assert calls == len(tasks) + len(concern_tasks)
+    assert len(list((value.selector.cache / 'repairs').rglob('*.json'))) == len(concern_tasks)
+    assert value.select() == selected
+    assert len(value.client.calls) == calls
+    assert value.selector.client is value.client
+
+
+def test_learned_feature_cache_reuse_checks_each_task_sources(checked_selector, monkeypatch):
+    value = checked_selector
+    selected = value.select()
+    tasks, _ = value.selector.tasks(value.target, value.rows)
+    saved = {key: (value.selector.cache / (key + '.json')).read_bytes() for key in tasks}
+    calls = len(value.client.calls)
+    assert calls == len(tasks)
+    assert value.select() == selected
+    assert len(value.client.calls) == calls
+    value.scored.clear()
+    original_cached = extraction.cached
+
+    def cached_and_change_source(*args):
+        result = original_cached(*args)
+        value.source['valid'] = False
+        return result
+
+    monkeypatch.setattr(extraction, 'cached', cached_and_change_source)
+    with pytest.raises(ConfigError, match='feature source changed'):
+        value.select()
+    assert value.scored == []
+    assert len(value.client.calls) == calls
+    assert {key: (value.selector.cache / (key + '.json')).read_bytes() for key in tasks} == saved
+
+
 def test_serving_action_crosses_require_explicit_model_transform(monkeypatch):
     from src.generator.fewshot import action_crosses
     target, rows = dict(record(10), case_id='target'), [example('a')]

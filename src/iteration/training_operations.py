@@ -3,7 +3,7 @@ from __future__ import annotations
 from threading import local
 from src.infrastructure import cache, tracing
 from src.infrastructure.config import ConfigError, load_settings
-from ..generator.generator import ReplyGenerator
+from ..generator.generator import GenerationConstraints, ReplyGenerator
 from ..llm import build_clients
 from ..judge import lr_retrain as lr, corrected_v1 as rt
 from ..judge.corrected import CodexJudgeClient
@@ -12,34 +12,6 @@ from .parallel import completed_map
 from src.infrastructure.storage import write_json, read_json as read
 from .task_state import update as status
 from .training_evidence import checkpoint
-
-class ExcludingRetriever:
-    def __init__(self, wrapped):
-        self.wrapped = wrapped
-        self.blocked = set()
-        self.failure = None
-
-    def __getattr__(self, name):
-        return getattr(self.wrapped, name)
-
-    def retrieve(self, **kwargs):
-        try:
-            kwargs['exclude_ids'] = set(kwargs.get('exclude_ids') or ()) | self.blocked
-            rows = self.wrapped.retrieve(**kwargs)
-            if any(str(r['id']) in self.blocked for r in rows):
-                raise ConfigError('召回器返回被排除的训练目标会话')
-            return rows
-        except Exception as exc:
-            self.failure = exc
-            raise
-
-class TrainingGenerator(ReplyGenerator):
-    def build_prompt(self, case, forced_reply=True):
-        messages = super().build_prompt(case, forced_reply)
-        if self._retriever.failure is not None:
-            # Base generator permits retrieval fallback; isolation errors must fail closed.
-            raise ConfigError(f'训练召回失败，禁止降级继续：{self._retriever.failure}')
-        return messages
 
 def check_generations(value, cases, identity):
     if value['identity'] != identity:
@@ -73,15 +45,12 @@ def generate(directory, spec, snapshot, workers, limit=0):
         entry = {'input_sha256': cache.digest(case), 'trace_ref': trace.ref}
         try:
             if not hasattr(tls, 'generator'):
-                tls.generator = TrainingGenerator(settings, gen['config'], build_clients(settings, gen['config']['llm']),
+                tls.generator = ReplyGenerator(settings, gen['config'], build_clients(settings, gen['config']['llm']),
                     prompt_root=gen['dir'], pool_path=versions.data_version_dir(spec['data_ref']) / 'fewshot_pool.jsonl')
-                tls.generator._retriever = ExcludingRetriever(tls.generator._retriever)
-                tls.generator.source_check = seal.check
             excluded = snapshot['retrieval_excluded_ids_by_chat'][case['source_message_id'].rpartition(':')[0]]
-            tls.generator._retriever.blocked = set(excluded)
-            tls.generator._retriever.failure = None
+            constraints = GenerationConstraints(frozenset(excluded), seal.check)
             with trace.operation('generation', 'training', 0, {'excluded_ids_sha256': cache.digest(excluded)}) as op:
-                result = tls.generator.generate(case)
+                result = tls.generator.generate(case, constraints=constraints)
                 op['result'] = result
             entry.update(status='ok', replies=result['replies'], output_sha256=cache.digest(result['replies']))
         except ConfigError:

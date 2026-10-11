@@ -17,6 +17,22 @@ POLICY = 'pairwise_xgb_v1'
 SOURCE_OVERLAP_POLICY = 'exclude_reply_in_context_v1'
 
 
+class _CheckedFeatureClient:
+    def __init__(self, client, check):
+        self._client = client
+        self._check = check
+
+    def cache_identity(self):
+        return self._client.cache_identity()
+
+    def run(self, prompt, schema=None):
+        self._check()
+        try:
+            return self._client.run(prompt, schema)
+        finally:
+            self._check()
+
+
 def validate_source_overlap_policy(policy):
     require(policy is None or policy == SOURCE_OVERLAP_POLICY,
             f'Unsupported learned source overlap policy: {policy!r}')
@@ -148,8 +164,12 @@ class LearnedSelector:
         if self.model.get('feature_transform', {}).get('self_concern') is not None:
             from src.generator.fewshot import supplemental
             extractor = supplemental
-        values = {key: extractor.extract_one(self.cache, key, task, self.client)
-                  for key, task in tasks.items()}
+        client = _CheckedFeatureClient(self.client, check)
+        values = {}
+        for key, task in tasks.items():
+            check()
+            values[key] = extractor.extract_one(self.cache, key, task, client)
+            check()
         scores = score_document(self.model, feature_rows(case, rows, refs, values,
             transform=self.model.get('feature_transform')))
         check()

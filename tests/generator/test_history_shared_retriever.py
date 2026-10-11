@@ -6,7 +6,7 @@ from threading import Barrier
 import pytest
 
 from src.generator.fewshot import shared_history as runtime
-from src.iteration.training_operations import ExcludingRetriever
+from src.generator.generator import GenerationConstraints, ReplyGenerator
 from src.infrastructure.config import ConfigError
 
 
@@ -39,19 +39,24 @@ def fixture(tmp_path, monkeypatch):
 
 def test_parallel_workers_and_retry_pools_load_once_preserve_exclusions(tmp_path, monkeypatch):
     pool, _, inputs, loaded, original = fixture(tmp_path, monkeypatch)
+    (tmp_path / 'persona.md').write_text('synthetic persona')
+    settings = {'evaluation': {'few_shots_per_case': 3, 'few_shots_char_budget': 1000}}
+    case = {'case_id': 'c', 'chat_type': 'private', 'context': []}
     with runtime.shared_history_index(inputs):
         def one(blocked):
-            retriever = ExcludingRetriever(runtime.generator.open_session(path=pool))
-            retriever.blocked = {blocked}
-            assert retriever.is_approved()
-            rows = retriever.retrieve(exclude_ids={'c'})
-            return rows, retriever.render_selected(rows, max_chars=100)
+            generator = ReplyGenerator(settings, {}, None, prompt_root=tmp_path, pool_path=pool)
+            constraints = GenerationConstraints({blocked}, lambda: None)
+            return generator.build_prompt(case, constraints=constraints)
 
         for attempt in range(3):
             with ThreadPoolExecutor(max_workers=8) as executor:
                 result = list(executor.map(one, ['a', 'b'] * 8))
-            assert [r[0] for r in result] == [[{'id': 'b'}], [{'id': 'a'}]] * 8
-            assert all(row == (str(rows), [r['id'] for r in rows]) for rows, row in result)
+            for index, messages in enumerate(result):
+                selected = 'b' if index % 2 == 0 else 'a'
+                blocked = 'a' if index % 2 == 0 else 'b'
+                assert str([{'id': selected}]) in messages[1]['content']
+                assert f"'id': '{blocked}'" not in messages[1]['content']
+                assert "'id': 'c'" not in messages[1]['content']
         assert len(loaded) == 1
     assert runtime.generator.open_session is original
 

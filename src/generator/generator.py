@@ -8,8 +8,9 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import ConfigError
 from ..llm import ChatClient
@@ -21,6 +22,55 @@ from .history import HistoryError
 _logger = logging.getLogger("digital_human.generator")
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class GenerationConstraints:
+    """Per-request exclusions and source checks; retrieval must not fall back."""
+
+    excluded_ids: frozenset[str]
+    source_check: Callable[[], None]
+
+    def __post_init__(self):
+        if isinstance(self.excluded_ids, (str, bytes)) or not callable(self.source_check):
+            raise ConfigError('生成约束需要示例 ID 集合和来源核验函数')
+        try:
+            excluded_ids = frozenset(str(key) for key in self.excluded_ids)
+        except TypeError as exc:
+            raise ConfigError('生成约束需要示例 ID 集合和来源核验函数') from exc
+        object.__setattr__(self, 'excluded_ids', excluded_ids)
+
+
+class _ConstrainedRetriever:
+    def __init__(self, wrapped, excluded_ids, check):
+        self._wrapped = wrapped
+        self._excluded_ids = excluded_ids
+        self._check = check
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    @staticmethod
+    def _validate_ids(ids, excluded_ids):
+        if any(str(key) in excluded_ids for key in ids):
+            raise ConfigError('召回或展示返回被排除的示例')
+
+    def retrieve(self, **kwargs):
+        excluded_ids = set(kwargs.get('exclude_ids') or ()) | self._excluded_ids
+        kwargs['exclude_ids'] = excluded_ids
+        self._check()
+        rows = self._wrapped.retrieve(**kwargs)
+        self._check()
+        self._validate_ids((row['id'] for row in rows), excluded_ids)
+        return rows
+
+    def render_selected(self, rows, max_chars):
+        self._validate_ids((row['id'] for row in rows), self._excluded_ids)
+        self._check()
+        block, ids = self._wrapped.render_selected(rows, max_chars=max_chars)
+        self._check()
+        self._validate_ids(ids, self._excluded_ids)
+        return block, ids
 
 
 class ReplyGenerator:
@@ -122,17 +172,28 @@ class ReplyGenerator:
         if self._history_sources is not None:
             self._history_sources.check()
 
+    def _check_request_sources(self, constraints):
+        self._check_sources()
+        if constraints is not None:
+            constraints.source_check()
+
     @property
     def baseline_id(self) -> str:
         return self._cfg["baseline_id"]
 
-    def _style_block(self, case: dict[str, Any]) -> str:
+    def _style_block(self, case: dict[str, Any], *,
+                     constraints: GenerationConstraints | None = None) -> str:
         if self._retriever is None:
             tracing.note("retrieval", {"enabled": False, "rendered": "(无)"})
             return "(无)"
         is_group = case.get("chat_type") == "group"
         messages = case.get("context", [])
         query_text = "\n".join(str(m.get("text", "")) for m in messages[-3:])
+        check = lambda: self._check_request_sources(constraints)
+        retriever = self._retriever
+        if constraints is not None:
+            retriever = _ConstrainedRetriever(retriever,
+                constraints.excluded_ids | {str(case.get('case_id', ''))}, check)
         try:
             retrieval = dict(
                 chat_name=str(case.get("chat_name", "")),
@@ -143,36 +204,38 @@ class ReplyGenerator:
                     {"sender": str(m.get("sender", "")), "text": str(m.get("text", ""))}
                     for m in messages
                 ],
-                **({'history_case': case} if getattr(self._retriever, 'history_policy', None) else {}),
+                **({'history_case': case} if getattr(retriever, 'history_policy', None) else {}),
             )
-            rows = (self._retriever.retrieve(query=query_text, **retrieval)
+            rows = (retriever.retrieve(query=query_text, **retrieval)
                     if self._learned is None else [])
             selection_trace = {}
             if self._learned is not None:
                 from .learned_selection import recall
-                recalled = recall(self._retriever, case,
+                recalled = recall(retriever, case,
                     source_overlap_policy=self._cfg.get('retriever', {}).get('source_overlap_policy'))
                 rows = self._learned.select(case, recalled,
-                    count=self._max_shots, budget=self._budget, retriever=self._retriever,
-                    check=self._check_sources)
+                    count=self._max_shots, budget=self._budget, retriever=retriever,
+                    check=check)
             elif self._selection:
                 from .selection import select
                 latest = str(messages[-1].get('text', '')) if messages else ''
-                latest_rows = self._retriever.retrieve(query=latest, **retrieval) if latest != query_text else rows
+                latest_rows = retriever.retrieve(query=latest, **retrieval) if latest != query_text else rows
                 rows, selection_trace = select(rows, latest_rows, count=self._max_shots,
-                    budget=self._budget, retriever=self._retriever)
+                    budget=self._budget, retriever=retriever)
             elif self._reranker is not None:
                 rows = self._reranker.select(case, rows, count=self._max_shots, budget=self._budget,
-                                            retriever=self._retriever, check=self._check_sources)
+                                            retriever=retriever, check=check)
             else:
                 rows = rows[:self._max_shots]
-            block, ids = self._retriever.render_selected(rows, max_chars=self._budget)
+            block, ids = retriever.render_selected(rows, max_chars=self._budget)
             tracing.note("retrieval", {"enabled": True, "query": query_text, "selected_ids": ids,
                                       "max_shots": self._max_shots, "char_budget": self._budget,
                                       "rendered": block, **({'selection': selection_trace} if self._selection else {})})
             _logger.debug("风格召回 %d 条: %s", len(ids), ids)
             return block
-        except Exception as exc:  # noqa: BLE001 - legacy retrieval retains its original fallback
+        except Exception as exc:
+            if constraints is not None:
+                raise ConfigError(f'受约束召回失败，禁止降级继续：{exc}') from exc
             if self._learned is not None or self._reranker is not None or self._selection:
                 raise
             if isinstance(exc, HistoryError) or getattr(self._retriever, 'history_policy', None):
@@ -181,56 +244,65 @@ class ReplyGenerator:
             _logger.warning("风格召回失败，降级为无示例: %s", exc)
             return "(无)"
 
-    def build_prompt(self, case: dict[str, Any], forced_reply: bool = True) -> list[dict[str, str]]:
+    def build_prompt(self, case: dict[str, Any], forced_reply: bool = True, *,
+                     constraints: GenerationConstraints | None = None) -> list[dict[str, str]]:
         """组装完整模型输入（触发预检和生成共用，保证比对的输入与真实一致）。"""
+        options = {} if constraints is None else {'constraints': constraints}
+        if constraints is not None:
+            self._check_request_sources(constraints)
         if self._history_sources is not None:
             from ..history.sources import prompt_case
             self._material_seal.check()
             self._history_sources.validate(case)
             if self._information_end >= case["input_cutoff"]["timestamp"]:
                 raise HistoryError("生成器静态学习材料晚于本题输入时间，禁止生成或复用")
-            options = {}
+            rendering = {}
             if self._context_projection is not None:
                 from .source_projection import project_validated
                 projection = project_validated(case, self._history_sources)
-                options['source_context'] = projection
+                rendering['source_context'] = projection
                 tracing.note('source_projection', {'policy': self._context_projection, **projection.stats})
-            messages = self._builder.build_messages(prompt_case(case), self._style_block(case),
-                                                    forced_reply, **options)
+            messages = self._builder.build_messages(prompt_case(case), self._style_block(case, **options),
+                                                    forced_reply, **rendering)
             if self._background is not None:
                 client = self._llm['group' if case.get('chat_type') == 'group' else 'private']
                 messages.insert(1, self._background.message(case, client))
-            self._material_seal.check()
-            self._history_sources.check()
+            self._check_request_sources(constraints)
             return messages
         if 'input_cutoff' in case or 'source_span' in case:
             raise HistoryError('历史题缺少绑定的原始数据集，禁止降级为普通生成')
-        return self._builder.build_messages(case, self._style_block(case), forced_reply)
+        messages = self._builder.build_messages(case, self._style_block(case, **options), forced_reply)
+        if constraints is not None:
+            self._check_request_sources(constraints)
+        return messages
 
-    def generate(self, case: dict[str, Any], forced_reply: bool = True) -> dict[str, Any]:
+    def generate(self, case: dict[str, Any], forced_reply: bool = True, *,
+                 constraints: GenerationConstraints | None = None) -> dict[str, Any]:
         """返回 {"replies": [...], "latency_ms": float}。无效结果重试一次后抛异常（计入失败）。
 
         有效生成结果（SOP §3.6）：replies 为字符串数组、每项非空、≤3 条；
         强制回复模式下空数组无效。
         """
-        messages = self.build_prompt(case, forced_reply)
-        self._check_sources()
+        options = {} if constraints is None else {'constraints': constraints}
+        messages = self.build_prompt(case, forced_reply, **options)
+        self._check_request_sources(constraints)
         client = self._llm["group" if case.get("chat_type") == "group" else "private"]
         identity = cache.client_identity(client)
         started = time.perf_counter()
         result = cache.memo("generation", {"client": identity, "messages": messages,
                             "forced_reply": forced_reply, "parser": cache.code_digest(__file__)} if identity else None,
-                            lambda: self._generate(messages, client, forced_reply))
-        self._check_sources()
+                            lambda: self._generate(messages, client, forced_reply, **options))
+        self._check_request_sources(constraints)
         return {**result, "latency_ms": round((time.perf_counter() - started) * 1000, 3)}
 
-    def _generate(self, messages, client, forced_reply):
+    def _generate(self, messages, client, forced_reply, *,
+                  constraints: GenerationConstraints | None = None):
         started = time.perf_counter()
         def request():
-            self._check_sources()
+            self._check_request_sources(constraints)
             with cache.validation(lambda raw: self._validate(self._parse(raw), forced_reply) is not None):
                 raw = client.chat(messages, json_mode=True)
-            self._check_sources()
+            self._check_request_sources(constraints)
             return raw
         raw = request()
         parsed = self._validate(self._parse(raw), forced_reply)

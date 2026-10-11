@@ -513,6 +513,7 @@
     "tests/generator/test_generator_background.py",
     "tests/generator/test_generator_identity.py",
     "tests/generator/test_generator_source_projection.py",
+    "tests/generator/test_generator_training_constraints.py",
     "tests/generator/test_history_shared_retriever.py",
     "tests/generator/test_learned_fewshot.py",
     "tests/generator/test_ranker_expansion.py",

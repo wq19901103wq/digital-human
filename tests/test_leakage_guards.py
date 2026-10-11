@@ -19,7 +19,7 @@ from src.data import history_build as history
 from src.infrastructure.config import ConfigError
 from src.infrastructure.config import load_settings
 from src.infrastructure.config import sha256_file
-from src.generator.generator import ReplyGenerator
+from src.generator.generator import GenerationConstraints, ReplyGenerator
 from src.data.history.sources import load
 from src.judge import judge as judge_module, lr_retrain
 from src.iteration import experiment, promote, runner, versions
@@ -307,6 +307,182 @@ def test_generation_checkpoint_cannot_skip_source_validation(env):
     with pytest.raises(ConfigError):
         generation_job.generate(directory, spec, {'cases': [case]}, 1)
     assert env.calls == [] and (directory / 'generations.json').read_bytes() == old
+
+
+@pytest.mark.parametrize('policy', ['ordinary', 'selection', 'learned', 'reranker'])
+def test_request_exclusions_cover_real_historical_recall_routes(env, monkeypatch, policy):
+    from src.generator.fewshot.selection import POLICY
+    from src.generator.fewshot.reranker import FewShotReranker
+
+    generator = model(env)
+    case = env.source.roles['development'][1]
+    blocked = env.source.roles['development'][0]['case_id']
+    generator._max_shots = 1
+
+    class Selector:
+        def select(self, case, rows, *, count, budget, retriever, check):
+            check()
+            return rows[:count]
+
+    if policy == 'selection':
+        generator._selection = POLICY
+    elif policy == 'learned':
+        generator._learned = Selector()
+    elif policy == 'reranker':
+        generator._reranker = FewShotReranker(SimpleNamespace(chat=lambda *args, **kwargs: '{"indices":[0]}'))
+    original = generator._retriever.retrieve
+    recalls = []
+
+    def retrieve(**options):
+        recalls.append(set(options['exclude_ids']))
+        return original(**options)
+
+    monkeypatch.setattr(generator._retriever, 'retrieve', retrieve)
+    spec = {'data_ref': 'd-test', 'generator_ref': 'g-0001', 'dataset': 'development'}
+    spec['learning_snapshot'] = guard.snapshot('d-test', [env.gdir], 'development')
+    seal = guard.verify_generation(spec, [case])
+    constraints = GenerationConstraints({blocked}, seal.check)
+    messages = generator.build_prompt(case, constraints=constraints)
+    assert len(recalls) == (2 if policy in ('selection', 'learned') else 1)
+    assert all(excluded == {blocked, case['case_id']} for excluded in recalls)
+    examples = messages[1]['content'].split('<style_examples>\n', 1)[1].split('\n</style_examples>', 1)[0]
+    assert any(row['reply'][0] in examples for row in env.source.examples[:3])
+    assert env.source.roles['development'][0]['human_reply'][0] not in examples
+    assert case['human_reply'][0] not in examples
+    assert env.calls == []
+
+
+@pytest.mark.parametrize('policy', ['selection', 'learned'])
+def test_second_recall_cannot_bypass_request_exclusions(env, monkeypatch, policy):
+    from src.generator.fewshot.selection import POLICY
+
+    generator = model(env)
+    case = env.source.roles['development'][1]
+    blocked = env.source.examples[3]
+    if policy == 'selection':
+        generator._selection = POLICY
+    else:
+        generator._learned = SimpleNamespace(select=lambda *args, **kwargs: pytest.fail('must reject recall'))
+    original = generator._retriever.retrieve
+    recalls = []
+
+    def leaking_second_recall(**options):
+        recalls.append(set(options['exclude_ids']))
+        return original(**options) if len(recalls) == 1 else [blocked]
+
+    monkeypatch.setattr(generator._retriever, 'retrieve', leaking_second_recall)
+    with pytest.raises(ConfigError, match='被排除的示例'):
+        generator.generate(case, constraints=GenerationConstraints({blocked['id']}, lambda: None))
+    assert len(recalls) == 2 and env.calls == []
+
+
+@pytest.mark.parametrize('policy', ['learned', 'reranker'])
+def test_selection_cannot_reintroduce_excluded_history_before_render(env, policy):
+    generator = model(env)
+    case = env.source.roles['development'][1]
+    blocked = env.source.examples[3]
+    selector = SimpleNamespace(select=lambda *args, **kwargs: [blocked])
+    if policy == 'learned':
+        generator._learned = selector
+    else:
+        generator._reranker = selector
+    with pytest.raises(ConfigError, match='被排除的示例'):
+        generator.generate(case, constraints=GenerationConstraints({blocked['id']}, lambda: None))
+    assert env.calls == []
+
+
+def test_training_generation_uses_request_constraints_and_reuses_verified_checkpoint(env, monkeypatch):
+    from src.generator.fewshot import RecallSession
+
+    monkeypatch.setattr(generation_job, 'build_clients', llm.build_clients)
+    case = env.source.roles['judge_training'][0]
+    excluded = [env.source.examples[-1]['id']]
+    chat = case['source_message_id'].rpartition(':')[0]
+    snapshot = {'cases': [case], 'retrieval_excluded_ids_by_chat': {chat: excluded}}
+    spec = {'id': 'training', 'data_ref': 'd-test', 'generator_ref': 'g-0001', 'dataset': 'training'}
+    spec['learning_snapshot'] = guard.snapshot('d-test', [env.gdir], 'judge_training')
+    directory = env.root / 'judge_training/training'
+    original = RecallSession.retrieve
+    recalls = []
+
+    def retrieve(session, **options):
+        recalls.append(set(options['exclude_ids']))
+        return original(session, **options)
+
+    monkeypatch.setattr(RecallSession, 'retrieve', retrieve)
+    result = generation_job.generate(directory, spec, snapshot, 1)
+    assert result['entries'][case['case_id']]['status'] == 'ok'
+    assert recalls == [{case['case_id'], *excluded}]
+    saved = (directory / 'generations.json').read_bytes()
+    assert len(env.calls) == 1
+    assert generation_job.generate(directory, spec, snapshot, 1) == result
+    assert len(env.calls) == 1 and len(recalls) == 1
+    assert (directory / 'generations.json').read_bytes() == saved
+
+
+@pytest.mark.parametrize('failure', ['retrieval', 'source_after_model'])
+def test_training_generation_failure_does_not_save_or_retry_unverified_result(env, monkeypatch, failure):
+    from src.generator.fewshot import RecallSession
+
+    monkeypatch.setattr(generation_job, 'build_clients', llm.build_clients)
+    case = env.source.roles['judge_training'][0]
+    spec = {'id': 'training', 'data_ref': 'd-test', 'generator_ref': 'g-0001', 'dataset': 'training'}
+    spec['learning_snapshot'] = guard.snapshot('d-test', [env.gdir], 'judge_training')
+    directory = env.root / 'judge_training/training'
+    chat = case['source_message_id'].rpartition(':')[0]
+    snapshot = {'cases': [case], 'retrieval_excluded_ids_by_chat': {chat: []}}
+    if failure == 'retrieval':
+        def failing_recall(*args, **kwargs):
+            raise RuntimeError('retrieval unavailable')
+
+        monkeypatch.setattr(RecallSession, 'retrieve', failing_recall)
+    else:
+        source = env.source.directory / 'messages.jsonl'
+        env.hook.append(lambda: source.write_text(source.read_text() + '\n'))
+    with pytest.raises(ConfigError):
+        generation_job.generate(directory, spec, snapshot, 1)
+    assert len(env.calls) == (0 if failure == 'retrieval' else 1)
+    assert not (directory / 'generations.json').exists()
+
+
+def test_constrained_training_cache_reuse_still_checks_sources(env, monkeypatch):
+    case = env.source.roles['judge_training'][0]
+    spec = {'data_ref': 'd-test', 'generator_ref': 'g-0001', 'dataset': 'training'}
+    spec['learning_snapshot'] = guard.snapshot('d-test', [env.gdir], 'judge_training')
+    seal = guard.verify_generation(spec, [case])
+    constraints = GenerationConstraints({env.source.examples[-1]['id']}, seal.check)
+    generator = model(env)
+    directory = env.root / 'judge_training/cache-reuse'
+    results, traces = [], []
+    for attempt in range(2):
+        trace = tracing.CaseTrace(directory, case, spec)
+        with trace.operation('generation', 'training', 0, {}):
+            results.append(generator.generate(case, constraints=constraints))
+        trace.finish('ok')
+        traces.append(trace)
+    assert results[0]['replies'] == results[1]['replies']
+    assert len(env.calls) == 1
+    assert any(event['kind'] == 'cache_hit' and event['data']['layer'] == 'generation'
+               for event in traces[1].value['operations'][0]['events'])
+    original = cache.Store.get
+
+    def changed_after_cache_read(store, key):
+        entry = original(store, key)
+        if entry is not None and entry['layer'] == 'generation':
+            source = env.source.directory / 'messages.jsonl'
+            source.write_text(source.read_text() + '\n')
+        return entry
+
+    monkeypatch.setattr(cache.Store, 'get', changed_after_cache_read)
+    trace = tracing.CaseTrace(directory, case, spec)
+    with pytest.raises(ConfigError):
+        with trace.operation('generation', 'training', 0, {}):
+            generator.generate(case, constraints=constraints)
+    trace.finish('interrupted')
+    assert len(env.calls) == 1
+    assert trace.value['operations'][0]['status'] == 'failed'
+    assert any(event['kind'] == 'cache_hit' and event['data']['layer'] == 'generation'
+               for event in trace.value['operations'][0]['events'])
 
 
 def test_validator_revision_preserves_material_identity(env, monkeypatch):
