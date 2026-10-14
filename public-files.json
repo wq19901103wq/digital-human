@@ -42,6 +42,8 @@
     "prompts/conversation_partner/persona.md",
     "prompts/conversation_rhythm/persona.md",
     "prompts/conversation_rhythm_partner/persona.md",
+    "prompts/conversation_rhythm_role_continuity/persona.md",
+    "prompts/conversation_rhythm_single_example/persona.md",
     "prompts/judge_pairwise.template.md",
     "prompts/mechanical/persona.md",
     "prompts/mechanical/profile.json",

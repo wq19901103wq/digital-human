@@ -16,8 +16,38 @@ from types import SimpleNamespace
 import pytest
 
 from src.infrastructure.config import ConfigError
+from src.infrastructure.config import ROOT, sha256_file
 from src.iteration import versions
 from src.iteration.materials import validation
+
+
+def test_single_output_example_recipe_changes_only_schema_example():
+    original = ROOT / 'prompts/conversation_rhythm/persona.md'
+    candidate = ROOT / 'prompts/conversation_rhythm_single_example/persona.md'
+    assert candidate.read_text() == original.read_text().replace(
+        '{"replies":["第一条消息","第二条消息"]}', '{"replies":["回复内容"]}')
+    assert validation.GENERATOR_RECIPES['conversation_rhythm_single_example'] == {
+        **validation.GENERATOR_RECIPES['conversation_rhythm'],
+        'persona.md': sha256_file(candidate),
+    }
+
+
+def test_role_continuity_recipe_preserves_single_example_prompt():
+    original = ROOT / 'prompts/conversation_rhythm_single_example/persona.md'
+    candidate = ROOT / 'prompts/conversation_rhythm_role_continuity/persona.md'
+    block = (
+        '<role_continuity>\n'
+        '输出前核对一次角色延续：上一轮是谁在提问、担心、提议或讲自己的情况，本轮就从你本人所处的位置接话。'
+        '本人被安慰时，回应对方的安慰，不要无依据地转成劝对方；'
+        '他人自述的经历或条件，不要顺手写成本人的自述。'
+        '对方提供了新信息时，可以自然改变看法，不必机械坚持原话。'
+        '只输出回复，不输出核对过程。\n</role_continuity>\n'
+    )
+    assert candidate.read_text() == original.read_text().replace('<output_schema>', block + '<output_schema>')
+    assert validation.GENERATOR_RECIPES['conversation_rhythm_role_continuity'] == {
+        **validation.GENERATOR_RECIPES['conversation_rhythm_single_example'],
+        'persona.md': sha256_file(candidate),
+    }
 
 
 @pytest.fixture
