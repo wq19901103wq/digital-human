@@ -49,6 +49,8 @@ GENERATOR_RECIPES = {
         'persona.md': '8657ba44d0ae25b89c0931ec4148cd0bda4d3cf632f86b390fae283481fcfb5b'},
     'conversation_rhythm_role_continuity': {**MECHANICAL_ASSETS,
         'persona.md': 'c0e4dd0523823d361941ad2214243551bc9eb6c68df7ed0d762005f623894406'},
+    'conversation_rhythm_current_intent': {**MECHANICAL_ASSETS,
+        'persona.md': 'fdc2ee1b1e5b22849d98ff1800a6af32c7ba8f0c1de77849b98272bb98f3f2d2'},
     'conversation_rhythm_partner': {**MECHANICAL_ASSETS,
         'persona.md': '5041c133e6186f9490858d703b021f5eb22f8ab2d73e8631fdb875a51149114b'},
 }

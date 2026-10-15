@@ -41,6 +41,7 @@
     "prompts/conversation/persona.md",
     "prompts/conversation_partner/persona.md",
     "prompts/conversation_rhythm/persona.md",
+    "prompts/conversation_rhythm_current_intent/persona.md",
     "prompts/conversation_rhythm_partner/persona.md",
     "prompts/conversation_rhythm_role_continuity/persona.md",
     "prompts/conversation_rhythm_single_example/persona.md",
