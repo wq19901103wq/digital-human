@@ -6,7 +6,8 @@ import json
 from ...iteration.storage import write_json
 from . import wiki_revision as revision, wiki_structured as structured
 from .wiki_library_extract import obj
-from .wiki_repair import _cached_call, _render
+from .wiki_repair import _render, coverage_diagnostic
+from .wiki_revision_output import cached_call
 
 SCHEMA = deepcopy(revision.SCHEMA)
 DECISION = SCHEMA['properties']['decisions']['items']
@@ -110,7 +111,9 @@ def content_slots(record, entities):
 def _validate_slots(checks, record, entities, by_line, *, retained=True, uncertain=False):
     expected = {slot['slot_key'] for slot in content_slots(record, entities)}
     if len(checks) != len(expected) or {c['slot_key'] for c in checks} != expected:
-        raise ValueError('every content slot needs exactly one source check')
+        raise ValueError('every content slot needs exactly one source check; '
+                         f'record={record.get("id", record.get("fact_ids"))}; ' +
+                         coverage_diagnostic(expected, [c['slot_key'] for c in checks]))
     bound = {record[key] for key in ('subject_id', 'object_id', 'target_id', 'speaker_id',
         'subject_ref', 'object_ref', 'target_ref') if record.get(key)}
     bound.update(p.get('entity_id', p.get('entity_ref')) for p in record.get('participants', []))
@@ -165,24 +168,28 @@ def _validate_slots(checks, record, entities, by_line, *, retained=True, uncerta
 def _validate_roles(checks, record, entities, by_line, *, retained=True, uncertain=False):
     expected = {r['role_key']: r['entity_id'] for r in role_claims(record, entities)}
     if len(checks) != len(expected) or {r['role_key'] for r in checks} != set(expected):
-        raise ValueError('every structural role needs exactly one source check')
+        raise ValueError('every structural role needs exactly one source check; ' +
+                         coverage_diagnostic(expected, [check['role_key'] for check in checks]))
     for check in checks:
-        if not check['lines'] or not set(check['lines']) <= by_line.keys():
-            raise ValueError('role check requires available source lines')
         actual = check['described_entity_id']
+        diagnostic = (f'role_key={check["role_key"]}; actual_entity_id={actual}; '
+                      f'expected_entity_id={expected[check["role_key"]]}')
+        if not check['lines'] or not set(check['lines']) <= by_line.keys():
+            raise ValueError('role check requires available source lines; ' + diagnostic)
         if actual and actual not in entities:
-            raise ValueError('role check refers to unknown input entity')
+            raise ValueError('role check refers to unknown input entity; ' + diagnostic)
         if not check['explanation'].strip():
-            raise ValueError('role check requires a source explanation')
+            raise ValueError('role check requires a source explanation; ' + diagnostic)
         if retained:
             allowed = ('content', 'speaker_metadata') if check['role_key'] == 'speaker_id' else ('content',)
             supported = check['support'] in allowed and actual == expected[check['role_key']]
             unresolved = uncertain and check['support'] == 'uncertain' and actual in (
                 '', expected[check['role_key']])
             if not (supported or unresolved):
-                raise ValueError('retained roles need semantic support, not merely message authorship')
+                raise ValueError('retained roles need semantic support, not merely message authorship; ' +
+                                 diagnostic + f'; support={check["support"]}')
             if not set(check['lines']) <= set(record['lines']):
-                raise ValueError('role sources must be preserved in the record evidence')
+                raise ValueError('role sources must be preserved in the record evidence; ' + diagnostic)
 
 
 def validate(value, batch, rows, data):
@@ -190,25 +197,34 @@ def validate(value, batch, rows, data):
     entities = {e['id']: e for e in data['entities']}
     originals = {r['id']: r for r in batch}
     by_line = {r['line']: r for r in rows}
+    errors = []
+
+    def audit(record_key, check, record, record_entities, **options):
+        for field, validator in (('role_checks', _validate_roles), ('slot_checks', _validate_slots)):
+            try:
+                validator(check[field], record, record_entities, by_line, **options)
+            except ValueError as error:
+                errors.append(f'record={record_key}; {field}: {error}')
+
     for decision in value['decisions']:
-        _validate_roles(decision['role_checks'], originals[decision['record_id']], entities,
-                        by_line, retained=decision['action'] == 'keep')
-        _validate_slots(decision['slot_checks'], originals[decision['record_id']], entities,
-                        by_line, retained=decision['action'] == 'keep')
+        audit(decision['record_id'], decision, originals[decision['record_id']], entities,
+              retained=decision['action'] == 'keep')
     corrections = value['corrections']
     replacements = {f'{key}/{i}': record for key in revision.TABLES
                     for i, record in enumerate(corrections[key])}
     checks = value['replacement_checks']
     if len(checks) != len(replacements) or {c['record_key'] for c in checks} != replacements.keys():
-        raise ValueError('every replacement needs exactly one content audit')
-    replacement_entities = {e['ref']: e for e in corrections['entities']}
-    actions = {d['record_id']: d['action'] for d in value['decisions']}
-    for check in checks:
-        record = replacements[check['record_key']]
-        uncertain = actions[record['fact_ids'][0]] == 'unresolved'
-        _validate_roles(check['role_checks'], record, replacement_entities, by_line, uncertain=uncertain)
-        _validate_slots(check['slot_checks'], record, replacement_entities, by_line,
-                        uncertain=uncertain)
+        errors.append('every replacement needs exactly one content audit; ' +
+                      coverage_diagnostic(replacements, [check['record_key'] for check in checks]))
+    else:
+        replacement_entities = {e['ref']: e for e in corrections['entities']}
+        actions = {d['record_id']: d['action'] for d in value['decisions']}
+        for check in checks:
+            record = replacements[check['record_key']]
+            audit(check['record_key'], check, record, replacement_entities,
+                  uncertain=actions[record['fact_ids'][0]] == 'unresolved')
+    if errors:
+        raise ValueError('\n'.join(errors))
 
 
 def extract(client, cache, data, batch, rows):
@@ -220,12 +236,14 @@ def extract(client, cache, data, batch, rows):
         entities=[e for e in data['entities'] if e['id'] in refs],
         columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
         messages=[_render(r) + [r['chat_id']] for r in rows])
-    return _cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
-                        lambda v: validate(v, batch, rows, data))
+    return cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                       lambda v: validate(v, batch, rows, data), payload)
 
 
 def revise(client, directory, data, rows, workers=4):
-    jobs = list(structured.jobs_for(revision.records(data), rows, count=12, max_chars=60000))
+    # Small batches keep each response well under the model output cap; oversized
+    # requests hit max_output_tokens and the pinned codex CLI cannot resume them.
+    jobs = list(structured.jobs_for(revision.records(data), rows, count=2, max_chars=6000))
     progress = dict(stage='semantic_roles_revision', batches=len(jobs), completed=0, failed=0)
     outputs = {}
     write_json(directory / 'progress.json', progress)

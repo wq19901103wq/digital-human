@@ -162,6 +162,37 @@ def test_invalid_identity_and_source_are_rejected(tmp_path, mutation):
         members.load_pages([raw], 'room@chatroom', 'self')
 
 
+def test_prepare_selected_accounts_keeps_raw_context_and_source_indices(tmp_path):
+    snapshot = roster(tmp_path)
+    raw = page(tmp_path, [message('self', 1000, 1), message('peer1', 1001, 2),
+                          message('peer2', 1002, 3), message('friend', 1003, 4)])
+    output = tmp_path / 'batch'
+    summary = members.prepare(snapshot, [raw], output, 'self', {},
+                              accounts=['friend', 'peer2', 'peer3', 'peer2'])
+    manifest = read_json(output / 'manifest.json')
+    assert summary['jobs'] == 2 and summary['gaps'] == {'no_raw_sender_messages': 1}
+    assert manifest['selected_accounts'] == ['friend', 'peer2', 'peer3']
+    assert {job['account'] for job in manifest['jobs']} == {'friend', 'peer2'}
+    bindings = {job['account']: job['binding_evidence'][0] for job in manifest['jobs']}
+    assert bindings['peer2']['json_pointer'] == '/members/2'
+    assert bindings['friend']['json_pointer'] == '/members/4'
+    assert manifest['gaps'][0]['account'] == 'peer3'
+    assert manifest['source_coverage']['retained_rows'] == 4
+    inspected = wiki_delivery.inspect([output])
+    assert inspected['summary']['counts'] == {'pending': 2}
+
+
+@pytest.mark.parametrize('account,non_friends_only', [
+    ('absent', False), ('self', False), ('friend', True),
+])
+def test_prepare_rejects_absent_or_excluded_selected_accounts(tmp_path, account, non_friends_only):
+    output = tmp_path / 'batch'
+    with pytest.raises(ValueError, match='selected account is absent or excluded'):
+        members.prepare(roster(tmp_path), [page(tmp_path)], output, 'self', {},
+                        accounts=[account], non_friends_only=non_friends_only)
+    assert not (output / 'manifest.json').exists()
+
+
 def test_existing_runner_refuses_changed_member_snapshot(tmp_path, monkeypatch):
     snapshot, raw, output = roster(tmp_path), page(tmp_path), tmp_path / 'batch'
     members.prepare(snapshot, [raw], output, 'self', {}, non_friends_only=True)

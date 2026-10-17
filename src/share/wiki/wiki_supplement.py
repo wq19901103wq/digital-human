@@ -7,6 +7,7 @@ import os
 import time
 
 from ...config import sha256_file
+from ...judge import codex_transport
 from ...iteration.storage import file_lock, read_json, write_json
 from .. import knowledge_view
 from . import wiki_batch, wiki_job_pool, wiki_prompt, wiki_repair, wiki_scope, wiki_source_index
@@ -86,13 +87,16 @@ def prepare(parent, output):
         return manifest['summary']
 
 
-def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_incomplete=False):
+def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_incomplete=False,
+        wait=False):
     if workers < 1 or object_workers < 1 or attempts < 1 or (max_jobs is not None and max_jobs < 1):
         raise ValueError('workers, object_workers, attempts and optional max_jobs must be positive')
     output = Path(output)
-    with file_lock(output / '.lock', blocking=False):
+    with file_lock(output / '.lock', blocking=wait):
         manifest = read_json(output / 'manifest.json')
-        if manifest['pipeline'] != pipeline():
+        current = pipeline()
+        if not wiki_batch.compatible_pipeline(manifest['pipeline'], current,
+                                              required_names=current.keys()):
             raise ValueError('supplement pipeline changed; prepare a new supplement')
         for key in ('messages', 'parent', 'index'):
             source = manifest[key]
@@ -107,6 +111,7 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_
         state = read_json(output / 'progress.json', default=dict(jobs={}))
         state.update(stage='running', pid=os.getpid(), total=len(manifest['jobs']),
                      object_workers=object_workers, workers=workers, skip_incomplete=skip_incomplete)
+        state.pop('blocker', None)
         def save():
             state['counts'] = dict(Counter(j['stage'] for j in state['jobs'].values()))
             state['updated_at'] = time.time()
@@ -153,6 +158,7 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_
                         manifest['config'], workers=workers, max_chars=manifest['max_chars'])
                 if result['stage'] == 'complete':
                     break
+                codex_transport.check_available()
             else:
                 raise RuntimeError(f"generation incomplete: {result.get('errors', [])}")
             unchanged()
@@ -161,9 +167,17 @@ def run(output, *, workers=4, object_workers=1, attempts=2, max_jobs=None, skip_
             return dict(stage='complete', knowledge=str(knowledge), sha256=sha256_file(knowledge),
                         records=exported['records'], packets=exported['packets'])
 
-        wiki_job_pool.run_jobs(pending_jobs(), execute, object_workers=object_workers,
-                              state=state, save=save, max_jobs=max_jobs)
+        try:
+            wiki_job_pool.run_jobs(pending_jobs(), execute, object_workers=object_workers,
+                state=state, save=save, max_jobs=max_jobs,
+                check_available=codex_transport.check_available)
+        except codex_transport.CodexServiceBlocked as exc:
+            state.update(stage='blocked', pid=None, blocker=exc.details)
+            state['coverage_gaps'] = manifest['summary']['gaps']
+            save()
+            return state
         state['stage'] = 'complete' if state['counts'].get('complete', 0) == state['total'] else 'incomplete'
+        state['pid'] = None
         state['coverage_gaps'] = manifest['summary']['gaps']
         save()
         return state

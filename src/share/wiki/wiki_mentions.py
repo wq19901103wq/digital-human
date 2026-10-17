@@ -103,9 +103,9 @@ def select_mentions(path, base_rows, account, self_account, wiki, title, radius=
 
 
 def extend_facts(client, directory, meta, wiki_lines, rows, selection, draft, workers, max_chars,
-                 progress, status):
+                 progress, status, *, reread_contract='legacy_v1', reference_contract='legacy_v1'):
     """Two passes only on newly recalled windows; successful base work is untouched."""
-    from .wiki_repair import make_batches, extract_batch, reread_batch, identified
+    from .wiki_repair import make_batches, extract_batch, reread_batch, identified, failure_record
     batches = make_batches(rows, max_chars)
     facts, reviews = {}, {}
     progress.update(mention_batches=len(batches), mention_completed=0, mention_reread_completed=0)
@@ -119,10 +119,13 @@ def extend_facts(client, directory, meta, wiki_lines, rows, selection, draft, wo
         with ThreadPoolExecutor(max_workers=workers) as pool:
             if stage == 'extract':
                 pending = {pool.submit(extract_batch, client, directory, meta, wiki_lines, batch,
-                           recall=recall(batch)): i for i, batch in enumerate(batches)}
+                           recall=recall(batch), reference_contract=reference_contract): i
+                           for i, batch in enumerate(batches)}
             else:
                 pending = {pool.submit(reread_batch, client, directory, meta, wiki_lines, batch,
-                           facts[i], draft, recall=recall(batch)): i for i, batch in enumerate(batches)}
+                           facts[i], draft, recall=recall(batch), reread_contract=reread_contract,
+                           reference_contract=reference_contract): i
+                           for i, batch in enumerate(batches)}
             for future in as_completed(pending):
                 i = pending[future]
                 try:
@@ -135,7 +138,8 @@ def extend_facts(client, directory, meta, wiki_lines, rows, selection, draft, wo
                         progress['mention_reread_completed'] += 1
                 except Exception as exc:
                     progress['failed'] += 1
-                    progress['errors'].append(dict(stage=progress['stage'], batch=i, error=str(exc)[-800:]))
+                    progress['errors'].append(failure_record(exc, tail_limit=800,
+                                                           stage=progress['stage'], batch=i))
                 status()
         if progress['failed']:
             return None

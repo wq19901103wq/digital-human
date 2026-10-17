@@ -1,15 +1,79 @@
 """Source attribution and normalized export checks, using synthetic people only."""
 import json
+from copy import deepcopy
+import re
 import xml.etree.ElementTree as ET
 
 import pytest
 
 from src.share.wiki import wiki_repair as repair
 from src.share.wiki import wiki_structured as structured
+from src.share.wiki.wiki_library import digest
+from src.infrastructure.storage import read_json, write_json
 from test_wiki_repair import Client, row, source
 
 
 META = dict(name='示例人物', account='person', self_account='self')
+
+
+def reference_typed_xml(data):
+    def fill(element, value):
+        if isinstance(value, dict):
+            element.set('type', 'object')
+            for key, child in value.items():
+                node = (ET.SubElement(element, key) if re.fullmatch(r'[A-Za-z_][\w.-]*', key)
+                        else ET.SubElement(element, 'field', name=key))
+                fill(node, child)
+        elif isinstance(value, list):
+            element.set('type', 'array')
+            for child in value:
+                fill(ET.SubElement(element, 'item'), child)
+        else:
+            element.set('type', 'boolean' if isinstance(value, bool) else
+                        'number' if isinstance(value, (int, float)) else 'string')
+            element.text = str(value).lower() if isinstance(value, bool) else str(value)
+    root = ET.Element('wiki', schema=data['schema'])
+    for key, value in data.items():
+        fill(ET.SubElement(root, key), value)
+    ET.indent(root, space='  ')
+    return ET.tostring(root, encoding='unicode', xml_declaration=True) + '\n'
+
+
+@pytest.mark.parametrize('value', [
+    '', ' \r\n\t ', '\u0085\u2003', '中文 😀', '&<>"\'\r\n\t', None,
+    True, False, 0, -15, 1.25, {}, [],
+    {'1': '', 'field': {}, '中': [], 'a中': True, '_x.y-z': 2,
+     'a:b': '引号 "', '&<>"\'\r\n\t': [' ', {}, [], '&<>']},
+    [None, False, -4.5, ['', {'records': [{'value': '\n'}, {'value': ' '}, {'value': ''}]}]],
+])
+def test_typed_xml_is_byte_identical_to_elementtree(value):
+    data = dict(schema='wiki & <> "\r\n\t', payload=value)
+    assert structured.to_xml(data) == reference_typed_xml(data)
+
+
+@pytest.mark.parametrize('key', ['', 'space name', 'prefix:name', '{urn:example}payload', None])
+def test_unusual_top_level_xml_names_keep_elementtree_behavior(key):
+    data = {'schema': 'wiki_structured_v1', key: [' ', {'1': '&<>"'}]}
+    assert structured.to_xml(data) == reference_typed_xml(data)
+
+
+def test_typed_xml_reuses_field_names_without_building_a_tree(monkeypatch):
+    data = dict(schema='wiki_structured_v1', records=[dict(subject='person', value='中文')] * 100)
+    expected = reference_typed_xml(data)
+    checked = []
+    original = structured._XML_NAME
+
+    def check_name(key):
+        checked.append(key)
+        return original(key)
+
+    def forbid_tree(*args, **kwargs):
+        raise AssertionError('typed Wiki JSON must not construct an XML tree')
+
+    monkeypatch.setattr(structured, '_XML_NAME', check_name)
+    monkeypatch.setattr(ET, 'Element', forbid_tree)
+    assert structured.to_xml(data) == expected
+    assert len(checked) == 7
 
 
 def fixture(tmp_path):
@@ -46,6 +110,48 @@ def test_addresses_remain_directed_and_sources_never_copy_text(tmp_path):
     assert '你来定时间' not in json.dumps(compiled, ensure_ascii=False)
     assert compiled['evidence']['1']['path'] == str(coverage['path'])
     assert len(records) == 3  # No inferred reverse address or identity merge.
+
+
+def test_unknown_entity_diagnostic_locates_record_and_lists_output_refs(tmp_path):
+    rows, _, data = fixture(tmp_path)
+    data['addresses'][0]['target_ref'] = 'unknown-entity'
+    with pytest.raises(ValueError, match='unknown entity ref') as error:
+        structured.validate(data, {'F1': 'fact-1'}, rows, META)
+    message = str(error.value)
+    assert "['unknown-entity']" in message
+    assert 'record=addresses/0' in message
+    assert "available_refs=['E0', 'E1']" in message
+    assert "fact_ids=['F1']" in message
+    assert data['addresses'][0]['target_ref'] == 'unknown-entity'
+
+
+def test_mechanical_feedback_reports_independent_records_reviews_and_attribution(tmp_path):
+    rows, _, data = fixture(tmp_path)
+    data['addresses'][0]['target_ref'] = 'E9'
+    data['addresses'][1]['term'] = '不在原始消息中'
+    data['reviews'][0]['disposition'] = 'omit'
+    common = {key: data['addresses'][0][key] for key in structured.COMMON}
+    data['attributes'] = [dict(common, subject_ref='E0', field='occupation', value='设计师',
+                               mode='self_report')]
+    with pytest.raises(ValueError) as error:
+        structured.validate(data, {'F1': 'fact-1'}, rows, META)
+    message = str(error.value)
+    assert all(location in message for location in ('addresses[0]', 'addresses[1]', 'reviews[0]', 'attribution'))
+    assert 'unknown entity ref' in message and 'address term must occur' in message
+    assert 'review disposition disagrees' in message and 'self_report_without_source_author' in message
+
+
+@pytest.mark.parametrize('mutation', ['line', 'ref'])
+def test_attribution_safe_filter_cannot_admit_invalid_source_or_entity(tmp_path, mutation):
+    rows, _, data = fixture(tmp_path)
+    common = {key: data['addresses'][0][key] for key in structured.COMMON}
+    data['attributes'] = [dict(common, subject_ref='E0', field='occupation', value='设计师', mode='self_report')]
+    if mutation == 'line':
+        data['attributes'][0]['lines'] = [999]
+    else:
+        data['attributes'][0]['subject_ref'] = 'E9'
+    with pytest.raises(ValueError, match='lines|unknown entity ref'):
+        structured.validate(data, {'F1': 'fact-1'}, rows, META)
 
 
 @pytest.mark.parametrize('mutation', ['wrong_self', 'bad_kind', 'missing_subject', 'unknown_object',
@@ -330,3 +436,127 @@ def test_old_attribution_cache_is_rechecked_and_only_invalid_response_is_regener
     assert len(client.prompts) == 1
     structured.extract(*args)
     assert len(client.prompts) == 1
+
+
+def legacy_request(client, meta, facts, rows):
+    payload = dict(subject=meta, facts=[dict(fact, id=f'F{index+1}')
+                                      for index, fact in enumerate(facts)],
+        columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
+        messages=[repair._render(record) + [record['chat_id']] for record in rows])
+    prompt = structured.PROMPT + json.dumps(payload, ensure_ascii=False)
+    return prompt, digest([client.cache_identity(), prompt, structured.SCHEMA])
+
+
+def test_legacy_prompt_schema_and_request_payload_remain_byte_identical(tmp_path, monkeypatch):
+    rows, _, data = fixture(tmp_path)
+    facts = [dict(id='fact-1', lines=[1, 2, 3], summary='称呼')]
+    client = Client()
+    prompt, _ = legacy_request(client, META, facts, rows)
+    calls = []
+    def cached_call(actual_client, directory, actual_prompt, schema, parse, **kwargs):
+        assert actual_client is client and directory == tmp_path / 'cache'
+        assert actual_prompt == prompt and schema == structured.SCHEMA and kwargs == {}
+        parse(data)
+        calls.append(actual_prompt)
+        return data
+    monkeypatch.setattr(repair, '_cached_call', cached_call)
+    assert digest([structured.PROMPT, structured.SCHEMA]) == (
+        '45113cf1c1e17afd4eb53a5fb73862300cd2d63b541698f8a611df3b1d49bda3')
+    assert structured.source_prompt() == structured.PROMPT
+    assert structured.extract(client, tmp_path / 'cache', META, facts, rows) == (
+        data, {'F1': 'fact-1'})
+    assert calls == [prompt]
+    with pytest.raises(ValueError, match='unsupported structured source contract'):
+        structured.extract(client, tmp_path / 'cache', META, facts, rows, contract='unknown')
+    assert calls == [prompt]
+
+
+def test_source_contract_uses_account_authors_not_display_names_or_chat_owners(tmp_path):
+    rows, _, _ = fixture(tmp_path)
+    rows[0]['message_kind'] = 'forward'
+    rows[1]['sender'] = rows[0]['sender']
+    indexed = structured.source_contract(META, list(reversed(rows)))
+    assert indexed == dict(version='structured_source_v2', person_refs=[
+        dict(ref='E0', account='person', anchor_lines=[2, 3]),
+        dict(ref='E1', account='self', anchor_lines=[1])], authors=[
+        dict(account='person', anchor_lines=[2, 3], direct_lines=[2, 3]),
+        dict(account='self', anchor_lines=[1], direct_lines=[])])
+    assert structured.source_contract(META, rows[1:])['person_refs'][1]['anchor_lines'] == []
+    assert 'text' not in json.dumps(indexed)
+
+
+def saved_structured_request(directory, key, data, storage, used):
+    failure = dict(request_sha256=key, attempt=used, policy_attempt=used,
+                   retry_policy=repair.RETRY_POLICY, error='previous attribution error',
+                   result=data if storage == 'failure' else None, errors=[])
+    write_json(directory.parent / 'failures' / f'{key}-{used}.json', failure)
+    if storage == 'cache':
+        write_json(directory / f'{key}.json', dict(request_sha256=key, attempts=used, result=data))
+    return {path: path.read_bytes() for path in directory.parent.rglob('*.json')}
+
+
+@pytest.mark.parametrize('storage', ['cache', 'failure'])
+@pytest.mark.parametrize('used', [0, repair.RETRY_LIMIT])
+def test_source_contract_reuses_valid_legacy_results_without_requests(tmp_path, storage, used):
+    rows, _, data = fixture(tmp_path)
+    facts = [dict(id='fact-1', lines=[1, 2, 3], summary='称呼')]
+    client = Client()
+    _, key = legacy_request(client, META, facts, rows)
+    directory = tmp_path / 'job' / 'cache'
+    before = saved_structured_request(directory, key, data, storage, used)
+    assert structured.extract(client, directory, META, facts, rows,
+                              contract='structured_source_v2') == (data, {'F1': 'fact-1'})
+    assert client.prompts == []
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert read_json(directory / f'{key}.json')['result'] == data
+
+
+@pytest.mark.parametrize('used', [0, repair.RETRY_LIMIT])
+def test_invalid_cache_does_not_hide_valid_saved_failure_result(tmp_path, used):
+    rows, _, data = fixture(tmp_path)
+    facts = [dict(id='fact-1', lines=[1, 2, 3], summary='称呼')]
+    invalid = deepcopy(data)
+    invalid['entities'][1]['lines'] = [2]
+    client = Client()
+    _, key = legacy_request(client, META, facts, rows)
+    directory = tmp_path / 'job' / 'cache'
+    before = saved_structured_request(directory, key, data, 'failure', used)
+    write_json(directory / f'{key}.json', dict(request_sha256=key, attempts=used, result=invalid))
+    assert structured.extract(client, directory, META, facts, rows,
+                              contract='structured_source_v2') == (data, {'F1': 'fact-1'})
+    assert client.prompts == []
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert read_json(directory / f'{key}.json')['result'] == data
+
+
+@pytest.mark.parametrize('storage', ['cache', 'failure'])
+@pytest.mark.parametrize('used', [0, repair.RETRY_LIMIT])
+def test_source_contract_changes_only_invalid_structured_request_and_keeps_old_budget(
+        tmp_path, storage, used):
+    rows, _, data = fixture(tmp_path)
+    facts = [dict(id='fact-1', lines=[1, 2, 3], summary='称呼')]
+    invalid = deepcopy(data)
+    invalid['entities'][1]['lines'] = [2]
+    class Correct(Client):
+        def run(self, prompt, schema):
+            self.prompts.append(prompt)
+            payload = json.loads(prompt[len(structured.source_prompt('structured_source_v2')):])
+            assert payload['source_contract'] == structured.source_contract(META, rows)
+            assert payload['messages'] == [repair._render(record) + [record['chat_id']] for record in rows]
+            assert '是可选的保留编号' in prompt
+            return json.dumps(data)
+    client = Correct()
+    old_prompt, old_key = legacy_request(client, META, facts, rows)
+    directory = tmp_path / 'job' / 'cache'
+    before = saved_structured_request(directory, old_key, invalid, storage, used)
+    result = structured.extract(client, directory, META, facts, rows, contract='structured_source_v2')
+    assert result == (data, {'F1': 'fact-1'}) and len(client.prompts) == 1
+    assert client.prompts[0] != old_prompt
+    new_key = digest([client.cache_identity(), client.prompts[0], structured.SCHEMA])
+    assert new_key != old_key and read_json(directory / f'{new_key}.json')['result'] == data
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert structured.extract(client, directory, META, facts, rows,
+                              contract='structured_source_v2') == result
+    assert len(client.prompts) == 1
+    with pytest.raises(ValueError, match='entity_account_without_source_anchor'):
+        structured.validate(invalid, {'F1': 'fact-1'}, rows, META)

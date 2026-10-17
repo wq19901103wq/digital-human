@@ -14,6 +14,7 @@ import time
 from urllib.parse import quote
 
 from ...config import sha256_file
+from ...infrastructure.storage import locked
 from ...iteration.storage import atomic_write, file_lock, read_json, write_json
 from .. import knowledge_view
 from . import wiki_batch, wiki_objects, wiki_prompt, wiki_structured
@@ -223,23 +224,38 @@ def _overlay_revisions(jobs, revisions):
     return selected, dict(counts)
 
 
-def _require_revision_original(manifest, job_id, binding, seen=None):
+def _revision_file(path, cache, *, json_data=False):
+    path = Path(path)
+    key = ('revision_source', str(path.resolve()), json_data)
+    stamp = wiki_batch._stamp(path)
+    if key not in cache or cache[key][0] != stamp:
+        result = sha256_file(path), read_json(path) if json_data else None
+        if stamp != wiki_batch._stamp(path):
+            raise ValueError('revision source changed while being checked')
+        cache[key] = stamp, result
+    return cache[key][1]
+
+
+def _require_revision_original(manifest, job_id, binding, seen=None, *, cache=None):
+    cache = {} if cache is None else cache
     seen = set() if seen is None else seen
     source = Path(manifest['revision']['source']['path']).parent
     if source in seen:
         raise ValueError('cyclic revision source binding')
     seen.add(source)
-    if sha256_file(source / 'manifest.json') != manifest['revision']['source']['sha256']:
+    source_digest, parent = _revision_file(source / 'manifest.json', cache, json_data=True)
+    if source_digest != manifest['revision']['source']['sha256']:
         raise ValueError('revision source manifest changed')
-    original = read_json(source / 'progress.json')['jobs'][job_id]
+    _, progress = _revision_file(source / 'progress.json', cache, json_data=True)
+    original = progress['jobs'][job_id]
     if (original['stage'] != 'complete' or binding !=
             dict(path=original['knowledge'], sha256=original['sha256'])):
         raise ValueError('revision no longer matches completed original')
-    if sha256_file(Path(original['knowledge'])) != original['sha256']:
+    knowledge_digest, _ = _revision_file(original['knowledge'], cache)
+    if knowledge_digest != original['sha256']:
         raise ValueError('revision original knowledge changed')
-    parent = read_json(source / 'manifest.json')
     if parent.get('revision'):
-        _require_revision_original(parent, job_id, original.get('revision_source'), seen)
+        _require_revision_original(parent, job_id, original.get('revision_source'), seen, cache=cache)
 
 
 def inspect(batches, *, cache=None):
@@ -281,7 +297,8 @@ def inspect(batches, *, cache=None):
             if stage == 'complete':
                 try:
                     if manifest.get('revision'):
-                        _require_revision_original(manifest, job['id'], saved.get('revision_source'))
+                        _require_revision_original(manifest, job['id'], saved.get('revision_source'),
+                            cache=cache)
                         item['revision_source'] = saved['revision_source']
                     item.update(_checked(batch, job, saved, cache), verified=True)
                     if item['content_issues']:
@@ -342,10 +359,12 @@ def require_catalog(output, batches):
             raise ValueError('catalog frozen batch manifest changed')
         manifests[batch['path']] = read_json(path)
     _revision_sources(manifests)
+    revision_cache = {}
     for job in value['jobs']:
         manifest = manifests[job['batch']]
         if manifest.get('revision') and job['stage'] == 'complete':
-            _require_revision_original(manifest, job['id'], job.get('revision_source'))
+            _require_revision_original(manifest, job['id'], job.get('revision_source'),
+                cache=revision_cache)
     grouped = object_catalog(value['jobs'])
     if grouped['objects'] != value['objects'] or grouped['summary'] != value['summary']['objects']:
         raise ValueError('catalog object coverage differs from saved jobs')
@@ -471,20 +490,41 @@ def _object_index(value, output):
     return text
 
 
-def _write_objects(value, output):
+def _object_fingerprint(obj, members):
+    sources = sorted({j['files']['knowledge.json']['path'] for j in members if wiki_objects.eligible(j)})
+    return digest([obj, members]), _object_stamps(map(Path, sources))
+
+
+def _object_stamps(paths):
+    return tuple((str(path), wiki_batch._stamp(path)) for path in paths)
+
+
+def _write_objects(value, output, cache):
     lookup = {(j['batch'], j['id']): j for j in value['jobs']}
     for obj in value['objects']:
         path = output / 'objects' / (obj['id'] + '.md')
         members = [lookup[r['batch'], r['id']] for r in obj['jobs']]
+        fingerprint = _object_fingerprint(obj, members)
+        key = 'object_output', str(path.resolve())
+        previous = cache.get(key)
+        if previous and previous[0] == fingerprint:
+            try:
+                if previous[1] == _object_stamps(Path(name) for name, _ in previous[1]):
+                    continue
+            except FileNotFoundError:
+                pass
         rendered, files = _object_page(obj, members, output)
+        if fingerprint != _object_fingerprint(obj, members):
+            raise ValueError('object materials changed while being composed')
         wiki_objects.write(files, path.with_suffix(''))
         if not path.exists() or path.read_text() != rendered:
             atomic_write(path, rendered)
+        cache[key] = fingerprint, _object_stamps([path, *(path.with_suffix('') / name for name in files)])
 
 
-def write_catalog(value, output):
+def write_catalog(value, output, *, cache=None):
     output = Path(output)
-    _write_objects(value, output)
+    _write_objects(value, output, {} if cache is None else cache)
     summary = value['summary']
     complete = [j for j in value['jobs'] if j['stage'] == 'complete']
     text = ['# Wiki 原始整理任务', '', '[按聊天对象查看](index.md)', '', '更新时间：' + value['updated_at'], '',
@@ -564,8 +604,14 @@ def deliver(batches, output, *, follow=False, interval=30):
         cache = {}
         while True:
             value = inspect(batches, cache=cache)
-            write_catalog(value, output)
+            write_catalog(value, output, cache=cache)
             print(json.dumps(dict(stage=value['stage'], **value['summary']), ensure_ascii=False), flush=True)
-            if not follow or not any(b['running'] for b in value['batches']):
+            if not follow:
                 return value
+            if not any(locked(Path(batch) / '.lock') for batch in batches):
+                current = [wiki_batch.status(batch) for batch in batches]
+                if all(all(latest[field] == saved[field] for field in
+                           ('stage', 'running', 'counts', 'updated_at'))
+                       for latest, saved in zip(current, value['batches'])):
+                    return value
             time.sleep(interval)

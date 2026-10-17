@@ -1,6 +1,132 @@
 """Bounded object scheduling with serialized, resumable batch progress."""
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from threading import RLock
+from collections import Counter, defaultdict
+from contextlib import nullcontext
+import json
+import logging
+from pathlib import Path
+from threading import BoundedSemaphore, RLock
+import time
+import uuid
+
+from ...iteration.storage import read_json
+
+
+class RequestBudget:
+    """Share request slots across objects without changing client/cache identity."""
+
+    def __init__(self, workers):
+        if type(workers) is not int or workers < 1:
+            raise ValueError('request workers must be a positive integer')
+        self.slots = BoundedSemaphore(workers)
+
+    def wrap(self, client, *, timings=None, job=None):
+        return BudgetedClient(client, self.slots, timings=timings, job=job)
+
+
+class BudgetedClient:
+    def __init__(self, client, slots=None, *, timings=None, job=None):
+        self.client = client
+        self.slots = slots
+        self.timings = timings
+        self.job = job
+
+    def cache_identity(self):
+        return self.client.cache_identity()
+
+    def run(self, prompt, schema=None):
+        if self.timings is None:
+            with self.slots if self.slots is not None else nullcontext():
+                return self.client.run(prompt, schema)
+        stage = self.timings.stage(self.job)
+        started_at, started = time.time(), time.perf_counter()
+        admitted, error_type = None, None
+        try:
+            with self.slots if self.slots is not None else nullcontext():
+                admitted = time.perf_counter()
+                return self.client.run(prompt, schema)
+        except BaseException as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            finished = time.perf_counter()
+            self.timings.record(dict(schema='wiki_request_timing_v1', run_id=self.timings.run_id,
+                job_id=self.job['id'], stage=stage, started_at=started_at, finished_at=time.time(),
+                queue_seconds=(admitted if admitted is not None else finished) - started,
+                client_seconds=finished - admitted if admitted is not None else None,
+                status='error' if error_type else 'success', error_type=error_type,
+                timeout_seconds=self.timings.timeout_seconds))
+
+
+class RequestTimings:
+    """Observe client calls, not remote inference or successful Wiki-cache reads."""
+
+    def __init__(self, output, *, timeout_seconds=None):
+        self.path = Path(output) / 'request-profile.jsonl'
+        self.run_id = uuid.uuid4().hex
+        self.timeout_seconds = timeout_seconds
+        self.guard = RLock()
+
+    def stage(self, job):
+        try:
+            return read_json(Path(job['output']) / 'progress.json', default={}).get('stage', 'unknown')
+        except (OSError, ValueError):
+            return 'unknown'
+
+    def record(self, value):
+        try:
+            with self.guard:
+                with self.path.open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps(value, ensure_ascii=False) + '\n')
+        except OSError as exc:
+            logging.warning('Wiki request timing could not be saved (%s)', type(exc).__name__)
+
+
+def _timing_summary(records):
+    result = dict(requests=len(records), success=sum(item['status'] == 'success' for item in records),
+                  errors=dict(Counter(item['error_type'] for item in records if item['error_type'])))
+    result['failed'] = result['requests'] - result['success']
+    for field in ('queue_seconds', 'client_seconds'):
+        values = [item[field] for item in records if item[field] is not None]
+        result[field] = dict(total=sum(values), mean=sum(values) / len(values) if values else 0,
+                             maximum=max(values, default=0))
+    result['wall_span_seconds'] = (max(item['finished_at'] for item in records) -
+                                  min(item['started_at'] for item in records)) if records else 0
+    return result
+
+
+def _group_timings(records, field):
+    grouped = defaultdict(list)
+    for item in records:
+        grouped[item[field]].append(item)
+    return dict(sorted(grouped.items()))
+
+
+def request_profile(output, *, run_id=None):
+    """Summarize persisted request timings without model calls or raw content."""
+    path = Path(output) / 'request-profile.jsonl'
+    records, partial_lines = [], 0
+    if path.exists():
+        with path.open(encoding='utf-8') as stream:
+            for line in stream:
+                if not line.endswith('\n'):
+                    partial_lines += 1
+                    continue
+                value = json.loads(line)
+                if value.get('schema') != 'wiki_request_timing_v1':
+                    raise ValueError('unknown Wiki request timing schema')
+                if run_id is None or value['run_id'] == run_id:
+                    records.append(value)
+    return dict(schema='wiki_request_profile_v1', run_id=run_id,
+        run_ids=sorted({item['run_id'] for item in records}), partial_lines=partial_lines,
+        measurement='client calls including global cache; excludes Wiki-cache reuse and local-only work',
+        summary=_timing_summary(records),
+        by_stage={stage: _timing_summary(items)
+                  for stage, items in _group_timings(records, 'stage').items()},
+        by_job={job_id: dict(summary=_timing_summary(items),
+                            by_stage={stage: _timing_summary(stage_items)
+                                      for stage, stage_items in _group_timings(items, 'stage').items()})
+                for job_id, items in _group_timings(records, 'job_id').items()})
 
 
 def object_key(job):
@@ -12,7 +138,7 @@ def object_key(job):
     return 'job', job['id']
 
 
-def run_jobs(jobs, execute, *, object_workers, state, save, max_jobs=None):
+def run_jobs(jobs, execute, *, object_workers, state, save, max_jobs=None, check_available=None):
     """Execute pending jobs; the caller owns the batch lock and input checks.
 
     ``jobs`` may be a coordinator-side iterator that validates/reuses completed
@@ -45,8 +171,12 @@ def run_jobs(jobs, execute, *, object_workers, state, save, max_jobs=None):
 
     def invoke(job):
         try:
+            if check_available is not None:
+                check_available()
             return execute(job, lambda: attempt(job['id']))
         except Exception as exc:
+            if check_available is not None:
+                check_available()
             return dict(stage='incomplete', error=f'{type(exc).__name__}: {exc}'[-1600:])
 
     pending, waiting, active_keys = {}, [], set()
@@ -93,6 +223,8 @@ def run_jobs(jobs, execute, *, object_workers, state, save, max_jobs=None):
                 while len(pending) < object_workers:
                     if max_jobs is not None and started >= max_jobs:
                         break
+                    if check_available is not None:
+                        check_available()
                     job = next_job()
                     if job is None:
                         break

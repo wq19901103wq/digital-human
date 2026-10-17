@@ -6,7 +6,8 @@ import json
 from ...iteration.storage import write_json
 from . import wiki_revision as revision, wiki_structured as structured
 from .wiki_library_extract import obj
-from .wiki_repair import _cached_call, _render
+from .wiki_repair import _render
+from .wiki_revision_output import cached_call
 
 SCHEMA = deepcopy(revision.SCHEMA)
 DECISION = SCHEMA['properties']['decisions']['items']
@@ -73,8 +74,8 @@ def extract(client, cache, data, batch, rows):
         entities=[e for e in data['entities'] if e['id'] in refs],
         columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
         messages=[_render(r) + [r['chat_id']] for r in rows])
-    return _cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
-                        lambda v: validate(v, batch, rows, data))
+    return cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                       lambda v: validate(v, batch, rows, data), payload)
 
 
 def revise(client, directory, data, rows, workers=4):

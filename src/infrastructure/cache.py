@@ -72,8 +72,10 @@ def validation(check):
         _validator.reset(token)
 
 
-def response_valid(value):
+def response_valid(value, *, require_validator=False):
     check = _validator.get()
+    if require_validator and check is None:
+        return False
     try:
         return check(value) is not False if check else bool(value.strip())
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):

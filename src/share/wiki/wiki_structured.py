@@ -19,6 +19,7 @@ from .wiki_library_extract import obj
 TEXT = {'type': 'string'}
 LINES = {'type': 'array', 'items': {'type': 'integer'}, 'minItems': 1}
 REFS = {'type': 'array', 'items': TEXT, 'minItems': 1}
+_XML_NAME = re.compile(r'[A-Za-z_][\w.-]*').fullmatch
 
 
 def array(item):
@@ -93,6 +94,40 @@ lines 只能指向输入原始消息；至少一条支持记录本身，其他�
 只输出 schema JSON。\n"""
 
 
+def source_prompt(contract='legacy_v1'):
+    if contract == 'legacy_v1':
+        return PROMPT
+    if contract != 'structured_source_v2':
+        raise ValueError(f'unsupported structured source contract: {contract}')
+    return PROMPT.replace(
+        'entities: ref 固定使用 E0=本文人物、E1=聊天本人，其余 E2...；label 为资料中称谓，不等于真实姓名。\n'
+        'E0/E1 的 account 固定；其他人的账号只有原始发言元数据明确支持时填写。无账号人物不跨批合并。',
+        'entities: E0=本文人物、E1=聊天本人是可选的保留编号，不要求每批都输出；其余人物用 E2...。\n'
+        'E0/E1 若输出，kind 必须为 person、account 固定为 subject 给出的对应账号，\n'
+        'lines 至少引用该账号在本次输入中的一条实际发言；没有作者锚点则省略实体及不受支持的引用。\n'
+        'label 为资料中称谓，不等于真实姓名。其他人的账号也必须有其本人发言的引用。\n'
+        'source_contract 是从原始元数据生成的作者索引；每个账号的 anchor_lines 只证明该账号存在，\n'
+        '不能证明邻近事实属于它；direct_lines 排除了转发消息，self_report 必须有主体自己的直接发言。\n'
+        'person_refs 列出了 E0/E1 可用的作者锚点，空列表不是可以从群名、聊天所有者或对方发言补造的身份。\n'
+        '无法绑定账号的人物可用 E2+、account 空串，保留 reported/uncertain 及真实归属，不强行合并。\n'
+        '无账号人物不跨批合并。')
+
+
+def source_contract(meta, rows):
+    authors = defaultdict(lambda: dict(anchor_lines=[], direct_lines=[]))
+    for row in sorted(rows, key=lambda item: item['line']):
+        account = row['sender_id']
+        if account:
+            authors[account]['anchor_lines'].append(row['line'])
+            if row['message_kind'] != 'forward':
+                authors[account]['direct_lines'].append(row['line'])
+    return dict(version='structured_source_v2',
+        person_refs=[dict(ref=ref, account=meta[key],
+                         anchor_lines=authors.get(meta[key], {}).get('anchor_lines', []))
+                     for ref, key in (('E0', 'account'), ('E1', 'self_account'))],
+        authors=[dict(account=account, **authors[account]) for account in sorted(authors)])
+
+
 def jobs_for(facts, rows, count=20, max_chars=100000):
     """Bound source context by same-chat distance/time, never drop cited rows."""
     from .wiki_repair import _stamp, _render
@@ -127,14 +162,25 @@ def jobs_for(facts, rows, count=20, max_chars=100000):
         yield batch, sorted(selected.values(), key=lambda r: r['line'])
 
 
-def extract(client, directory, meta, facts, rows):
-    from .wiki_repair import _cached_call, _render
+def extract(client, directory, meta, facts, rows, *, contract='legacy_v1', reference_contract='legacy_v1'):
+    from .wiki_repair import _cached_call, _render, reference_call
+    prompt = source_prompt(contract)
+    if reference_contract not in ('legacy_v1', 'bounded_refs_v2'):
+        raise ValueError(f'unknown reference contract: {reference_contract}')
     mapping = {f'F{i+1}': f['id'] for i, f in enumerate(facts)}
     payload = dict(subject=meta, facts=[dict(f, id=short) for short, f in zip(mapping, facts)],
         columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
         messages=[_render(r) + [r['chat_id']] for r in rows])
-    value = _cached_call(client, directory, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
-                        lambda v: validate(v, mapping, rows, meta))
+    if contract == 'structured_source_v2':
+        saved = _cached_call(client, directory, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                             lambda value: validate(value, mapping, rows, meta), cache_only=True)
+        if saved is not None:
+            return saved, mapping
+        payload['source_contract'] = source_contract(meta, rows)
+    value = reference_call(client, directory, prompt + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                        lambda v: validate(v, mapping, rows, meta),
+                        bounds=dict(lines=[r['line'] for r in rows], utterance_line=[r['line'] for r in rows],
+                                    fact_id=mapping, fact_ids=mapping), contract=reference_contract)
     return value, mapping
 
 
@@ -228,79 +274,113 @@ def require_attribution(issues):
 
 
 def validate(value, mapping, rows, meta):
+    from .wiki_repair import require_checks
     by_line = {r['line']: r for r in rows}
-    _check_source_refs(value, mapping, by_line)
     entities = {e['ref']: e for e in value['entities']}
-    if len(entities) != len(value['entities']):
-        raise ValueError('duplicate entity ref')
-    for ref, account in [('E0', meta['account']), ('E1', meta['self_account'])]:
-        if ref in entities and (entities[ref]['account'] != account or entities[ref]['kind'] != 'person'):
+    def check_unique():
+        if len(entities) != len(value['entities']):
+            raise ValueError('duplicate entity ref')
+    def check_entity(e):
+        ref = e['ref']
+        account = {'E0': meta['account'], 'E1': meta['self_account']}.get(ref)
+        if account is not None and (e['account'] != account or e['kind'] != 'person'):
             raise ValueError(f'{ref} must retain its supplied account={account} and kind=person if present. '
                 'E0/E1 are optional: omit an unsupported entity and unsupported references to it, '
                 'rather than clearing or changing its account. Use E2+ for distinct supported or '
                 'unresolved people; preserve facts with supported ownership. Re-read the original '
                 'messages and update fact reviews consistently.')
-    for e in entities.values():
         if not e['ref'] or not e['label']:
             raise ValueError(f'entity needs nonempty ref and label: {e}')
         if e['account'] and e['kind'] != 'person':
             raise ValueError(f'{e["ref"]} kind={e["kind"]}: non-person account must be empty; '
                              f'group IDs are not sender accounts: {e["account"]}')
         if e['account'] and e['account'] not in (meta['account'], meta['self_account']):
-            if e['account'] not in {by_line[n]['sender_id'] for n in e['lines']}:
+            if set(e['lines']) <= by_line.keys() and e['account'] not in {by_line[n]['sender_id'] for n in e['lines']}:
                 raise ValueError(f'{e["ref"]} account={e["account"]} not among cited senders: '
                                  f'{ {n: by_line[n]["sender_id"] for n in e["lines"]} }')
-    represented = set()
-    for collection in ('attributes', 'relations', 'events', 'addresses'):
-        for record in value[collection]:
-            if collection in ('attributes', 'relations') and not record['subject_ref']:
-                raise ValueError('an attribute/relation must have a subject')
-            if collection == 'relations' and not record['object_ref']:
-                raise ValueError('a relation must have an object')
-            represented.update(record['fact_ids'])
-            refs = [record[k] for k in ('subject_ref', 'object_ref', 'target_ref') if record.get(k)]
-            refs += [p['entity_ref'] for p in record.get('participants', [])]
-            if not set(refs) <= entities.keys():
-                raise ValueError(f'unknown entity ref: {set(refs) - entities.keys()}')
-            for key in ('valid_from', 'valid_to'):
-                if record[key] and date.fromisoformat(record[key]).isoformat() != record[key]:
-                    raise ValueError('effective dates must be exact ISO dates or empty')
-            if record['valid_from'] and record['valid_to'] and record['valid_from'] > record['valid_to']:
-                raise ValueError('effective interval reversed')
-            if collection == 'addresses':
-                line = record['utterance_line']
-                if (line not in record['lines'] or line not in by_line or not record['term']
-                        or record['term'] not in by_line[line]['text']):
-                    raise ValueError('address term must occur in its cited utterance: '
-                        f'term={record["term"]!r}, utterance_line={line}, cited_lines={record["lines"]}, '
-                        f'actual_utterance={by_line.get(line, {}).get("text", "unavailable")!r}; '
-                        'use the exact term and its actual source line, or omit an unsupported address')
-                target = entities.get(record['target_ref'])
-                sender = by_line[line]['sender_id']
-                if address_needs_source_review(record['usage'], by_line[line].get('message_kind')):
-                    raise ValueError(f'forwarded address speaker unresolved: utterance_line={line}, '
-                        f'term={record["term"]!r}, outer_sender={sender}. '
-                        'Re-read the supplied forward and its context: the outer sender is the '
-                        'publisher, not evidence of an inner speaker account. Represent a supported '
-                        'quoted use with explicit attribution, or keep uncertain/omit when unresolved; '
-                        'do not infer inner accounts from names or mechanically change usage. '
-                        'Only cite a separate direct utterance when it independently supports the record. '
-                        'Update fact reviews consistently.')
-                if record['usage'] == 'direct' and (not target or target['account'] == sender):
-                    raise ValueError(f'address line={line} term={record["term"]}: direct target '
-                        f'{record["target_ref"]} equals sender {sender} or is unresolved; '
-                        're-read attribution; self_reference/quoted/uncertain may be appropriate')
-                if record['usage'] == 'self_reference' and (not target or target['account'] != sender):
-                    raise ValueError('self reference must target source sender')
-                if not target and record['usage'] != 'uncertain':
-                    raise ValueError('unresolved target must remain uncertain')
+    def check_record(collection, record_index, record):
+        if collection in ('attributes', 'relations') and not record['subject_ref']:
+            raise ValueError('an attribute/relation must have a subject')
+        if collection == 'relations' and not record['object_ref']:
+            raise ValueError('a relation must have an object')
+        refs = [record[k] for k in ('subject_ref', 'object_ref', 'target_ref') if record.get(k)]
+        refs += [p['entity_ref'] for p in record.get('participants', [])]
+        if not set(refs) <= entities.keys():
+            raise ValueError(f'unknown entity ref: {sorted(set(refs) - entities.keys())}; '
+                             f'record={collection}/{record_index}; fact_ids={record["fact_ids"]}; '
+                             f'available_refs={sorted(entities)}; '
+                             'references must use entities declared in this output, not input entity IDs')
+        for key in ('valid_from', 'valid_to'):
+            if record[key] and date.fromisoformat(record[key]).isoformat() != record[key]:
+                raise ValueError('effective dates must be exact ISO dates or empty')
+        if record['valid_from'] and record['valid_to'] and record['valid_from'] > record['valid_to']:
+            raise ValueError('effective interval reversed')
+        if collection == 'addresses':
+            line = record['utterance_line']
+            if (line not in record['lines'] or line not in by_line or not record['term']
+                    or record['term'] not in by_line[line]['text']):
+                raise ValueError('address term must occur in its cited utterance: '
+                    f'term={record["term"]!r}, utterance_line={line}, cited_lines={record["lines"]}, '
+                    f'actual_utterance={by_line.get(line, {}).get("text", "unavailable")!r}; '
+                    'use the exact term and its actual source line, or omit an unsupported address')
+            target = entities.get(record['target_ref'])
+            sender = by_line[line]['sender_id']
+            if address_needs_source_review(record['usage'], by_line[line].get('message_kind')):
+                raise ValueError(f'forwarded address speaker unresolved: utterance_line={line}, '
+                    f'term={record["term"]!r}, outer_sender={sender}. '
+                    'Re-read the supplied forward and its context: the outer sender is the '
+                    'publisher, not evidence of an inner speaker account. Represent a supported '
+                    'quoted use with explicit attribution, or keep uncertain/omit when unresolved; '
+                    'do not infer inner accounts from names or mechanically change usage. '
+                    'Only cite a separate direct utterance when it independently supports the record. '
+                    'Update fact reviews consistently.')
+            if not target and record['usage'] != 'uncertain':
+                raise ValueError(f'unresolved target must remain uncertain; line={line}; '
+                    f'target_ref={record["target_ref"]!r}; usage={record["usage"]!r}. '
+                    'Re-read the source: keep usage=uncertain when the target cannot be bound, '
+                    'or omit unsupported content and update fact reviews; '
+                    'do not substitute an unrelated known entity.')
+            if record['usage'] == 'direct' and target and target['account'] == sender:
+                raise ValueError(f'address line={line} term={record["term"]}: direct target '
+                    f'{record["target_ref"]} equals sender {sender}; '
+                    're-read attribution; self_reference/quoted/uncertain may be appropriate')
+            if record['usage'] == 'self_reference' and target and target['account'] != sender:
+                raise ValueError('self reference must target source sender')
+    represented = {fact for collection in ('attributes', 'relations', 'events', 'addresses')
+                   for record in value[collection] for fact in record['fact_ids']}
     reviews = [r['fact_id'] for r in value['reviews']]
-    if len(reviews) != len(set(reviews)) or set(reviews) != set(mapping):
-        raise ValueError(f'every input fact needs one review; expected={list(mapping)}, received={reviews}')
-    for review in value['reviews']:
+    def check_reviews():
+        if len(reviews) != len(set(reviews)) or set(reviews) != set(mapping):
+            raise ValueError(f'every input fact needs one review; expected={list(mapping)}, received={reviews}')
+    def check_review(review):
         if (review['disposition'] == 'represented') != (review['fact_id'] in represented):
-            raise ValueError(f'review disposition disagrees with records: {review["fact_id"]}')
-    require_attribution(attribution_issues(value, rows))
+            raise ValueError(f'review disposition disagrees with records: {review["fact_id"]}; '
+                f'disposition={review["disposition"]}; referenced={review["fact_id"] in represented}. '
+                'represented requires a supported attribute, relation, event or address citing this fact_id. '
+                'If no supported record remains, use omit or unresolved as the raw evidence warrants; '
+                'do not attach the fact_id to an unrelated record just to pass coverage.')
+    def check_attribution():
+        safe = dict(entities=[entity for entity in value['entities']
+                             if set(entity['lines']) <= by_line.keys()])
+        for collection in ('attributes', 'relations', 'events'):
+            safe[collection] = [record for record in value[collection]
+                if set(record['lines']) <= by_line.keys() and
+                all(ref in entities for ref in ([participant['entity_ref'] for participant in record['participants']]
+                    if collection == 'events' else [record['subject_ref']]))]
+        require_attribution(attribution_issues(safe, rows))
+    checks = [('source_refs', lambda: _check_source_refs(value, mapping, by_line)),
+              ('entities', check_unique)]
+    checks.extend((f'entities[{index}]', lambda entity=entity: check_entity(entity))
+                  for index, entity in enumerate(value['entities']))
+    checks.extend((f'{collection}[{index}]',
+                   lambda collection=collection, index=index, record=record: check_record(collection, index, record))
+                  for collection in ('attributes', 'relations', 'events', 'addresses')
+                  for index, record in enumerate(value[collection]))
+    checks.append(('reviews', check_reviews))
+    checks.extend((f'reviews[{index}]', lambda review=review: check_review(review))
+                  for index, review in enumerate(value['reviews']))
+    checks.append(('attribution', check_attribution))
+    require_checks(checks)
 
 
 def compile_records(meta, outputs, rows, coverage):
@@ -359,8 +439,7 @@ def compile_records(meta, outputs, rows, coverage):
         reviews=reviews, evidence=evidence)
 
 
-def to_xml(data):
-    """Lossless typed XML projection; entity/record IDs become SQL foreign keys."""
+def _element_xml(data):
     def fill(element, value):
         if isinstance(value, dict):
             element.set('type', 'object')
@@ -382,6 +461,56 @@ def to_xml(data):
         fill(ET.SubElement(root, key), value)
     ET.indent(root, space='  ')
     return ET.tostring(root, encoding='unicode', xml_declaration=True) + '\n'
+
+
+def _xml_text(value):
+    return value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _xml_attribute(value):
+    return (_xml_text(value).replace('"', '&quot;').replace('\r', '&#13;')
+            .replace('\n', '&#10;').replace('\t', '&#09;'))
+
+
+def to_xml(data):
+    """Serialize typed Wiki JSON without constructing an intermediate XML tree."""
+    if not isinstance(data['schema'], str) or any(
+            not isinstance(key, str) or not _XML_NAME(key) for key in data):
+        return _element_xml(data)
+    output = ["<?xml version='1.0' encoding='utf-8'?>\n",
+              '<wiki schema="' + _xml_attribute(data['schema']) + '">\n']
+    tags, indentation = {}, ['']
+
+    def emit(key, value, depth):
+        if key not in tags:
+            tag, attributes = (key, '') if _XML_NAME(key) else (
+                'field', ' name="' + _xml_attribute(key) + '"')
+            tags[key] = (tag, attributes)
+        tag, attributes = tags[key]
+        if depth == len(indentation):
+            indentation.append(indentation[-1] + '  ')
+        prefix = indentation[depth] + '<' + tag + attributes + ' type="'
+        if isinstance(value, (dict, list)):
+            prefix += 'object' if isinstance(value, dict) else 'array'
+            if not value:
+                output.append(prefix + '" />\n')
+                return
+            output.append(prefix + '">\n')
+            children = value.items() if isinstance(value, dict) else (('item', child) for child in value)
+            for child_key, child in children:
+                emit(child_key, child, depth + 1)
+            output.append(indentation[depth] + '</' + tag + '>\n')
+        else:
+            prefix += ('boolean' if isinstance(value, bool) else
+                       'number' if isinstance(value, (int, float)) else 'string')
+            text = str(value).lower() if isinstance(value, bool) else str(value)
+            output.append(prefix + '">' + _xml_text(text) + '</' + tag + '>\n' if text else
+                          prefix + '" />\n')
+
+    for key, value in data.items():
+        emit(key, value, 1)
+    output.append('</wiki>\n')
+    return ''.join(output)
 
 
 def render(data):
@@ -432,13 +561,18 @@ def render(data):
     return '\n'.join(text) + '\n'
 
 
-def generate(client, directory, meta, facts, rows, coverage, workers, progress, status, *, jobs=None):
+def generate(client, directory, meta, facts, rows, coverage, workers, progress, status, *, jobs=None,
+             contract='legacy_v1', reference_contract='legacy_v1'):
+    from .wiki_repair import failure_record
+    source_prompt(contract)
     jobs = list(jobs_for(facts, rows)) if jobs is None else jobs
     progress.update(stage='structuring', structured_batches=len(jobs), structured_completed=0)
     status()
     outputs = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending = {pool.submit(extract, client, directory, meta, fs, rs): i for i, (fs, rs) in enumerate(jobs)}
+        pending = {pool.submit(extract, client, directory, meta, fs, rs, contract=contract,
+                               reference_contract=reference_contract): i
+                   for i, (fs, rs) in enumerate(jobs)}
         for future in as_completed(pending):
             i = pending[future]
             try:
@@ -446,7 +580,7 @@ def generate(client, directory, meta, facts, rows, coverage, workers, progress, 
                 progress['structured_completed'] += 1
             except Exception as exc:
                 progress['failed'] += 1
-                progress['errors'].append(dict(stage='structuring', batch=i, error=str(exc)[-1000:]))
+                progress['errors'].append(failure_record(exc, tail_limit=1000, stage='structuring', batch=i))
             status()
     if progress['failed']:
         return None

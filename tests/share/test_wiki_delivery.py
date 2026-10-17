@@ -1,4 +1,5 @@
 """Delivery catalogs distinguish actual reusable results, candidates and gaps."""
+from collections import Counter
 from copy import deepcopy
 import json
 
@@ -31,6 +32,109 @@ def batch_fixture(tmp_path, *, reused=False, data=None):
     write_json(batch / 'progress.json', dict(stage='complete', jobs={'page': dict(stage='complete',
         knowledge=str(source), sha256=sha256_file(source), records=exported['records'], packets=exported['packets'])}))
     return batch, source
+
+
+def test_revision_checks_reuse_file_reads_without_caching_job_binding(tmp_path, monkeypatch):
+    batch, source = batch_fixture(tmp_path)
+    manifest = dict(revision=dict(source=dict(path=str(batch / 'manifest.json'),
+        sha256=sha256_file(batch / 'manifest.json'))))
+    binding = dict(path=str(source), sha256=sha256_file(source))
+    reads, hashes, cache = Counter(), Counter(), {}
+    original_read, original_hash = delivery.read_json, delivery.sha256_file
+
+    def counted_read(path, *args, **kwargs):
+        reads[str(path)] += 1
+        return original_read(path, *args, **kwargs)
+
+    def counted_hash(path):
+        hashes[str(path)] += 1
+        return original_hash(path)
+
+    monkeypatch.setattr(delivery, 'read_json', counted_read)
+    monkeypatch.setattr(delivery, 'sha256_file', counted_hash)
+    for _ in range(3):
+        delivery._require_revision_original(manifest, 'page', binding, cache=cache)
+    assert reads == {str(batch / 'manifest.json'): 1, str(batch / 'progress.json'): 1}
+    assert hashes == {str(batch / 'manifest.json'): 1, str(batch / 'progress.json'): 1,
+        str(source): 1}
+    with pytest.raises(ValueError, match='matches completed original'):
+        delivery._require_revision_original(manifest, 'page', binding | {'sha256': 'wrong'}, cache=cache)
+    with pytest.raises(KeyError):
+        delivery._require_revision_original(manifest, 'missing', binding, cache=cache)
+
+
+@pytest.mark.parametrize('mutation', ['manifest', 'stage', 'knowledge', 'missing'])
+def test_revision_file_cache_invalidates_changed_or_missing_sources(tmp_path, mutation):
+    batch, source = batch_fixture(tmp_path)
+    manifest = dict(revision=dict(source=dict(path=str(batch / 'manifest.json'),
+        sha256=sha256_file(batch / 'manifest.json'))))
+    binding = dict(path=str(source), sha256=sha256_file(source))
+    cache = {}
+    delivery._require_revision_original(manifest, 'page', binding, cache=cache)
+    if mutation == 'manifest':
+        saved = read_json(batch / 'manifest.json')
+        saved['jobs'][0]['account'] = 'other'
+        write_json(batch / 'manifest.json', saved)
+    elif mutation == 'stage':
+        saved = read_json(batch / 'progress.json')
+        saved['jobs']['page']['stage'] = 'incomplete'
+        write_json(batch / 'progress.json', saved)
+    elif mutation == 'knowledge':
+        source.write_text('{}')
+    else:
+        source.unlink()
+    with pytest.raises((ValueError, FileNotFoundError)):
+        delivery._require_revision_original(manifest, 'page', binding, cache=cache)
+
+
+def test_revision_file_cache_rejects_changes_during_read(tmp_path, monkeypatch):
+    batch, _ = batch_fixture(tmp_path)
+    path = batch / 'manifest.json'
+    original_read = delivery.read_json
+
+    def changed_read(filename):
+        value = original_read(filename)
+        path.write_text('{}')
+        return value
+
+    monkeypatch.setattr(delivery, 'read_json', changed_read)
+    cache = {}
+    with pytest.raises(ValueError, match='changed while being checked'):
+        delivery._revision_file(path, cache, json_data=True)
+    assert not cache
+
+
+def test_catalog_reuses_revision_ancestors_and_rechecks_them_each_refresh(tmp_path, monkeypatch):
+    from src.share.wiki import wiki_revision_batch as revision_batch
+    from test_wiki_revision import KeepClient
+    from test_wiki_revision_batch import prepared
+
+    source, revision, knowledge_path = prepared(tmp_path)
+    revision_batch.run(revision, client=KeepClient())
+    next_revision = tmp_path / 'next-revision'
+    revision_batch.prepare(revision, next_revision)
+    revision_batch.run(next_revision, client=KeepClient())
+    hashes, cache = Counter(), {}
+    original_hash = delivery.sha256_file
+
+    def counted_hash(path):
+        hashes[str(path)] += 1
+        return original_hash(path)
+
+    monkeypatch.setattr(delivery, 'sha256_file', counted_hash)
+    batches = [source, revision, next_revision]
+    first = delivery.inspect(batches, cache=cache)
+    assert first['jobs'][0]['batch'] == str(next_revision)
+    assert first['summary']['counts'] == {'complete': 1}
+    count = hashes[str(knowledge_path)]
+    assert count > 0
+    assert delivery.inspect(batches, cache=cache)['summary'] == first['summary']
+    assert hashes[str(knowledge_path)] == count
+    knowledge_path.write_text('{}')
+    value = delivery.inspect(batches, cache=cache)
+    assert value['summary']['counts'] == {'invalid': 1}
+    assert value['summary']['records'] == 0
+    assert 'original knowledge changed' in value['jobs'][0]['error']
 
 
 def test_reused_outputs_are_linked_without_copying_facts_or_confirming_identity(tmp_path):
@@ -290,6 +394,180 @@ def test_follow_writes_final_catalog_and_stops_when_batches_finish(tmp_path, mon
     assert delivery.deliver([batch], tmp_path / 'catalog', follow=True)['stage'] == 'complete'
     assert sleeps == [30]
     assert read_json(tmp_path / 'catalog/catalog.json')['stage'] == 'complete'
+
+
+def test_unchanged_resume_export_does_not_invalidate_catalog_checks(tmp_path, monkeypatch):
+    batch, source = batch_fixture(tmp_path)
+    original = delivery.inspect_job
+    calls, cache = [], {}
+
+    def resume_during_check(*args):
+        calls.append(1)
+        wiki_prompt.export(source, batch / 'prompt/page')
+        return original(*args)
+
+    monkeypatch.setattr(delivery, 'inspect_job', resume_during_check)
+    first = delivery.inspect([batch], cache=cache)
+    assert first['summary']['counts'] == {'complete': 1}
+    assert delivery.inspect([batch], cache=cache)['summary'] == first['summary']
+    assert calls == [1]
+
+
+def bound_catalog_fixture(tmp_path):
+    batch, source = batch_fixture(tmp_path)
+    manifest = read_json(batch / 'manifest.json')
+    manifest['jobs'][0]['binding'] = 'raw_member_snapshot'
+    write_json(batch / 'manifest.json', manifest)
+    return delivery.inspect([batch]), source
+
+
+def test_object_refresh_reuses_unchanged_outputs_without_retaining_body(tmp_path, monkeypatch):
+    value, _ = bound_catalog_fixture(tmp_path)
+    output, cache, calls = tmp_path / 'catalog', {}, []
+    original = delivery.wiki_objects.compose
+
+    def counted_compose(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(delivery.wiki_objects, 'compose', counted_compose)
+    delivery.write_catalog(value, output, cache=cache)
+    before = {p: p.read_bytes() for p in (output / 'objects').rglob('*') if p.is_file()}
+    value['updated_at'] = 'later'
+    delivery.write_catalog(value, output, cache=cache)
+    assert calls == [1]
+    assert all(p.read_bytes() == content for p, content in before.items())
+    assert read_json(output / 'catalog.json')['updated_at'] == 'later'
+    assert all(isinstance(entry[0][0], str) and len(entry[0][0]) == 64 for entry in cache.values())
+    assert all(isinstance(stamp, tuple) and len(stamp) == 3 for entry in cache.values()
+               for _, stamp in entry[1])
+
+
+@pytest.mark.parametrize('artifact', ['page', 'knowledge.json', 'wiki.md', 'wiki.xml',
+                                     'cards.jsonl', 'sources.json', 'manifest.json'])
+@pytest.mark.parametrize('mutation', ['change', 'remove'])
+def test_object_cache_repairs_changed_or_missing_outputs(tmp_path, monkeypatch, artifact, mutation):
+    value, _ = bound_catalog_fixture(tmp_path)
+    output, cache = tmp_path / 'catalog', {}
+    delivery.write_catalog(value, output, cache=cache)
+    page = output / 'objects' / (value['objects'][0]['id'] + '.md')
+    target = page if artifact == 'page' else page.with_suffix('') / artifact
+    expected = target.read_bytes()
+    if mutation == 'change':
+        target.write_text('modified')
+    else:
+        target.unlink()
+    calls, original = [], delivery.wiki_objects.compose
+
+    def counted_compose(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(delivery.wiki_objects, 'compose', counted_compose)
+    delivery.write_catalog(value, output, cache=cache)
+    assert calls == [1] and target.read_bytes() == expected
+
+
+def test_object_cache_rechecks_changed_source_before_using_previous_page(tmp_path):
+    value, source = bound_catalog_fixture(tmp_path)
+    output, cache = tmp_path / 'catalog', {}
+    delivery.write_catalog(value, output, cache=cache)
+    source.write_text(source.read_text() + '\n')
+    with pytest.raises(ValueError, match='object material changed after inspection'):
+        delivery.write_catalog(value, output, cache=cache)
+
+
+def test_object_cache_invalidates_identity_and_keeps_candidate_separate(tmp_path):
+    value, _ = bound_catalog_fixture(tmp_path)
+    output, cache = tmp_path / 'catalog', {}
+    delivery.write_catalog(value, output, cache=cache)
+    value['jobs'][0]['binding'] = 'unverified_name_candidate'
+    grouped = delivery.object_catalog(value['jobs'])
+    value['objects'] = grouped['objects']
+    value['summary']['objects'] = grouped['summary']
+    delivery.write_catalog(value, output, cache=cache)
+    page = output / 'objects' / (value['objects'][0]['id'] + '.md')
+    text = page.read_text()
+    assert '**身份待核实**' in text
+    assert '当前没有可合入正文的已完成、归属明确的材料' in text
+    assert '合并 JSON' not in text
+    assert '旧名字候选' in (output / 'identity-review.md').read_text()
+
+
+def test_object_cache_rejects_source_changes_during_composition(tmp_path, monkeypatch):
+    value, source = bound_catalog_fixture(tmp_path)
+    output, cache = tmp_path / 'catalog', {}
+    original = delivery.wiki_objects.compose
+
+    def changed_compose(*args):
+        result = original(*args)
+        source.write_text(source.read_text() + '\n')
+        return result
+
+    monkeypatch.setattr(delivery.wiki_objects, 'compose', changed_compose)
+    with pytest.raises(ValueError, match='object materials changed while being composed'):
+        delivery.write_catalog(value, output, cache=cache)
+    assert not cache
+    assert not (output / 'catalog.json').exists()
+
+
+def test_follow_reuses_object_composition_across_refreshes(tmp_path, monkeypatch):
+    finished, _ = bound_catalog_fixture(tmp_path)
+    running = deepcopy(finished)
+    running['stage'] = 'incomplete'
+    running['batches'][0]['running'] = True
+    values, calls = iter([running, finished]), []
+    original = delivery.wiki_objects.compose
+
+    def counted_compose(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(delivery.wiki_objects, 'compose', counted_compose)
+    monkeypatch.setattr(delivery, 'inspect', lambda *args, **kwargs: next(values))
+    monkeypatch.setattr(delivery.time, 'sleep', lambda _: None)
+    delivery.deliver([tmp_path / 'batch'], tmp_path / 'catalog', follow=True)
+    assert calls == [1]
+
+
+def test_follow_keeps_watching_locked_batch_before_running_state(tmp_path, monkeypatch):
+    finished, _ = bound_catalog_fixture(tmp_path)
+    values, locks, checks = iter([finished, finished]), iter([True, False]), []
+
+    def inspect(*args, **kwargs):
+        checks.append(1)
+        return next(values)
+
+    monkeypatch.setattr(delivery, 'inspect', inspect)
+    monkeypatch.setattr(delivery, 'locked', lambda _: next(locks))
+    monkeypatch.setattr(delivery.time, 'sleep', lambda _: None)
+    delivery.deliver([tmp_path / 'batch'], tmp_path / 'catalog', follow=True)
+    assert checks == [1, 1]
+
+
+def test_follow_refreshes_progress_changed_during_cold_catalog(tmp_path, monkeypatch):
+    batch, _ = batch_fixture(tmp_path)
+    finished = read_json(batch / 'progress.json')
+    finished['updated_at'] = 2
+    incomplete = deepcopy(finished)
+    incomplete.update(stage='incomplete', updated_at=1)
+    incomplete['jobs']['page']['stage'] = 'incomplete'
+    write_json(batch / 'progress.json', incomplete)
+    original_write, writes = delivery.write_catalog, []
+
+    def write_catalog(*args, **kwargs):
+        original_write(*args, **kwargs)
+        writes.append(1)
+        if len(writes) == 1:
+            write_json(batch / 'progress.json', finished)
+
+    monkeypatch.setattr(delivery, 'write_catalog', write_catalog)
+    monkeypatch.setattr(delivery.time, 'sleep', lambda _: None)
+    output = tmp_path / 'catalog'
+    result = delivery.deliver([batch], output, follow=True)
+    assert writes == [1, 1]
+    assert result['summary']['counts'] == {'complete': 1}
+    assert read_json(output / 'catalog.json')['summary']['counts'] == {'complete': 1}
 
 
 def test_unified_check_reports_incomplete_separately_from_invalid_artifacts(tmp_path, capsys):

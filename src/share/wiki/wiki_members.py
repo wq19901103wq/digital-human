@@ -138,7 +138,7 @@ def load_pages(paths, chatroom, self_account):
 
 
 def prepare(members, pages, output, self_account, config, *, non_friends_only=False,
-            priority_accounts=(), max_chars=120000):
+            priority_accounts=(), accounts=(), max_chars=120000):
     """Compile raw metadata into frozen jobs consumed by the existing runner."""
     members, output = Path(members).resolve(), Path(output).resolve()
     with file_lock(output / '.lock', blocking=False):
@@ -161,12 +161,15 @@ def prepare(members, pages, output, self_account, config, *, non_friends_only=Fa
         write_json(output / 'source/import.json', dict(schema='wiki_group_api_import_v1',
             adapter_sha256=sha256_file(Path(__file__)), members=snapshot, **coverage))
         jobs, gaps, seen = [], [], set()
+        selected = set(accounts)
         for index, member in enumerate(roster['members']):
             account = member.get('wxid')
             if not isinstance(account, str) or not account or account.startswith('_sender_') or account in seen:
                 raise ValueError('member snapshot has a missing, placeholder or repeated account')
             seen.add(account)
-            if account == self_account or (non_friends_only and member.get('isFriend') is not False):
+            if (account == self_account
+                    or (non_friends_only and member.get('isFriend') is not False)
+                    or (selected and account not in selected)):
                 continue
             title = member.get('displayName') or member.get('nickname') or account
             title = re.sub(r'[\r\n]', ' ', str(title))
@@ -188,6 +191,8 @@ def prepare(members, pages, output, self_account, config, *, non_friends_only=Fa
             locator = dict(kind='raw_member_page_seed', path=str(seed), sha256=sha256_file(seed))
             jobs.append(dict(base, sources=[snapshot, locator], wiki=locator,
                              output=str(output / 'jobs' / job_id)))
+        if selected - {item['account'] for item in jobs + gaps}:
+            raise ValueError('selected account is absent or excluded by member filters')
         priorities = set(priority_accounts)
         if priorities - {j['account'] for j in jobs}:
             raise ValueError('priority account is absent or has no raw messages')
@@ -203,5 +208,7 @@ def prepare(members, pages, output, self_account, config, *, non_friends_only=Fa
             summary=dict(files=len(jobs), documents=len(jobs)+len(gaps), jobs=len(jobs), reusable=0,
                 bindings=dict(Counter(j['binding'] for j in jobs)),
                 gaps=dict(Counter(g['reason'] for g in gaps))))
+        if selected:
+            manifest['selected_accounts'] = sorted(selected)
         write_json(output / 'manifest.json', manifest)
         return manifest['summary']

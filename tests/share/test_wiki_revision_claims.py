@@ -98,6 +98,64 @@ def test_role_protocol_has_distinct_cache_and_preserves_kept_records(tmp_path):
     assert '你来定时间' not in json.dumps(result, ensure_ascii=False)
 
 
+def test_aggregated_diagnostics_reach_correction_and_reuse_the_valid_cache(tmp_path):
+    data = knowledge(tmp_path)
+    batch = revision.records(data)
+    rows = revision.read_rows(data['coverage'], 'self')
+    class Correcting(RoleClient):
+        def run(self, prompt, schema):
+            value = json.loads(super().run(prompt, schema))
+            if len(self.prompts) == 1:
+                for decision in value['decisions']:
+                    decision['role_checks'][0]['described_entity_id'] = 'unknown-input-entity'
+                    decision['slot_checks'] = []
+            else:
+                assert repair.RETRY_MARKER in prompt
+                feedback = json.loads(prompt.split(repair.RETRY_MARKER, 1)[0].split('\n', 1)[1])
+                for record in batch:
+                    assert f'record={record["id"]}; role_checks:' in feedback['error']
+                    assert f'record={record["id"]}; slot_checks:' in feedback['error']
+            return json.dumps(value)
+    client = Correcting()
+    directory = tmp_path / 'cache'
+    result = roles.extract(client, directory, data, batch, rows)
+    assert len(client.prompts) == 2
+    before = {path: path.read_bytes() for path in directory.glob('*.json')}
+    assert roles.extract(client, directory, data, batch, rows) == result
+    assert len(client.prompts) == 2
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_diagnostic_update_does_not_reset_persistent_correction_budget(tmp_path):
+    data = knowledge(tmp_path)
+    batch = revision.records(data)
+    rows = revision.read_rows(data['coverage'], 'self')
+    class Invalid(RoleClient):
+        def run(self, prompt, schema):
+            value = json.loads(super().run(prompt, schema))
+            for decision in value['decisions']:
+                decision['role_checks'][0]['described_entity_id'] = 'unknown-input-entity'
+                decision['slot_checks'] = []
+            return json.dumps(value)
+    client = Invalid()
+    directory = tmp_path / 'cache'
+    with pytest.raises(ValueError, match='record=.*role_checks:'):
+        roles.extract(client, directory, data, batch, rows)
+    assert len(client.prompts) == repair.RETRY_LIMIT
+    failures = sorted((tmp_path / 'failures').glob('*.json'))
+    assert len(failures) == repair.RETRY_LIMIT
+    for path in failures:
+        failure = json.loads(path.read_text())
+        failure['error'] = 'role check refers to unknown input entity'
+        path.write_text(json.dumps(failure))
+    legacy_errors = {path: path.read_bytes() for path in failures}
+    with pytest.raises(ValueError, match='unchanged request exhausted'):
+        roles.extract(client, directory, data, batch, rows)
+    assert len(client.prompts) == repair.RETRY_LIMIT
+    assert not list(directory.glob('*.json'))
+    assert all(path.read_bytes() == content for path, content in legacy_errors.items())
+
+
 def mixed_event(tmp_path):
     """An old summary combines distinct owners and dates in one topic."""
     path = source(tmp_path, [
@@ -161,6 +219,71 @@ def test_content_audit_must_cover_each_slot_and_use_real_sources(tmp_path, mutat
         checks[0]['assertions'][0]['actor_entity_id'] = 'invented-actor'
     with pytest.raises(ValueError):
         roles.validate(value, revision.records(data), rows, data)
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unexpected'])
+def test_content_slot_diagnostic_identifies_record_and_exact_missing_keys(tmp_path, mutation):
+    data, rows, value = mixed_event(tmp_path)
+    decision = value['decisions'][0]
+    checks = decision['slot_checks']
+    missing = checks[-1]['slot_key']
+    duplicate = checks[0]['slot_key']
+    if mutation == 'missing':
+        checks.pop()
+    elif mutation == 'duplicate':
+        checks[-1] = deepcopy(checks[0])
+    else:
+        checks[-1]['slot_key'] = 'invented-slot'
+    with pytest.raises(ValueError, match='exactly one source check') as error:
+        roles.validate(value, revision.records(data), rows, data)
+    message = str(error.value)
+    assert f'record={decision["record_id"]}' in message
+    assert f"missing=['{missing}']" in message
+    assert f"duplicate=['{duplicate}']" in message if mutation == 'duplicate' else 'duplicate=[]' in message
+    assert "unexpected=['invented-slot']" in message if mutation == 'unexpected' else 'unexpected=[]' in message
+
+
+def test_diagnostic_reports_independent_role_and_slot_errors_for_every_record(tmp_path):
+    data, rows, value = fixture(tmp_path)
+    assert len(value['decisions']) > 1
+    expected_roles = []
+    for decision in value['decisions']:
+        role = decision['role_checks'][0]
+        expected_roles.append((role['role_key'], role['described_entity_id']))
+        role['described_entity_id'] = 'unknown-input-entity'
+        decision['slot_checks'] = []
+    with pytest.raises(ValueError) as error:
+        roles.validate(value, revision.records(data), rows, data)
+    message = str(error.value)
+    for decision, (role_key, entity_id) in zip(value['decisions'], expected_roles):
+        assert f'record={decision["record_id"]}' in message
+        assert f'role_key={role_key}' in message
+        assert f'expected_entity_id={entity_id}' in message
+    assert 'actual_entity_id=unknown-input-entity' in message
+    assert message.count('unknown input entity') == len(value['decisions'])
+    assert message.count('every content slot needs exactly one source check') == len(value['decisions'])
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unexpected'])
+def test_role_coverage_diagnostic_lists_exact_keys(tmp_path, mutation):
+    data, rows, value = mixed_event(tmp_path)
+    decision = value['decisions'][0]
+    checks = decision['role_checks']
+    expected = checks[0]['role_key']
+    if mutation == 'missing':
+        checks.clear()
+    elif mutation == 'duplicate':
+        checks.append(deepcopy(checks[0]))
+    else:
+        checks[0]['role_key'] = 'unknown-role'
+    with pytest.raises(ValueError, match='every structural role') as error:
+        roles.validate(value, revision.records(data), rows, data)
+    message = str(error.value)
+    assert f'record={decision["record_id"]}' in message
+    assert f"expected=['{expected}']" in message
+    assert f"missing=['{expected}']" in message if mutation != 'duplicate' else 'missing=[]' in message
+    assert f"duplicate=['{expected}']" in message if mutation == 'duplicate' else 'duplicate=[]' in message
+    assert "unexpected=['unknown-role']" in message if mutation == 'unexpected' else 'unexpected=[]' in message
 
 
 def comparison_record(tmp_path, *, explicit=False):
@@ -236,6 +359,26 @@ def corrected_event(data, value):
         role_checks=[dict(role_key='participants/0/车主', described_entity_id='E0', support='content',
                           lines=[1], explanation='此人是该次维修的车主。')])]
     return correction
+
+
+def test_diagnostic_reports_replacement_errors_alongside_input_errors(tmp_path):
+    data, rows, value = mixed_event(tmp_path)
+    corrected_event(data, value)
+    decision = value['decisions'][0]
+    decision['role_checks'][0]['described_entity_id'] = 'unknown-input-entity'
+    decision['slot_checks'] = []
+    replacement = value['replacement_checks'][0]
+    replacement['role_checks'][0]['described_entity_id'] = 'unknown-replacement-entity'
+    replacement['slot_checks'] = []
+    with pytest.raises(ValueError) as error:
+        roles.validate(value, revision.records(data), rows, data)
+    message = str(error.value)
+    assert f'record={decision["record_id"]}' in message
+    assert 'record=events/0' in message
+    assert 'actual_entity_id=unknown-input-entity' in message
+    assert 'actual_entity_id=unknown-replacement-entity' in message
+    assert 'expected_entity_id=E0' in message
+    assert message.count('every content slot needs exactly one source check') == 2
 
 
 @pytest.mark.parametrize('mutation', ['none', 'missing_audit', 'bad_source', 'unsupported', 'wrong_key',

@@ -1,6 +1,8 @@
 """Incremental mention retrieval keeps raw attribution and existing work intact."""
 import json
 
+import pytest
+
 from src.share.wiki import wiki_mentions as mentions
 from src.share.wiki import wiki_repair as repair
 from test_wiki_repair import Client, row, source
@@ -13,6 +15,38 @@ class MentionClient(Client):
             value['facts'][0].update(speaker_id='other', mode='reported',
                 summary='另一位聊天参与者提及此人的到访计划。')
         return json.dumps(value)
+
+
+@pytest.mark.parametrize('stage', ['extract', 'reread'])
+def test_mention_failures_preserve_request_key_and_tail(tmp_path, monkeypatch, stage):
+    key = 'a' * 64
+    def fail(*args, **kwargs):
+        raise repair.request_error(key, 'failure ' * 200)
+    monkeypatch.setattr(repair, 'extract_batch', fail if stage == 'extract' else
+                        lambda *args, **kwargs: dict(facts=[]))
+    monkeypatch.setattr(repair, 'reread_batch', fail)
+    progress = dict(failed=0, errors=[])
+    result = mentions.extend_facts(object(), tmp_path, {}, [], [dict(line=1, timestamp=1,
+        sender_id='other', sender='other', message_kind='text', text='test', chat_id='other')],
+        dict(policy='test', anchors=[], terms=[]), {}, 1, 1000, progress, lambda: None)
+    assert result is None
+    assert progress['errors'] == [dict(stage=f'mentions_{stage}', batch=0,
+        error=('failure ' * 200)[-800:], request_sha256=key)]
+
+
+def test_reconciliation_failures_preserve_request_key_and_tail(tmp_path, monkeypatch):
+    from src.share.wiki import wiki_reconcile
+    key = 'b' * 64
+    def fail(*args, **kwargs):
+        raise repair.request_error(key, 'failure ' * 200)
+    monkeypatch.setattr(wiki_reconcile, 'groups_for', lambda data: [{}])
+    monkeypatch.setattr(wiki_reconcile, 'jobs_for', lambda *args, **kwargs: [([], [])])
+    monkeypatch.setattr(wiki_reconcile, 'extract', fail)
+    progress = dict(failed=0, errors=[])
+    result = wiki_reconcile.reconcile(object(), tmp_path, {}, [], 1, progress, lambda: None)
+    assert result is None
+    assert progress['errors'] == [dict(stage='reconciling_attributes', batch=0,
+        error=('failure ' * 200)[-1000:], request_sha256=key)]
 
 
 def test_legacy_recall_names_do_not_include_people_from_biography():
@@ -101,3 +135,23 @@ def test_incremental_two_pass_generation_reuses_all_base_calls(tmp_path):
     client.prompts.clear()
     repair.repair(wiki, path, output, 'person', 'self', {}, client=client, include_mentions=True)
     assert client.prompts == []
+
+
+def test_explicit_reread_contract_reaches_base_and_mention_windows(tmp_path):
+    wiki = tmp_path / '阿林.md'
+    wiki.write_text('# 阿林\n## 基本信息\n- old claim\n')
+    path = source(tmp_path, [row('private:self:person', 'person', 1000),
+                            row('group:self:room', 'other', 2000, '阿林明天来')])
+    client = MentionClient()
+    result = repair.repair(wiki, path, tmp_path / 'expanded', 'person', 'self', {},
+        client=client, include_mentions=True, reread_contract='reread_evidence_v2')
+    assert result['stage'] == 'complete'
+    rereads = [prompt for prompt in client.prompts
+               if prompt.startswith(repair.REREAD_EVIDENCE_PROMPT)]
+    assert len(rereads) == 2
+    assert sum(repair.MENTION_PROMPT in prompt for prompt in rereads) == 1
+    for prompt in rereads:
+        payload = json.loads(prompt[len(repair.REREAD_EVIDENCE_PROMPT):].replace(repair.MENTION_PROMPT, ''))
+        assert payload['source_contract']['message_lines'] == sorted({row[0] for row in payload['messages']})
+        assert payload['source_contract']['old_wiki_lines'] == [1, 2, 3]
+        assert payload['source_contract']['initial_fact_ids'] == [fact['id'] for fact in payload['initial_facts']]

@@ -14,7 +14,8 @@ from ...iteration.storage import write_json
 from . import wiki_structured as structured
 from .wiki_library import digest
 from .wiki_library_extract import obj
-from .wiki_repair import _cached_call, _render
+from .wiki_repair import _render, coverage_diagnostic
+from .wiki_revision_output import cached_call
 
 TABLES = ('attributes', 'relations', 'events', 'addresses')
 SCHEMA = obj(dict(decisions=structured.array(obj(dict(record_id=structured.TEXT,
@@ -78,7 +79,8 @@ def validate(value, batch, rows, meta, data=None):
     expected = {r['id'] for r in batch}
     decisions = value['decisions']
     if len(decisions) != len(expected) or {r['record_id'] for r in decisions} != expected:
-        raise ValueError('every input record needs exactly one semantic decision')
+        raise ValueError('every input record needs exactly one semantic decision; ' +
+                         coverage_diagnostic(expected, [r['record_id'] for r in decisions]))
     changed = {d['record_id']: d['action'] for d in decisions if d['action'] in ('correct', 'unresolved')}
     corrections = value['corrections']
     structured.validate(corrections, {rid: rid for rid in changed}, rows, meta)
@@ -132,8 +134,8 @@ def extract(client, cache, data, batch, rows):
         entities=[e for e in data['entities'] if e['id'] in refs],
         columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
         messages=[_render(r) + [r['chat_id']] for r in rows])
-    return _cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
-                        lambda v: validate(v, batch, rows, data['subject'], data))
+    return cached_call(client, cache, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                       lambda v: validate(v, batch, rows, data['subject'], data), payload)
 
 
 def apply(data, outputs, rows):

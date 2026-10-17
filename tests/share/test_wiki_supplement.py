@@ -2,7 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
-from threading import Barrier, get_ident
+from threading import Barrier, Event, get_ident
 
 import pytest
 
@@ -13,6 +13,8 @@ from src.share.wiki import wiki_source_index as sources
 from src.share.wiki import wiki_supplement as supplement
 from src.infrastructure.config import sha256_file
 from src.infrastructure.storage import read_json
+from src.infrastructure.storage import write_json
+from test_wiki_batch import pre_feedback_pipeline
 from test_wiki_repair import row, source
 
 
@@ -173,7 +175,8 @@ def test_scope_two_pass_cache_nonperson_root_and_locator_only_exports(tmp_path):
 
 
 @pytest.mark.parametrize('object_workers', [1, 3])
-def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, object_workers):
+@pytest.mark.parametrize('pre_feedback', [False, True])
+def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, object_workers, pre_feedback):
     library = tmp_path / 'wiki'
     (library / 'groups').mkdir(parents=True)
     (library / 'topics').mkdir()
@@ -184,6 +187,12 @@ def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, objec
     wiki_batch.prepare(library, messages, parent, 'self', {})
     summary = supplement.prepare(parent, output)
     assert summary['jobs'] == 2 and summary['kinds'] == {'conversation': 1, 'topic': 1}
+    manifest_path = output / 'manifest.json'
+    if pre_feedback:
+        manifest = read_json(manifest_path)
+        manifest['pipeline'] = pre_feedback_pipeline(manifest['pipeline'])
+        write_json(manifest_path, manifest)
+    frozen = manifest_path.read_bytes()
     calls = []
     real_generate = scope.generate
     def fake(*args, **kwargs):
@@ -197,10 +206,81 @@ def test_supplement_resume_and_frozen_source_checks(tmp_path, monkeypatch, objec
     assert len(calls) == 3
     supplement.run(output, object_workers=object_workers)
     assert len(calls) == 3
+    assert manifest_path.read_bytes() == frozen
     assert wiki_batch.status(output)['counts']['complete'] == 2
     messages.write_text(messages.read_text() + '\n')
     with pytest.raises(ValueError, match='messages changed'):
         supplement.run(output, object_workers=object_workers)
+
+
+@pytest.mark.parametrize('failed_kind', ['conversation', 'topic'])
+@pytest.mark.parametrize('pre_service', [False, True])
+def test_supplement_service_block_preserves_parallel_body_and_resumes_only_gap(
+        tmp_path, monkeypatch, failed_kind, pre_service):
+    from src.judge import codex_transport
+    library = tmp_path / 'wiki'
+    (library / 'groups').mkdir(parents=True)
+    (library / 'topics').mkdir()
+    (library / 'groups/123@chatroom.md').write_text('# 群\n- 群聊 ID：123@chatroom\n')
+    (library / 'topics/运动.md').write_text('# 运动\n- [1970-01-01] peer @ 群: 原始消息中的运动安排\n')
+    messages = source(tmp_path, [dict(row('group:self:123@chatroom', 'peer', 1000,
+        '原始消息中的运动安排'), chat_name='群')])
+    parent, output = tmp_path / 'parent', tmp_path / 'supplement'
+    wiki_batch.prepare(library, messages, parent, 'self', {})
+    supplement.prepare(parent, output)
+    manifest_path = output / 'manifest.json'
+    manifest = read_json(manifest_path)
+    if pre_service:
+        previous_pipeline = wiki_batch.previous_transport_pipeline(
+            manifest['pipeline'], required_names=manifest['pipeline'].keys())
+        assert previous_pipeline is not None
+        manifest['pipeline'] = previous_pipeline
+        write_json(manifest_path, manifest)
+    frozen = {path: path.read_bytes() for path in (manifest_path, parent / 'manifest.json')}
+    jobs = {job['kind']: job for job in manifest['jobs']}
+    failed = jobs[failed_kind]['id']
+    succeeded = next(job['id'] for kind, job in jobs.items() if kind != failed_kind)
+    overlap, blocked = Barrier(2), Event()
+    details = dict(exit_code=1, terminal_signals=['rate_limit'])
+    calls = []
+    real_generate = scope.generate
+
+    def available():
+        if blocked.is_set():
+            raise codex_transport.CodexServiceBlocked(details)
+
+    def generate(job, *args, **kwargs):
+        calls.append((job['id'], kwargs['workers']))
+        if len(calls) <= 2:
+            overlap.wait(timeout=10)
+            if job['id'] == failed:
+                blocked.set()
+                return dict(stage='incomplete', errors=['transport failed'])
+            assert blocked.wait(10)
+        return real_generate(job, *args, **kwargs, client=ScopeClient())
+
+    monkeypatch.setattr(codex_transport, 'check_available', available)
+    monkeypatch.setattr(scope, 'generate', generate)
+    state = supplement.run(output, object_workers=2, workers=2, attempts=3)
+    assert state['stage'] == 'blocked' and state['pid'] is None
+    assert state['blocker'] == details
+    assert state['active_jobs'] == [] and state['active_job'] is None
+    assert state['jobs'][failed]['stage'] == 'interrupted'
+    assert state['jobs'][failed]['attempts'] == 1
+    assert state['jobs'][succeeded]['stage'] == 'complete'
+    knowledge = Path(state['jobs'][succeeded]['knowledge'])
+    original_body = knowledge.read_bytes()
+    blocked.clear()
+    recovered = supplement.run(output, object_workers=2, workers=2, attempts=3)
+    assert recovered['stage'] == 'complete' and recovered['pid'] is None
+    assert 'blocker' not in recovered and recovered['counts'] == {'complete': 2}
+    assert recovered['jobs'][failed]['attempts'] == 2
+    assert recovered['jobs'][succeeded] == state['jobs'][succeeded]
+    assert knowledge.read_bytes() == original_body
+    assert [job_id for job_id, _ in calls].count(failed) == 2
+    assert [job_id for job_id, _ in calls].count(succeeded) == 1
+    assert all(workers == 2 for _, workers in calls)
+    assert all(path.read_bytes() == content for path, content in frozen.items())
 
 
 @pytest.mark.parametrize('object_workers', [1, 3])

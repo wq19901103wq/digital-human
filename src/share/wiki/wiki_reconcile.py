@@ -37,10 +37,14 @@ def groups_for(data):
 
 
 def validate(value, records, rows, data=None):
+    from .wiki_repair import coverage_diagnostic
     expected = {r['id'] for r in records}
     received = [r['record_id'] for r in value['reviews']]
     if set(received) != expected or len(received) != len(expected):
-        raise ValueError('every input record needs exactly one review')
+        raise ValueError('every input record needs exactly one review; '
+                         + coverage_diagnostic(expected, received)
+                         + '. Copy the exact record_id and preserve its corresponding review; '
+                         'do not substitute an unrelated record.')
     allowed = {r['line'] for r in rows}
     for review in value['reviews']:
         if not review['lines'] or not set(review['lines']) <= allowed:
@@ -68,15 +72,17 @@ def validate(value, records, rows, data=None):
                                               rows, check_entities=False))
 
 
-def extract(client, directory, data, groups, rows):
-    from .wiki_repair import _cached_call, _render
+def extract(client, directory, data, groups, rows, *, reference_contract='legacy_v1'):
+    from .wiki_repair import reference_call, _render
     records = [r for group in groups for r in group['records']]
     subjects = {r['subject_id'] for r in records}
     payload = dict(subject=data['subject'], entities=[e for e in data['entities'] if e['id'] in subjects],
         records=records, columns=['source_line', 'time', 'sender_id', 'display_name', 'kind', 'text', 'chat_id'],
         messages=[_render(r) + [r['chat_id']] for r in rows])
-    return _cached_call(client, directory, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
-                        lambda value: validate(value, records, rows, data))['reviews']
+    return reference_call(client, directory, PROMPT + json.dumps(payload, ensure_ascii=False), SCHEMA,
+                        lambda value: validate(value, records, rows, data),
+                        bounds=dict(record_id=[r['id'] for r in records], lines=[r['line'] for r in rows]),
+                        contract=reference_contract)['reviews']
 
 
 def apply_reviews(data, reviews, rows):
@@ -117,14 +123,16 @@ def apply_reviews(data, reviews, rows):
     return data
 
 
-def reconcile(client, directory, data, rows, workers, progress, status):
+def reconcile(client, directory, data, rows, workers, progress, status, *, reference_contract='legacy_v1'):
+    from .wiki_repair import failure_record
     groups = groups_for(data)
     jobs = list(jobs_for(groups, rows, count=4))
     progress.update(stage='reconciling_attributes', reconciliation_batches=len(jobs), reconciliation_completed=0)
     status()
     outputs = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending = {pool.submit(extract, client, directory, data, gs, rs): i for i, (gs, rs) in enumerate(jobs)}
+        pending = {pool.submit(extract, client, directory, data, gs, rs,
+                               reference_contract=reference_contract): i for i, (gs, rs) in enumerate(jobs)}
         for future in as_completed(pending):
             i = pending[future]
             try:
@@ -132,7 +140,8 @@ def reconcile(client, directory, data, rows, workers, progress, status):
                 progress['reconciliation_completed'] += 1
             except Exception as exc:
                 progress['failed'] += 1
-                progress['errors'].append(dict(stage='reconciling_attributes', batch=i, error=str(exc)[-1000:]))
+                progress['errors'].append(failure_record(exc, tail_limit=1000,
+                                                       stage='reconciling_attributes', batch=i))
             status()
     if progress['failed']:
         return None

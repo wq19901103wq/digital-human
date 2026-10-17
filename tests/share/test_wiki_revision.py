@@ -51,6 +51,27 @@ def test_all_records_reviewed_with_raw_only_and_exact_cache_resume(tmp_path):
     assert len(client.prompts) == calls
 
 
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'unexpected'])
+def test_decision_diagnostic_identifies_exact_coverage_errors(tmp_path, mutation):
+    data = knowledge(tmp_path)
+    batch = revision.records(data)
+    value = decisions(data)
+    missing = value['decisions'][-1]['record_id']
+    duplicate = value['decisions'][0]['record_id']
+    if mutation == 'missing':
+        value['decisions'].pop()
+    elif mutation == 'duplicate':
+        value['decisions'][-1] = deepcopy(value['decisions'][0])
+    else:
+        value['decisions'][-1]['record_id'] = 'unknown-record'
+    with pytest.raises(ValueError, match='exactly one semantic decision') as error:
+        revision.validate(value, batch, [], data['subject'])
+    message = str(error.value)
+    assert f"missing=['{missing}']" in message
+    assert f"duplicate=['{duplicate}']" in message if mutation == 'duplicate' else 'duplicate=[]' in message
+    assert "unexpected=['unknown-record']" in message if mutation == 'unexpected' else 'unexpected=[]' in message
+
+
 def test_source_labels_drop_guessed_aliases_without_changing_directed_addresses(tmp_path):
     data = knowledge(tmp_path)
     data['entities'][0].update(label='不属于本人的别名', labels=['不属于本人的别名', '网络泛称'])
